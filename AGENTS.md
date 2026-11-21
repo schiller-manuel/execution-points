@@ -14,9 +14,11 @@ and runnable, and continue discussing unresolved API choices with the user.
   referenced objects.
 - Intercept before the whole expression. Returning a replacement skips that
   expression's evaluation. `original()` evaluates it on demand.
+- Activate replacements through an explicit callback scope using
+  `point.withReplacement(handler, action)`.
 
-The scoped `withReplacement(handler, action)` API and repeated `original()`
-behavior are provisional. They are working defaults, not settled design choices.
+Repeated `original()` behavior remains provisional. The current implementation
+evaluates the expression on every call; whether to limit it is undecided.
 
 ## Validation
 

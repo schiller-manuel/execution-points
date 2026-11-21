@@ -102,7 +102,9 @@ Primitive captures are snapshots of the binding's value at interception. They do
 
 Nested scopes can override the same point and restore the outer handler afterward. Concurrent async scopes have separate replacement maps. Returning or throwing restores the surrounding synchronous context; async descendants retain the context in which they were created. This is async-context scoping, not cancellation of unfinished work.
 
-**Provisional API:** `withReplacement` and `original()` are working choices for this prototype. `original()` is not memoized or limited to one invocation. Calling it twice evaluates the original expression twice, including its side effects. Whether to offer a once-only continuation or a separate repeat API remains a design decision.
+**Agreed scope API:** replacements are activated through the explicit `withReplacement(handler, action)` callback scope.
+
+**Provisional call-through behavior:** `original()` is not memoized or limited to one invocation. Calling it twice evaluates the original expression twice, including its side effects. Whether to offer a once-only continuation or a separate repeat API remains a design decision.
 
 ## Configuration
 
