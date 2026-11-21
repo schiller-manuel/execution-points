@@ -1,17 +1,21 @@
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { readFile, readdir } from 'node:fs/promises'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
+import { API, ModuleKind, ModuleResolutionKind } from 'typescript/sync'
+import { createFileSystemLayer } from 'typescript/fs'
+import { ScriptTarget } from 'typescript/ast'
 
-import config from '../points.config.mjs'
-import { checkPlan } from '../src/compiler.mjs'
-import { buildPlan } from '../src/discovery.mjs'
+import { generateRegistryModule } from '../src/contracts.mjs'
+import { buildPlan, loadManifest } from '../src/discovery.mjs'
 
 const execFileAsync = promisify(execFile)
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const config = loadManifest(root)
 const tscBin = join(root, 'node_modules/typescript/bin/tsc')
 const testFile = join(root, 'examples/checkout.test.ts')
 const testSource = await readFile(testFile, 'utf8')
@@ -35,9 +39,59 @@ function describeDiagnostics(diagnostics) {
     .join('\n')
 }
 
-async function analyze(overrides = new Map(), { tolerant = true } = {}) {
-  const plan = await buildPlan({ ...config, overrides, tolerant })
-  return await checkPlan(plan, { overrides })
+function analyze(overrides = new Map(), { tolerant = true } = {}) {
+  const api = new API({ cwd: root })
+  let snapshot
+  try {
+    const plan = buildPlan({ ...config, overrides, tolerant, api })
+    const virtualRegistryFile = join(root, '__execution_points_registry.d.ts')
+    const { text: registryText } = generateRegistryModule(plan, { fromFile: virtualRegistryFile, api, overrides })
+    const tsCfg = existsSync(plan.tsconfig) ? api.parseConfigFile(plan.tsconfig) : undefined
+    const compilerOptions = {
+      strict: true,
+      target: ScriptTarget.ES2022,
+      module: ModuleKind.ESNext,
+      moduleResolution: ModuleResolutionKind.Bundler,
+      skipLibCheck: true,
+      ...tsCfg?.options,
+      noEmit: true,
+      declaration: false,
+      emitDeclarationOnly: false,
+      incremental: false,
+      composite: false,
+    }
+    const files = new Map([[virtualRegistryFile, registryText]])
+    for (const t of plan.targets) files.set(t.file, t.source)
+    for (const t of plan.tests) files.set(t.file, t.source)
+    for (const [f, s] of overrides) files.set(f, s)
+
+    const rootFiles = [...new Set([...(tsCfg?.fileNames ?? []).filter((f) => !f.endsWith('.ep')), ...files.keys()])]
+    snapshot = api.createSnapshot({
+      fileSystem: createFileSystemLayer([...files]),
+      createPrograms: [{ rootFiles, compilerOptions }],
+    })
+    const prog = snapshot.operation.createdPrograms[0]
+    const diagnostics = [
+      ...(tsCfg?.errors ?? []).filter((d) => d.code !== 18068),
+      ...prog.getProgramDiagnostics(),
+      ...prog.getGlobalDiagnostics(),
+      ...prog.getSyntacticDiagnostics(),
+      ...prog.getBindDiagnostics(),
+      ...prog.getSemanticDiagnostics(),
+    ]
+      .filter((d) => d.category === 1)
+      .map((d) => ({
+        fileName: d.fileName,
+        start: Math.max(0, d.pos ?? d.start ?? 0),
+        end: Math.max(0, d.end ?? d.pos ?? d.start ?? 0),
+        code: d.code,
+        text: [d.text ?? 'TypeScript reported an error.', ...(d.messageChain ?? []).map((c) => c.text)].join('\n'),
+      }))
+    return { ok: diagnostics.length === 0, diagnostics }
+  } finally {
+    snapshot?.dispose()
+    api.close()
+  }
 }
 
 function passed(name) {

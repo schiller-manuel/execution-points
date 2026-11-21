@@ -17,9 +17,6 @@ importers:
       typescript:
         specifier: 7.1.0-dev.20261121.1
         version: 7.1.0-dev.20261121.1
-      typescript-ts6:
-        specifier: npm:typescript@6.0.3
-        version: typescript@6.0.3
     devDependencies:
       '@types/node':
         specifier: ^24.0.0
@@ -405,11 +402,6 @@ packages:
   tslib@2.9.1:
     resolution: {integrity: sha512-a4Ux9VKuIMHsOS7ENbEq6hK2ZGYIT27Rtl0E4eD9KqwxhKiQeMZE/9xb3IdYwWaSOyIBQLExhQgXDTYoiCxnWA==}
 
-  typescript@6.0.3:
-    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
-    engines: {node: '>=14.17'}
-    hasBin: true
-
   typescript@7.1.0-dev.20261121.1:
     resolution: {integrity: sha512-/dDd4OgwnCQdzQ3nC3JByHeKhi1rDccTjlXtJTDcmMBYL6ak0KqEnEMjeQRVjwVRCo0fYejq3Kw51S7akRSltg==}
     engines: {node: '>=16.20.0'}
@@ -778,8 +770,6 @@ snapshots:
 
   tslib@2.9.1:
     optional: true
-
-  typescript@6.0.3: {}
 
   typescript@7.1.0-dev.20261121.1:
     optionalDependencies:

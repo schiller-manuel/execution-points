@@ -133,18 +133,20 @@ Register the content mapper in `tsconfig.json` and include `points.ep`:
 
 (Inside this repository itself, `tsconfig.json` uses `"package": "."` to point at the local package root. `.vscode/settings.json` enables `"js/ts.contentMappers.enabled": true` and uses the workspace TypeScript 7.1 SDK.)
 
-`points.config.mjs` reads `points.ep` so Vitest and TypeScript share a single configuration. Add the Vite plugin before other plugins that rewrite the same source:
+`vitest.config.mjs` reads `points.ep` directly via `loadManifest()` so Vitest and TypeScript share a single configuration. Add the Vite plugin before other plugins that rewrite the same source:
 
 ```js
 import { defineConfig } from 'vitest/config'
 import { executionPoints } from 'execution-points-prototype/vite'
-import points from './points.config.mjs'
+import { loadManifest } from './src/discovery.mjs'
+
+const points = loadManifest(import.meta.dirname)
 
 export default defineConfig({
   plugins: [executionPoints(points)],
   test: {
-    environment: 'node',
     include: points.testFiles,
+    environment: 'node',
     isolate: true,
   },
 })
@@ -157,8 +159,8 @@ The plugin checks that the text it instruments matches the source used for disco
 TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfig.json` `"contentMappers"`). Rather than rewriting `.ts` files or emitting generated `.d.ts` files to disk:
 
 1. **Single `.ep` anchor (`points.ep`).** `tsconfig.json` registers `src/content-mapper.mjs` for `.ep` files with `"dynamicConfig": true` and `watchedFiles` covering all test and target `.ts` files.
-2. **Discover points with ESQuery (`src/query.mjs` + `src/discovery.mjs`).** Literal `point({ file, query, capture })` calls are discovered and matched against target ASTs.
-3. **Analyze with TypeScript 7.1 (`src/contracts.mjs`).** A warm `typescript/sync` snapshot analyzes target `.ts` files (excluding `.ep` and `contentMappers`, preventing recursion). Result types come from the unmodified target AST; narrowed local types come from an incremental `snapshot.update(...)` probe. All safe in-scope local bindings are discovered via `checker.getSymbolsInScope` for VS Code `capture` autocomplete.
+2. **Discover points with TypeScript 7.1 + ESQuery (`src/discovery.mjs`).** Literal `point({ file, query, capture })` calls are discovered directly over TypeScript 7.1's AST (`api.createSourceFile`) with lexical shadow tracking—no second TypeScript compiler needed.
+3. **Analyze with warm incremental snapshots (`src/contracts.mjs`).** A persistent `typescript/sync` snapshot analyzes target `.ts` files (excluding `.ep` and `contentMappers`, preventing recursion) and updates incrementally via `snapshot.update(...)` on file saves. Result types come from the unmodified target AST; narrowed local types come from an incremental probe. All safe in-scope local bindings are discovered via `checker.getSymbolsInScope` for VS Code `capture` autocomplete.
 4. **Emit virtual module augmentation.** `transform("points.ep")` returns a virtual `.ts` file augmenting `ExecutionPointRegistry` on `execution-points-prototype`. Export-reachable private types (such as `Quote` and `User` in `examples/checkout.ts`) preserve exact identity via export-anchored type expressions (`ReturnType<typeof import(...).checkout>["quote"]`); unreachable structural or nominal private types emit clean helper or branded interfaces.
 5. **Native `tsc` and VS Code checking.** `point()` uses `const` type parameters (`File`, `Query`, `Capture`) to look up the contract from `ExecutionPointRegistry`, constrain `capture` to in-scope locals, surface discovery errors right on `point(...)`, and type `({ locals, original }) => ...` natively in both `tsc --noEmit --runExternalCode` and VS Code's TypeScript 7.1 language server.
 
@@ -183,13 +185,10 @@ This is an expression-replacement prototype with explicit boundaries:
 
 | File | Responsibility |
 | --- | --- |
-| `points.ep` | Execution-points manifest and TypeScript 7.1 content-mapper anchor. |
-| `src/query.mjs` | ESQuery-based AST selector engine over TypeScript syntax trees. |
-| `src/discovery.mjs` | Find literal points, execute selectors, validate targets, and build stable source-specific IDs. |
-| `src/contracts.mjs` | Extract result types and narrowed in-scope locals via TypeScript 7.1 and emit virtual `ExecutionPointRegistry` augmentation. |
+| `points.ep` | Single manifest and TypeScript 7.1 content-mapper anchor. |
+| `src/discovery.mjs` | Discover literal points and execute ESQuery selectors over TypeScript 7.1 ASTs. |
+| `src/contracts.mjs` | Extract result types and narrowed in-scope locals via warm incremental snapshots and emit virtual `ExecutionPointRegistry` augmentation. |
 | `src/content-mapper.mjs` | TypeScript 7.1 STDIO JSON-RPC content mapper server (`initialize`, `openProject`, `transform`, `closeProject`). |
-| `src/compiler.mjs` | Programmatic `checkPlan()` entry point using the same virtual registry augmentation. |
-| `src/cli.mjs` | CLI inspection helper printing discovered execution-point contracts. |
 | `src/plugin.mjs` | Instrument selected expressions and test declarations through Vite. |
 | `src/runtime.mjs` | Dispatch replacements, slice per-point captures, and manage async-local scopes. |
 | `src/runtime.d.ts` | Define `ExecutionPointRegistry`, `point()`, `Context`, and replacement types. |
