@@ -26,6 +26,8 @@ export function point(spec, internalId) {
     )
   }
 
+  const captureNames = Array.isArray(spec?.capture) ? [...spec.capture] : []
+
   return Object.freeze({
     withReplacement(handler, action) {
       if (typeof handler !== 'function' || typeof action !== 'function') {
@@ -35,7 +37,7 @@ export function point(spec, internalId) {
       }
 
       const replacements = new Map(registry.storage.getStore() ?? [])
-      replacements.set(internalId, handler)
+      replacements.set(internalId, { handler, captureNames })
 
       // Do not make this function async: synchronous returns, thrown errors,
       // and the identity of an action's Promise must pass through unchanged.
@@ -50,15 +52,21 @@ export function point(spec, internalId) {
  * eagerly at the generated call site.
  */
 export function invoke(id, originalThunk, captureThunk) {
-  const replacement = registry.storage.getStore()?.get(id)
-  if (!replacement) return originalThunk()
+  const active = registry.storage.getStore()?.get(id)
+  if (!active) return originalThunk()
 
-  // This freezes only the capture container. Its values retain their original
-  // identity; objects referenced by captured bindings remain mutable.
-  const locals = Object.freeze(captureThunk())
+  // This freezes only the null-prototype capture container. Values retain
+  // their original identity; objects referenced by captures remain mutable.
+  const getters = captureThunk()
+  const locals = Object.create(null)
+  for (const key of active.captureNames) {
+    const entry = getters[key]
+    locals[key] = typeof entry === 'function' ? entry() : entry
+  }
+  Object.freeze(locals)
   const context = Object.freeze({ locals, original: originalThunk })
 
   // original() is deliberately not memoized in this prototype. Every call
   // evaluates the original expression again; recursive calls behave normally.
-  return replacement(context)
+  return active.handler(context)
 }

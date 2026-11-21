@@ -4,7 +4,7 @@ A prototype for replacing an expression inside application code from a test. Sel
 
 The application needs no testing markers or new exports for the selected operation. A Vite plugin instruments the selected expression in memory. The test and application run in the same Node worker.
 
-**Status:** the runtime, Vitest integration, and virtual TypeScript checker work. Automatic editor integration is not implemented. Run `pnpm check` for the inferred callback types and diagnostics described below.
+**Status:** the runtime, Vitest integration, and native TypeScript 7.1 content mapper (`tsc --noEmit --runExternalCode` + VS Code TypeScript 7.1 LSP) all work with zero generated files on disk.
 
 ## Run it
 
@@ -19,9 +19,9 @@ pnpm verify
 
 | Command | Purpose |
 | --- | --- |
-| `pnpm check` | Infer each point's contract and typecheck the tests using in-memory source projections. |
-| `pnpm test` | Run the instrumented Vitest examples. This command does not run the custom typechecker. |
-| `pnpm verify` | Check valid and invalid callbacks, capture restrictions, diagnostic positions, and that compilation writes no generated files. |
+| `pnpm check` | Run regular `tsc --noEmit --runExternalCode` using the TypeScript 7.1 content mapper (`points.ep`). |
+| `pnpm test` | Run the instrumented Vitest examples. |
+| `pnpm verify` | Verify real `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and that no generated files are written. |
 
 The examples cover a private method call, arithmetic, and a call returning a promise. They also exercise call-through, nested replacement scopes, concurrent async scopes, object mutation, and cleanup after an exception.
 
@@ -108,17 +108,32 @@ Nested scopes can override the same point and restore the outer handler afterwar
 
 ## Configuration
 
-`points.config.mjs` lists the test files to scan. These are explicit paths, not globs.
+`points.ep` lists the test files to scan (explicit paths or glob patterns) and also anchors the TypeScript 7.1 content mapper:
 
-```js
-export default {
-  root: import.meta.dirname,
-  tsconfig: 'tsconfig.json',
-  testFiles: ['examples/checkout.test.ts', 'examples/expressions.test.ts'],
+```json
+{
+  "tsconfig": "tsconfig.json",
+  "testFiles": ["examples/checkout.test.ts", "examples/expressions.test.ts"]
 }
 ```
 
-Add the plugin to the Vitest configuration before other plugins that rewrite the same source:
+Register the content mapper in `tsconfig.json` and include `points.ep`:
+
+```json
+{
+  "contentMappers": [
+    {
+      "package": "execution-points-prototype",
+      "extensions": [".ep"]
+    }
+  ],
+  "include": ["examples/**/*.ts", "points.ep"]
+}
+```
+
+(Inside this repository itself, `tsconfig.json` uses `"package": "."` to point at the local package root. `.vscode/settings.json` enables `"js/ts.contentMappers.enabled": true` and uses the workspace TypeScript 7.1 SDK.)
+
+`points.config.mjs` reads `points.ep` so Vitest and TypeScript share a single configuration. Add the Vite plugin before other plugins that rewrite the same source:
 
 ```js
 import { defineConfig } from 'vitest/config'
@@ -135,22 +150,19 @@ export default defineConfig({
 })
 ```
 
-The CLI loads `points.config.mjs` from the current directory. Errors include the original source file, line, and column, and produce a nonzero exit code. Discovery errors, such as an ambiguous selector, also fail the command.
-
-The plugin checks that the text it instruments matches the source used for discovery. It watches tests, application targets, and configuration, and rebuilds the plan when they change. Its source maps retain the original source text.
+The plugin checks that the text it instruments matches the source used for discovery. It watches tests, application targets, `points.ep`, and `tsconfig.json`, and rebuilds the plan when they change. Its source maps retain the original source text.
 
 ## How the types work
 
-An AST selector identifies syntax; it does not itself teach TypeScript the selected expression's type. This prototype connects selection to the compiler with virtual source views:
+TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfig.json` `"contentMappers"`). Rather than rewriting `.ts` files or emitting generated `.d.ts` files to disk:
 
-1. **Discover with TypeScript 6 and TSQuery.** The `typescript` dependency is pinned to 6.0.3 for the TSQuery AST integration.
-2. **Analyze with native TypeScript 7.1 beta.** The `typescript-native` dependency is an npm alias for `typescript@7.1.0-beta`. Its compiler API reads the project and in-memory overlays. Temporary identifier reads at each point obtain the captures' types after control-flow narrowing.
-3. **Build a virtual contract.** The application compiler view gets a type-only alias containing the result type and readonly locals. Private module-level types remain in their original module, preserving their identity.
-4. **Check the virtual test.** A hidden type argument connects its ordinary `point(...)` call to that contract. TypeScript contextually types the handler and checks its result. Diagnostic positions are translated back to the authored files.
+1. **Single `.ep` anchor (`points.ep`).** `tsconfig.json` registers `src/content-mapper.mjs` for `.ep` files with `"dynamicConfig": true` and `watchedFiles` covering all test and target `.ts` files.
+2. **Discover points with ESQuery (`src/query.mjs` + `src/discovery.mjs`).** Literal `point({ file, query, capture })` calls are discovered and matched against target ASTs.
+3. **Analyze with TypeScript 7.1 (`src/contracts.mjs`).** A warm `typescript/sync` snapshot analyzes target `.ts` files (excluding `.ep` and `contentMappers`, preventing recursion). Result types come from the unmodified target AST; narrowed local types come from an incremental `snapshot.update(...)` probe. All safe in-scope local bindings are discovered via `checker.getSymbolsInScope` for VS Code `capture` autocomplete.
+4. **Emit virtual module augmentation.** `transform("points.ep")` returns a virtual `.ts` file augmenting `ExecutionPointRegistry` on `execution-points-prototype`. Export-reachable private types (such as `Quote` and `User` in `examples/checkout.ts`) preserve exact identity via export-anchored type expressions (`ReturnType<typeof import(...).checkout>["quote"]`); unreachable structural or nominal private types emit clean helper or branded interfaces.
+5. **Native `tsc` and VS Code checking.** `point()` uses `const` type parameters (`File`, `Query`, `Capture`) to look up the contract from `ExecutionPointRegistry`, constrain `capture` to in-scope locals, surface discovery errors right on `point(...)`, and type `({ locals, original }) => ...` natively in both `tsc --noEmit --runExternalCode` and VS Code's TypeScript 7.1 language server.
 
-No `.generated` directory, declaration registry, or rewritten application file is saved. Runtime instrumentation is a separate Vite transform; the compiler-only aliases never need to exist at runtime.
-
-**Editor support is a separate unfinished piece.** Ordinary `tsc` and the editor's normal language service do not receive these virtual views. They may report fallback-type errors on the authored test. This repository does not yet install a language-server extension, TypeScript plugin, or content mapper. The current typecheck entry point is `pnpm check`.
+No `.generated` directory, declaration registry on disk, or rewritten `.ts` file is saved. Runtime instrumentation stays a separate Vite transform.
 
 ## Supported subset and limits
 
@@ -161,25 +173,27 @@ This is an expression-replacement prototype with explicit boundaries:
 - Positions requiring a JavaScript reference are rejected. For example, select a whole method call instead of just its method property, so the receiver is preserved.
 - Targets containing `await`, `yield`, `super`, optional chains, direct `eval`, or dynamic `import()` need additional transforms and are rejected. Selecting an ordinary promise-returning call inside an outer `await` is supported.
 - Point declarations must use a named `point` import, a literal specification, literal selector/path strings, and literal capture names. Computed configuration, spreads, and manual type arguments are outside this prototype.
-- A selector must match once. Overlapping targets are rejected. Repeated declarations for the same expression must use the same capture list.
+- A selector must match once. Overlapping targets are rejected. Multiple declarations targeting the same expression may request different capture lists.
 - Captures expose selected binding values. They do not allow reassignment of the application's lexical bindings, evaluation of arbitrary strings in its scope, or debugger-style suspension.
-- The checker supports accessible module-level types and structural local values. It rejects function/block-local named types when it cannot transport their identity safely, unresolved local generic type parameters, generic function-valued captures, and `any` contracts encountered during type extraction. It does not silently substitute an unchecked contract.
+- The checker supports exported/imported types, export-reachable private types, structural private interfaces, and unreachable private nominal types (via shared unique-symbol brands). It rejects function/block-local named types, unresolved local generic type parameters, generic function-valued captures, and `any` contracts encountered during type extraction. It does not silently substitute an unchecked contract.
 - The runtime uses Node `AsyncLocalStorage`. Browser, remote-process, and cross-worker interception are not implemented.
-- No automatic editor integration, declaration-file generation, watch-mode typecheck command, selector migration, hit counters, or breakpoint UI is included.
-
-The first next step is an editor adapter that supplies these same virtual views and source mappings to the language service. The existing discovery plan, `checkPlan()` projections, and diagnostic mapping provide a starting point; the integration still needs to be built.
+- Content-mapper updates for edited `.ts` targets/queries refresh when watched files are saved (per TypeScript 7.1's `watchedFiles` protocol); editing `capture: [...]` updates immediately on keystrokes.
 
 ## Source layout
 
 | File | Responsibility |
 | --- | --- |
+| `points.ep` | Execution-points manifest and TypeScript 7.1 content-mapper anchor. |
+| `src/query.mjs` | ESQuery-based AST selector engine over TypeScript syntax trees. |
 | `src/discovery.mjs` | Find literal points, execute selectors, validate targets, and build stable source-specific IDs. |
-| `src/compiler.mjs` | Analyze captures and results, build virtual contracts, and check projected tests. |
-| `src/cli.mjs` | Load configuration and print original-source compiler diagnostics. |
+| `src/contracts.mjs` | Extract result types and narrowed in-scope locals via TypeScript 7.1 and emit virtual `ExecutionPointRegistry` augmentation. |
+| `src/content-mapper.mjs` | TypeScript 7.1 STDIO JSON-RPC content mapper server (`initialize`, `openProject`, `transform`, `closeProject`). |
+| `src/compiler.mjs` | Programmatic `checkPlan()` entry point using the same virtual registry augmentation. |
+| `src/cli.mjs` | CLI inspection helper printing discovered execution-point contracts. |
 | `src/plugin.mjs` | Instrument selected expressions and test declarations through Vite. |
-| `src/runtime.mjs` | Dispatch replacements and manage async-local scopes. |
-| `src/runtime.d.ts` | Define the public point, context, and replacement types. |
+| `src/runtime.mjs` | Dispatch replacements, slice per-point captures, and manage async-local scopes. |
+| `src/runtime.d.ts` | Define `ExecutionPointRegistry`, `point()`, `Context`, and replacement types. |
 | `examples/` | Runnable applications and Vitest examples. |
-| `checks/verify.mjs` | Compiler rejection, source-position, and no-write checks. |
+| `checks/verify.mjs` | End-to-end `tsc --runExternalCode`, live `tsc --lsp --stdio`, negative type checks, and no-write verification. |
 
 The native compiler API is currently a beta dependency. See the [TypeScript 7.1 beta announcement](https://devblogs.microsoft.com/typescript/announcing-typescript-7-1-beta/) for its API model.

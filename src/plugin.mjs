@@ -18,6 +18,8 @@ export function executionPoints(options = {}) {
     if (!context?.addWatchFile) return
     for (const file of planFileNames(nextPlan)) context.addWatchFile(file)
     if (nextPlan.tsconfig) context.addWatchFile(resolve(root, nextPlan.tsconfig))
+    const manifestFile = resolve(root, 'points.ep')
+    if (readSource(manifestFile) !== undefined) context.addWatchFile(manifestFile)
   }
 
   function sourcesChanged() {
@@ -44,6 +46,11 @@ export function executionPoints(options = {}) {
       if (nextPlan.tsconfig) {
         const configFile = resolve(root, nextPlan.tsconfig)
         nextObservedFiles.set(configFile, readSource(configFile))
+      }
+      const manifestFile = resolve(root, 'points.ep')
+      const manifestContent = readSource(manifestFile)
+      if (manifestContent !== undefined) {
+        nextObservedFiles.set(manifestFile, manifestContent)
       }
       plan = nextPlan
       observedFiles = nextObservedFiles
@@ -148,7 +155,7 @@ export function executionPoints(options = {}) {
             throw new Error(`[execution-points] Invalid expression span for ${target.id} in ${file}.`)
           }
           const captures = target.captures
-            .map((name) => `[${JSON.stringify(name)}]: ${name}`)
+            .map((name) => `[${JSON.stringify(name)}]: () => (${name})`)
             .join(', ')
           at(target.start).opens.push({
             ...target,

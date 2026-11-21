@@ -10,16 +10,22 @@
     "./runtime": "./src/runtime.mjs",
     "./vite": "./src/plugin.mjs"
   },
+  "typescript": {
+    "contentMapper": {
+      "exec": ["node", "./src/content-mapper.mjs"],
+      "dynamicConfig": true
+    }
+  },
   "scripts": {
-    "check": "node src/cli.mjs check",
+    "check": "tsc --noEmit --runExternalCode",
     "test": "vitest run",
     "verify": "node checks/verify.mjs"
   },
   "dependencies": {
-    "@phenomnomnominal/tsquery": "6.2.0",
+    "esquery": "^1.7.0",
     "magic-string": "1.4.5",
-    "typescript": "6.0.3",
-    "typescript-native": "npm:typescript@7.1.0-beta"
+    "typescript": "7.1.0-dev.20261121.1",
+    "typescript-ts6": "npm:typescript@6.0.3"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

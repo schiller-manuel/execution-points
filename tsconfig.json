@@ -8,5 +8,11 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["examples/**/*.ts", "src/runtime.d.ts"]
+  "contentMappers": [
+    {
+      "package": ".",
+      "extensions": [".ep"]
+    }
+  ],
+  "include": ["examples/**/*.ts", "src/runtime.d.ts", "points.ep"]
 }
