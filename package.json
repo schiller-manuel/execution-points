@@ -1,0 +1,29 @@
+{
+  "name": "execution-points-prototype",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Experimental AST-selected expression replacement with local capture and virtual TypeScript checking",
+  "engines": { "node": ">=24" },
+  "exports": {
+    ".": { "types": "./src/runtime.d.ts", "default": "./src/runtime.mjs" },
+    "./runtime": "./src/runtime.mjs",
+    "./vite": "./src/plugin.mjs"
+  },
+  "scripts": {
+    "check": "node src/cli.mjs check",
+    "test": "vitest run",
+    "verify": "node checks/verify.mjs"
+  },
+  "dependencies": {
+    "@phenomnomnominal/tsquery": "6.2.0",
+    "magic-string": "1.4.5",
+    "typescript": "6.0.3",
+    "typescript-native": "npm:typescript@7.1.0-beta"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "vite": "8.3.8",
+    "vitest": "5.1.1"
+  }
+}
