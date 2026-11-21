@@ -75,6 +75,24 @@ assert.equal(valid.ok, true, `Valid example failed:\n${describeDiagnostics(valid
 assert.equal(valid.diagnostics.length, 0, describeDiagnostics(valid.diagnostics))
 passed('the ordinary TypeScript example type-checks through the virtual compiler')
 
+const originalPlan = buildPlan(config)
+const originalPoints = originalPlan.tests.find(test => test.file === testFile).points
+assert.ok(originalPoints.length > 0, 'The fixture must include a real imported point declaration')
+const shadowedSource = testSource + `
+function ordinaryLocalPointUsage() {
+  function point(value: string) { return value }
+  return point('ordinary local call')
+}
+`
+const shadowedPlan = buildPlan({ ...config, overrides: new Map([[testFile, shadowedSource]]) })
+assert.deepEqual(
+  shadowedPlan.tests.find(test => test.file === testFile).points,
+  originalPoints,
+  'A nested function named point must not be treated as the imported execution-point API',
+)
+assert.deepEqual(shadowedPlan.targets, originalPlan.targets)
+passed('a shadowed local point function is ignored while the imported point remains discoverable')
+
 const invalidReturn = replaceOnce(
   testSource,
   '/* invalid-return */ 7',

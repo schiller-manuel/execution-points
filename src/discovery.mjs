@@ -19,6 +19,17 @@ function parse(file, source) {
     file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
 }
 
+function bindingChecker(file, tree) {
+  // Only lexical binding identity is needed. Reuse this parsed tree without
+  // loading libraries or resolving the imported package and its dependencies.
+  const options = { noResolve: true, noLib: true }
+  const host = ts.createCompilerHost(options)
+  host.getSourceFile = requested => requested === file ? tree : undefined
+  host.fileExists = requested => requested === file
+  host.readFile = requested => requested === file ? tree.text : undefined
+  return ts.createProgram([file], options, host).getTypeChecker()
+}
+
 function fail(file, tree, node, message) {
   const pos = tree.getLineAndCharacterOfPosition(node.getStart(tree))
   throw new Error(`${file}:${pos.line + 1}:${pos.character + 1}: ${message}`)
@@ -103,19 +114,24 @@ export function buildPlan(options) {
     const file = resolve(root, configuredFile)
     const source = read(file)
     const tree = parse(file, source)
-    const importedNames = new Set()
+    const checker = bindingChecker(file, tree)
+    const importedBindings = new Set()
     for (const statement of tree.statements) {
       if (!ts.isImportDeclaration(statement) || statement.moduleSpecifier.text !== packageName) continue
       const bindings = statement.importClause?.namedBindings
       if (bindings && ts.isNamedImports(bindings)) {
         for (const specifier of bindings.elements) {
-          if ((specifier.propertyName ?? specifier.name).text === 'point') importedNames.add(specifier.name.text)
+          if ((specifier.propertyName ?? specifier.name).text === 'point') {
+            const binding = checker.getSymbolAtLocation(specifier.name)
+            if (binding) importedBindings.add(binding)
+          }
         }
       }
     }
     const points = []
     function visit(node) {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && importedNames.has(node.expression.text)) {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+          importedBindings.has(checker.getSymbolAtLocation(node.expression))) {
         if (node.arguments.length !== 1 || node.typeArguments?.length) fail(file, tree, node, 'Use point({ file, query, capture }) with one literal argument and no manual type arguments.')
         const spec = readSpec(node.arguments[0], tree, file)
         if (isAbsolute(spec.file)) fail(file, tree, node, 'Target paths are project-relative in this prototype.')
