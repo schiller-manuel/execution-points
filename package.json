@@ -8,12 +8,15 @@
   "exports": {
     ".": { "types": "./src/runtime.d.ts", "default": "./src/runtime.mjs" },
     "./runtime": "./src/runtime.mjs",
-    "./vite": "./src/plugin.mjs"
+    "./vite": "./src/plugin.mjs",
+    "./editor-worker": "./src/editor-worker.mjs"
   },
   "scripts": {
     "check": "node src/cli.mjs check",
     "test": "vitest run",
-    "verify": "node checks/verify.mjs"
+    "verify": "node checks/verify.mjs",
+    "verify:editor": "node checks/editor.mjs",
+    "vscode:package": "pnpm --dir vscode dlx @vscode/vsce@4.1.1 package --no-dependencies --out ../execution-points.vsix"
   },
   "dependencies": {
     "@phenomnomnominal/tsquery": "6.2.0",

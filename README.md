@@ -4,7 +4,7 @@ A prototype for replacing an expression inside application code from a test. Sel
 
 The application needs no testing markers or new exports for the selected operation. A Vite plugin instruments the selected expression in memory. The test and application run in the same Node worker.
 
-**Status:** the runtime, Vitest integration, and virtual TypeScript checker work. Automatic editor integration is not implemented. Run `pnpm check` for the inferred callback types and diagnostics described below.
+**Status:** the runtime, Vitest integration, and virtual TypeScript checker work. This experimental branch also contains a native TypeScript 7 VS Code adapter. Its compiler backend and host-adapter tests pass; a real VS Code UI session has not been validated. Stock `tsc` still does not receive these virtual contracts.
 
 ## Run it
 
@@ -150,7 +150,11 @@ An AST selector identifies syntax; it does not itself teach TypeScript the selec
 
 No `.generated` directory, declaration registry, or rewritten application file is saved. Runtime instrumentation is a separate Vite transform; the compiler-only aliases never need to exist at runtime.
 
-**Editor support is a separate unfinished piece.** Ordinary `tsc` and the editor's normal language service do not receive these virtual views. They may report fallback-type errors on the authored test. This repository does not yet install a language-server extension, TypeScript plugin, or content mapper. The current typecheck entry point is `pnpm check`.
+**Editor support is experimental on this branch.** `vscode/` contains an adapter for the native TypeScript 7 extension. It sends unsaved buffers to `src/editor-worker.mjs`, replaces diagnostics for affected files, and provides mapped type hovers and property completions. It requires VS Code 1.126 or newer, an active `TypeScriptTeam.native-preview` extension exposing response middleware, and Node.js 24 or newer. Install that native extension, open this repository root, and launch the checked-in **Execution Points: run editor extension** configuration with F5. The workspace settings select the pinned native SDK. A trusted workspace is required because the worker loads project configuration.
+
+Run `pnpm verify:editor` for the native backend/worker checks and `node --test vscode/extension.test.cjs` for host-adapter checks. These are not a real VS Code UI integration test. `Execution Points: Check Workspace` runs an explicit check, and the **Execution Points** output channel reports worker errors. Set `executionPoints.nodePath` to the Node 24 executable if VS Code cannot find it.
+
+**This adapter does not make ordinary `tsc` understand the contracts.** The CLI remains `pnpm check`. A generated declaration registry and a separate-manifest content mapper are being evaluated as shared compiler/editor integrations; neither is implemented here yet.
 
 ## Supported subset and limits
 
@@ -165,9 +169,10 @@ This is an expression-replacement prototype with explicit boundaries:
 - Captures expose selected binding values. They do not allow reassignment of the application's lexical bindings, evaluation of arbitrary strings in its scope, or debugger-style suspension.
 - The checker supports accessible module-level types and structural local values. It rejects function/block-local named types when it cannot transport their identity safely, unresolved local generic type parameters, generic function-valued captures, and `any` contracts encountered during type extraction. It does not silently substitute an unchecked contract.
 - The runtime uses Node `AsyncLocalStorage`. Browser, remote-process, and cross-worker interception are not implemented.
-- No automatic editor integration, declaration-file generation, watch-mode typecheck command, selector migration, hit counters, or breakpoint UI is included.
+- The experimental editor adapter covers diagnostics, simple type hovers, and property completions; full navigation, rename, refactoring, and signature-help parity are not implemented.
+- No declaration-file generation, watch-mode typecheck command, selector migration, hit counters, or breakpoint UI is included.
 
-The first next step is an editor adapter that supplies these same virtual views and source mappings to the language service. The existing discovery plan, `checkPlan()` projections, and diagnostic mapping provide a starting point; the integration still needs to be built.
+The next architecture decision is how to expose one contract to both ordinary `tsc` and editor tooling. This branch preserves the editor adapter experiment while that decision is discussed.
 
 ## Source layout
 

@@ -188,12 +188,12 @@ function typeImport(fromFile, targetFile) {
  * Typecheck a discovered plan using ordinary TypeScript source overlays.
  * No generated declaration or source files are written to disk.
  */
-export function checkPlan(plan, { overrides = new Map() } = {}) {
+export function checkPlan(plan, { overrides = new Map(), inspect } = {}) {
   const originals = new Map();
   for (const target of plan.targets) originals.set(target.file, target.source);
   for (const test of plan.tests) originals.set(test.file, test.source);
   for (const [file, source] of overrides) originals.set(file, source);
-  const result = { diagnostics: [], projections: new Map(originals), contracts: [], ok: false };
+  const result = { diagnostics: [], projections: new Map(originals), contracts: [], projected: false, ok: false };
   const api = new API({ cwd: plan.root });
   let analysisSnapshot;
   let finalSnapshot;
@@ -213,7 +213,13 @@ export function checkPlan(plan, { overrides = new Map() } = {}) {
       incremental: false,
       composite: false,
     };
-    const rootFiles = [...new Set([...(config?.fileNames ?? []), ...originals.keys()])];
+    // Open editor buffers provide filesystem contents, not additional project
+    // roots. An unrelated excluded file must not block a valid point contract.
+    const rootFiles = [...new Set([
+      ...(config?.fileNames ?? []),
+      ...plan.targets.map((target) => target.file),
+      ...plan.tests.map((test) => test.file),
+    ])];
     const testFiles = new Set(plan.tests.map((test) => test.file));
     const targetsByFile = new Map();
     for (const target of plan.targets) {
@@ -311,13 +317,18 @@ export function checkPlan(plan, { overrides = new Map() } = {}) {
       finalMaps.set(file, projection);
       result.projections.set(file, projection.text);
     }
+    result.projected = true;
     finalSnapshot = api.createSnapshot({
       fileSystem: createFileSystemLayer([...result.projections]),
       createPrograms: [{ rootFiles, compilerOptions }],
     });
-    result.diagnostics.push(...diagnosticsOf(finalSnapshot.operation.createdPrograms[0], finalMaps));
+    const finalProgram = finalSnapshot.operation.createdPrograms[0];
+    result.diagnostics.push(...diagnosticsOf(finalProgram, finalMaps));
     result.diagnostics = uniqueDiagnostics(result.diagnostics);
     result.ok = result.diagnostics.length === 0;
+    // The editor sidecar can query the live program synchronously. Handles and
+    // source-map functions must not escape this callback's lifetime.
+    inspect?.({ api, program: finalProgram, projections: finalMaps, sources: originals });
     return result;
   } finally {
     finalSnapshot?.dispose();

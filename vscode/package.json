@@ -1,0 +1,42 @@
+{
+  "name": "execution-points-vscode",
+  "displayName": "Execution Points (Prototype)",
+  "description": "Virtual TypeScript checking, hovers, and completions for execution points in ordinary TypeScript files.",
+  "version": "0.0.1",
+  "publisher": "execution-points",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": { "vscode": "^1.126.0" },
+  "categories": ["Programming Languages", "Testing"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/schiller-manuel/execution-points.git",
+    "directory": "vscode"
+  },
+  "main": "./extension.cjs",
+  "extensionKind": ["workspace"],
+  "extensionDependencies": ["TypeScriptTeam.native-preview"],
+  "activationEvents": ["workspaceContains:points.config.mjs"],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Execution Points runs the workspace's configuration and compiler worker using Node.js."
+    },
+    "virtualWorkspaces": { "supported": false }
+  },
+  "contributes": {
+    "commands": [{ "command": "executionPoints.check", "title": "Execution Points: Check Workspace" }],
+    "configuration": {
+      "title": "Execution Points",
+      "properties": {
+        "executionPoints.nodePath": {
+          "type": "string",
+          "default": "node",
+          "scope": "machine-overridable",
+          "description": "Node.js 24 or newer executable for the compiler worker. Use an absolute path if it is not on VS Code's PATH."
+        }
+      }
+    }
+  },
+  "scripts": { "test": "node --test extension.test.cjs" }
+}
