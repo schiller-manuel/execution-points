@@ -1,23 +1,20 @@
-export interface Spec {
-  readonly file: string
-  readonly query: string
-  readonly capture?: readonly string[]
-}
-
-export interface Contract {
+export interface NodeDescriptor {
+  readonly id: string
+  readonly kind: 'CallExpression' | 'BinaryExpression' | 'ConditionalExpression'
+  readonly inFunction: string | null
+  readonly nth: number
+  readonly callee?: string
+  readonly operator?: string
   readonly result: unknown
   readonly locals: object
 }
 
-export interface PointError<Message extends string = string> {
-  readonly __error: Message
-}
-
 /**
  * Augmented virtually by the TypeScript 7.1 content mapper (points.ep).
- * Maps target file path -> AST query -> contract (result + all in-scope locals) or PointError.
+ * Maps each configured target file path to the discriminated union of its
+ * selectable expressions (with inferred result and narrowed local types).
  */
-export interface ExecutionPointRegistry {}
+export interface ExecutionPointFileRegistry {}
 
 export interface Context<Result, Locals extends object> {
   /** Captured binding values. Referenced objects retain their normal mutability. */
@@ -26,86 +23,160 @@ export interface Context<Result, Locals extends object> {
   readonly original: () => Result
 }
 
-export interface Point<C extends Contract> {
+export interface Point<Result, Locals extends object> {
   withReplacement<T>(
-    handler: (context: Context<C['result'], C['locals']>) => C['result'],
+    handler: (context: Context<Result, Locals>) => Result,
     action: () => T,
   ): T
 }
 
-type RegistryEntry<File extends string, Query extends string> =
-  File extends keyof ExecutionPointRegistry
-    ? Query extends keyof ExecutionPointRegistry[File]
-      ? ExecutionPointRegistry[File][Query]
+export interface SelectablePoint<N extends NodeDescriptor, Captured extends object = {}>
+  extends Point<N['result'], Captured> {
+  /** Explicitly capture one or more in-scope local bindings at this expression. */
+  capture<K extends keyof N['locals'] & string>(
+    ...keys: readonly K[]
+  ): SelectablePoint<
+    N,
+    { readonly [P in K]: N['locals'][P] }
+  >
+}
+
+export interface CapturedSelection<
+  N extends NodeDescriptor,
+  Keys extends readonly string[],
+> {
+  readonly __node: N
+  readonly __capture: Keys
+}
+
+type VisitorNode<N extends NodeDescriptor> = N extends NodeDescriptor
+  ? Omit<N, 'result' | 'locals'> & {
+      readonly __node: N
+      capture<K extends keyof N['locals'] & string>(
+        ...keys: readonly K[]
+      ): CapturedSelection<N, readonly K[]>
+    }
+  : never
+
+type RegisteredTargetFile =
+  keyof ExecutionPointFileRegistry extends never
+    ? string
+    : keyof ExecutionPointFileRegistry & string
+
+type FileNodes<File extends string> =
+  File extends keyof ExecutionPointFileRegistry
+    ? ExecutionPointFileRegistry[File] & NodeDescriptor
+    : never
+
+type IsUnion<T, Copy = T> = [T] extends [never]
+  ? false
+  : T extends unknown
+    ? [Copy] extends [T]
+      ? false
+      : true
+    : never
+
+type CleanReturn<R> = Exclude<R, undefined | void | null | false>
+
+type ExtractNode<R> =
+  CleanReturn<R> extends infer Item
+    ? Item extends { readonly __node: infer N extends NodeDescriptor }
+      ? N
       : never
     : never
 
-type RegisteredFile =
-  keyof ExecutionPointRegistry extends never
-    ? string
-    : (keyof ExecutionPointRegistry & string) | (string & {})
+type ExtractCapturedLocals<R> =
+  CleanReturn<R> extends CapturedSelection<infer N, infer Keys>
+    ? { readonly [K in Keys[number] & keyof N['locals']]: N['locals'][K] }
+    : {}
 
-type RegisteredQuery<File extends string> =
-  File extends keyof ExecutionPointRegistry
-    ? (keyof ExecutionPointRegistry[File] & string) | (string & {})
-    : string
+type SelectedPoint<R> =
+  [ExtractNode<R>] extends [never]
+    ? {
+        readonly __selectionError: 'Visitor matched 0 expressions. Return a matching node from the callback.'
+      }
+    : IsUnion<ExtractNode<R>> extends true
+      ? {
+          readonly __selectionError: 'Visitor matched multiple expressions. Narrow further by inFunction, kind, callee/operator, or nth.'
+        }
+      : SelectablePoint<ExtractNode<R>, ExtractCapturedLocals<R>>
 
-type AvailableCapture<File extends string, Query extends string> =
-  [RegistryEntry<File, Query>] extends [never]
-    ? string
-    : RegistryEntry<File, Query> extends PointError
-      ? string
-      : RegistryEntry<File, Query> extends Contract
-        ? keyof RegistryEntry<File, Query>['locals'] & string
-        : string
+type NthParam<Matching extends NodeDescriptor, Nth extends number> =
+  IsUnion<Matching['nth']> extends true
+    ? [nth: Nth]
+    : [nth?: Nth]
 
-type UnregisteredSpecError<File extends string> = {
-  readonly __executionPointError: `Execution point for "${File}" is not registered. Run TypeScript 7.1 with --runExternalCode (or enable js/ts.contentMappers.enabled in VS Code) and ensure this test file is included in points.ep.`
+export interface ScopeNavigator<Nodes extends NodeDescriptor> {
+  call<
+    const Callee extends Extract<Nodes, { kind: 'CallExpression' }>['callee'] & string,
+    const Nth extends Extract<Nodes, { kind: 'CallExpression'; callee: Callee }>['nth'] = 0,
+  >(
+    callee: Callee,
+    ...nth: NthParam<Extract<Nodes, { kind: 'CallExpression'; callee: Callee }>, Nth>
+  ): SelectablePoint<Extract<Nodes, { kind: 'CallExpression'; callee: Callee; nth: Nth }>>
+
+  binary<
+    const Operator extends Extract<Nodes, { kind: 'BinaryExpression' }>['operator'] & string,
+    const Nth extends Extract<Nodes, { kind: 'BinaryExpression'; operator: Operator }>['nth'] = 0,
+  >(
+    operator: Operator,
+    ...nth: NthParam<Extract<Nodes, { kind: 'BinaryExpression'; operator: Operator }>, Nth>
+  ): SelectablePoint<Extract<Nodes, { kind: 'BinaryExpression'; operator: Operator; nth: Nth }>>
+
+  conditional<
+    const Nth extends Extract<Nodes, { kind: 'ConditionalExpression' }>['nth'] = 0,
+  >(
+    ...nth: NthParam<Extract<Nodes, { kind: 'ConditionalExpression' }>, Nth>
+  ): SelectablePoint<Extract<Nodes, { kind: 'ConditionalExpression'; nth: Nth }>>
 }
 
-type SpecCheck<File extends string, Query extends string> =
-  [RegistryEntry<File, Query>] extends [never]
-    ? UnregisteredSpecError<File>
-    : RegistryEntry<File, Query> extends PointError<infer Message>
-      ? { readonly __executionPointError: Message }
-      : {}
+export interface FileNavigator<Nodes extends NodeDescriptor> extends ScopeNavigator<Nodes> {
+  fn<const Name extends Exclude<Nodes['inFunction'], null>>(
+    name: Name,
+  ): ScopeNavigator<Extract<Nodes, { inFunction: Name }>>
 
-type ResolveContract<
-  File extends string,
-  Query extends string,
-  Capture extends readonly string[],
-> =
-  [RegistryEntry<File, Query>] extends [never]
-    ? { readonly result: never; readonly locals: Record<string, never> }
-    : RegistryEntry<File, Query> extends Contract
-      ? {
-          readonly result: RegistryEntry<File, Query>['result']
-          readonly locals: {
-            readonly [K in Capture[number] & keyof RegistryEntry<File, Query>['locals']]:
-              RegistryEntry<File, Query>['locals'][K]
-          }
-        }
-      : { readonly result: never; readonly locals: Record<string, never> }
+  topLevel(): ScopeNavigator<Extract<Nodes, { inFunction: null }>>
+}
+
+type VisitorReturn =
+  | { readonly __node: NodeDescriptor }
+  | CapturedSelection<NodeDescriptor, readonly string[]>
+  | undefined
+  | void
 
 /**
- * Declare a typed execution point. Contracts are inferred natively via
- * TypeScript 7.1 content mappers (points.ep) into ExecutionPointRegistry.
+ * Option A — Imperative narrowing visitor.
+ * Select an expression in `file` using ordinary TypeScript control-flow narrowing
+ * over the file's typed AST node union.
  */
-export declare function point<
-  const File extends RegisteredFile,
-  const Query extends RegisteredQuery<NoInfer<File>>,
-  const Capture extends readonly AvailableCapture<NoInfer<File>, NoInfer<Query>>[] = readonly [],
+export declare function select<
+  const File extends RegisteredTargetFile,
+  R extends VisitorReturn,
 >(
-  spec: {
-    readonly file: File
-    readonly query: Query
-    readonly capture?: Capture
-  } & SpecCheck<NoInfer<File>, NoInfer<Query>>,
-): Point<ResolveContract<File, Query, Capture>>
+  file: File,
+  visitor: (node: VisitorNode<FileNodes<NoInfer<File>>>) => R,
+): SelectedPoint<R>
 
-/** Internal transform entry point; application code does not call this. */
+/**
+ * Option B — Typed fluent navigator.
+ * Navigate a file's functions and expressions with full autocomplete at every step.
+ */
+export declare function fromFile<
+  const File extends RegisteredTargetFile,
+  ResultPoint extends Point<any, any>,
+>(
+  file: File,
+  navigate: (file: FileNavigator<FileNodes<NoInfer<File>>>) => ResultPoint,
+): ResultPoint
+
+/** Internal transform entry points; application code does not call these. */
+export declare function registerFile(
+  file: string,
+  nodes: readonly Omit<NodeDescriptor, 'result' | 'locals'>[],
+): void
+
 export declare function invoke<Result, Locals extends object>(
   id: string,
   originalThunk: () => Result,
-  captureThunk: () => Locals,
+  captureThunk: () => Record<keyof Locals, () => unknown>,
 ): Result

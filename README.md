@@ -1,10 +1,10 @@
 # Execution points
 
-A prototype for replacing an expression inside application code from a test. Select the expression with an existing AST query, request the surrounding locals you need, and provide the replacement in the test.
+A prototype for replacing expressions inside application code from a test with full native TypeScript inference—without editing application code or writing generated `.d.ts` files to disk.
 
-The application needs no testing markers or new exports for the selected operation. A Vite plugin instruments the selected expression in memory. The test and application run in the same Node worker.
+A TypeScript 7.1 content mapper (`points.ep`) indexes the configured target modules into a virtual `ExecutionPointFileRegistry`. Tests select expressions imperatively using either a **narrowing visitor (`select`)** or a **typed fluent navigator (`fromFile`)**, and a Vite plugin instruments only the target modules in memory.
 
-**Status:** the runtime, Vitest integration, and native TypeScript 7.1 content mapper (`tsc --noEmit --runExternalCode` + VS Code TypeScript 7.1 LSP) all work with zero generated files on disk.
+**Status:** the runtime, Vitest integration, both imperative APIs (`select` and `fromFile`), and native TypeScript 7.1 content mapper (`tsc --noEmit --runExternalCode` + VS Code TypeScript 7.1 LSP) all work with zero generated files on disk.
 
 ## Run it
 
@@ -23,26 +23,26 @@ pnpm verify
 | `pnpm test` | Run the instrumented Vitest examples. |
 | `pnpm verify` | Verify real `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and that no generated files are written. |
 
-The examples cover a private method call, arithmetic, and a call returning a promise. They also exercise call-through, nested replacement scopes, concurrent async scopes, object mutation, and cleanup after an exception.
-
-## Declare a point in a test
+## Select an execution point in a test
 
 The package is currently named `execution-points-prototype`.
 
+### Option A: Imperative narrowing visitor (`select`)
+
 ```ts
-import { point } from 'execution-points-prototype'
+import { select } from 'execution-points-prototype'
 import { checkout } from './checkout'
 
-const quotePoint = point({
-  file: 'examples/checkout.ts',
-  query: 'FunctionDeclaration[name.escapedText="checkout"] CallExpression[expression.name.escapedText="send"]',
-  capture: ['region', 'user', 'attempt'],
+const quotePoint = select('examples/checkout.ts', (node) => {
+  if (node.inFunction === 'checkout' && node.kind === 'CallExpression' && node.callee === 'send') {
+    return node.capture('region', 'user', 'attempt')
+  }
 })
 
 const result = quotePoint.withReplacement(
   ({ locals }) => {
-    // These are values from the application at the selected expression.
-    // The checker knows user is non-null after checkout's earlier guard.
+    // Fully typed by TypeScript's own control-flow narrowing:
+    // locals.user is narrowed to non-null User; return type must match Quote.
     return {
       total: locals.user.isTestAccount ? 0 : 7,
       currency: locals.region === 'EU' ? 'EUR' : 'USD',
@@ -56,9 +56,27 @@ const result = quotePoint.withReplacement(
 )
 ```
 
-`file` is relative to the configured project root. `query` uses [TSQuery](https://github.com/phenomnomnomnominal/tsquery), which applies CSS-style selectors to the TypeScript AST. Names such as `CallExpression` and fields such as `expression.name.escapedText` come from that AST. The query must match exactly one supported expression.
+- `node` is a discriminated union of every selectable expression in `'examples/checkout.ts'` (`kind`, `inFunction`, `callee` / `operator`, `nth`).
+- Returning 0 nodes or 2+ nodes (ambiguous match) is rejected at compile time.
+- `.capture(...)` autocompletes every in-scope local at that expression and rejects unknown binding names immediately.
 
-`capture` is optional and contains identifier names. The tool resolves each name in the selected expression's lexical scope, including shadowing. A missing binding or a binding that cannot be read at that position is an error.
+### Option B: Typed fluent navigator (`fromFile`)
+
+```ts
+import { fromFile } from 'execution-points-prototype'
+import { invoice } from './expressions'
+
+const sumPoint = fromFile('examples/expressions.ts', (f) =>
+  f.fn('invoice').binary('+').capture('base', 'fee'),
+)
+
+const result = sumPoint.withReplacement(({ locals, original }) => {
+  return original() * 2 + locals.fee
+}, () => invoice(10))
+```
+
+- Every step autocompletes (`f.fn(...)` → `.call(...)` / `.binary(...)` / `.conditional()` → `.capture(...)`).
+- If a scope has multiple matching calls/operators, TypeScript requires the 0-based `nth` index (e.g. `.call('send', 0)`).
 
 The replacement's result must match the selected expression's inferred type. A `Promise<number>` expression requires a `Promise<number>` replacement; a synchronous `Quote` expression requires a `Quote` replacement. The checker does not automatically unwrap promises.
 
@@ -108,12 +126,12 @@ Nested scopes can override the same point and restore the outer handler afterwar
 
 ## Configuration
 
-`points.ep` lists the test files to scan (explicit paths or glob patterns) and also anchors the TypeScript 7.1 content mapper:
+`points.ep` lists the target application modules to index (explicit paths or glob patterns) and anchors the TypeScript 7.1 content mapper. Test files do not need to be listed or transformed:
 
 ```json
 {
   "tsconfig": "tsconfig.json",
-  "testFiles": ["examples/checkout.test.ts", "examples/expressions.test.ts"]
+  "targets": ["examples/checkout.ts", "examples/expressions.ts"]
 }
 ```
 
@@ -133,7 +151,7 @@ Register the content mapper in `tsconfig.json` and include `points.ep`:
 
 (Inside this repository itself, `tsconfig.json` uses `"package": "."` to point at the local package root. `.vscode/settings.json` enables `"js/ts.contentMappers.enabled": true` and uses the workspace TypeScript 7.1 SDK.)
 
-`vitest.config.mjs` reads `points.ep` directly via `loadManifest()` so Vitest and TypeScript share a single configuration. Add the Vite plugin before other plugins that rewrite the same source:
+`vitest.config.mjs` reads `points.ep` directly via `loadManifest()` so Vitest and TypeScript share a single configuration:
 
 ```js
 import { defineConfig } from 'vitest/config'
@@ -145,54 +163,43 @@ const points = loadManifest(import.meta.dirname)
 export default defineConfig({
   plugins: [executionPoints(points)],
   test: {
-    include: points.testFiles,
+    include: ['examples/**/*.test.ts'],
     environment: 'node',
     isolate: true,
   },
 })
 ```
 
-The plugin checks that the text it instruments matches the source used for discovery. It watches tests, application targets, `points.ep`, and `tsconfig.json`, and rebuilds the plan when they change. Its source maps retain the original source text.
-
 ## How the types work
 
-TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfig.json` `"contentMappers"`). Rather than rewriting `.ts` files or emitting generated `.d.ts` files to disk:
+TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfig.json` `"contentMappers"`). Rather than rewriting `.ts` files, scanning test files, or writing `.d.ts` files to disk:
 
-1. **Single `.ep` anchor (`points.ep`).** `tsconfig.json` registers `src/content-mapper.mjs` for `.ep` files with `"dynamicConfig": true` and `watchedFiles` covering all test and target `.ts` files.
-2. **Discover points with TypeScript 7.1 + ESQuery (`src/discovery.mjs`).** Literal `point({ file, query, capture })` calls are discovered directly over TypeScript 7.1's AST (`api.createSourceFile`) with lexical shadow tracking—no second TypeScript compiler needed.
-3. **Analyze with warm incremental snapshots (`src/contracts.mjs`).** A persistent `typescript/sync` snapshot analyzes target `.ts` files (excluding `.ep` and `contentMappers`, preventing recursion) and updates incrementally via `snapshot.update(...)` on file saves. Result types come from the unmodified target AST; narrowed local types come from an incremental probe. All safe in-scope local bindings are discovered via `checker.getSymbolsInScope` for VS Code `capture` autocomplete.
-4. **Emit virtual module augmentation.** `transform("points.ep")` returns a virtual `.ts` file augmenting `ExecutionPointRegistry` on `execution-points-prototype`. Export-reachable private types (such as `Quote` and `User` in `examples/checkout.ts`) preserve exact identity via export-anchored type expressions (`ReturnType<typeof import(...).checkout>["quote"]`); unreachable structural or nominal private types emit clean helper or branded interfaces.
-5. **Native `tsc` and VS Code checking.** `point()` uses `const` type parameters (`File`, `Query`, `Capture`) to look up the contract from `ExecutionPointRegistry`, constrain `capture` to in-scope locals, surface discovery errors right on `point(...)`, and type `({ locals, original }) => ...` natively in both `tsc --noEmit --runExternalCode` and VS Code's TypeScript 7.1 language server.
-
-No `.generated` directory, declaration registry on disk, or rewritten `.ts` file is saved. Runtime instrumentation stays a separate Vite transform.
+1. **Single `.ep` anchor (`points.ep`).** `tsconfig.json` registers `src/content-mapper.mjs` for `.ep` files with `"dynamicConfig": true` and `watchedFiles` covering only the configured target modules.
+2. **Index target ASTs with TypeScript 7.1 (`src/discovery.mjs`).** Walks each target module via `api.createSourceFile` to index selectable expressions (`CallExpression`, non-assignment `BinaryExpression`, `ConditionalExpression`) with enclosing function name, `callee`/`operator`, `nth`, and safe pre-expression local bindings.
+3. **Analyze with warm incremental snapshots (`src/contracts.mjs`).** A persistent `typescript/sync` snapshot analyzes target `.ts` files (excluding `.ep` and `contentMappers`, preventing recursion) and updates incrementally via `snapshot.update(...)` on file saves. Result types come from the unmodified target AST; narrowed local types come from a nested incremental probe.
+4. **Emit virtual file schema.** `transform("points.ep")` returns a virtual `.ts` file augmenting `ExecutionPointFileRegistry` with the discriminated union of each target file's nodes. Export-reachable private types (`Quote`, `User`, `Order`) preserve exact identity via export-anchored paths; unreachable private types emit structural or unique-symbol-branded helpers.
+5. **Native `tsc` and VS Code checking.** Both `select()` (control-flow narrowing) and `fromFile()` (fluent navigator) derive their full types directly from `ExecutionPointFileRegistry`—so editing tests never triggers the content mapper and updates on every keystroke (~4 ms).
 
 ## Supported subset and limits
 
-This is an expression-replacement prototype with explicit boundaries:
-
-- Targets are separate TypeScript application modules inside the configured root. Global scripts and targets in the declaring test file are rejected.
-- Supported target kinds are ordinary calls, non-assignment binary expressions, conditional expressions, property reads, element reads, and parenthesized value expressions.
-- Positions requiring a JavaScript reference are rejected. For example, select a whole method call instead of just its method property, so the receiver is preserved.
-- Targets containing `await`, `yield`, `super`, optional chains, direct `eval`, or dynamic `import()` need additional transforms and are rejected. Selecting an ordinary promise-returning call inside an outer `await` is supported.
-- Point declarations must use a named `point` import, a literal specification, literal selector/path strings, and literal capture names. Computed configuration, spreads, and manual type arguments are outside this prototype.
-- A selector must match once. Overlapping targets are rejected. Multiple declarations targeting the same expression may request different capture lists.
-- Captures expose selected binding values. They do not allow reassignment of the application's lexical bindings, evaluation of arbitrary strings in its scope, or debugger-style suspension.
-- The checker supports exported/imported types, export-reachable private types, structural private interfaces, and unreachable private nominal types (via shared unique-symbol brands). It rejects function/block-local named types, unresolved local generic type parameters, generic function-valued captures, and `any` contracts encountered during type extraction. It does not silently substitute an unchecked contract.
-- The runtime uses Node `AsyncLocalStorage`. Browser, remote-process, and cross-worker interception are not implemented.
-- Content-mapper updates for edited `.ts` targets/queries refresh when watched files are saved (per TypeScript 7.1's `watchedFiles` protocol); editing `capture: [...]` updates immediately on keystrokes.
+- Targets are TypeScript modules configured in `points.ep`. Global scripts are skipped.
+- Indexed target kinds are ordinary `CallExpression`, non-assignment `BinaryExpression`, and `ConditionalExpression` nodes (including nested expressions).
+- Reference-only positions and expressions containing `await`, `yield`, `super`, optional chains, dynamic `import()`, or direct `eval` are skipped.
+- Captures expose explicitly selected binding values via lazy thunks; objects retain normal mutability while the `locals` container is shallowly frozen with a null prototype.
+- The runtime uses Node `AsyncLocalStorage` with a zero-overhead `activeCount === 0` fast path when no replacement is active.
 
 ## Source layout
 
 | File | Responsibility |
 | --- | --- |
-| `points.ep` | Single manifest and TypeScript 7.1 content-mapper anchor. |
-| `src/discovery.mjs` | Discover literal points and execute ESQuery selectors over TypeScript 7.1 ASTs. |
-| `src/contracts.mjs` | Extract result types and narrowed in-scope locals via warm incremental snapshots and emit virtual `ExecutionPointRegistry` augmentation. |
-| `src/content-mapper.mjs` | TypeScript 7.1 STDIO JSON-RPC content mapper server (`initialize`, `openProject`, `transform`, `closeProject`). |
-| `src/plugin.mjs` | Instrument selected expressions and test declarations through Vite. |
-| `src/runtime.mjs` | Dispatch replacements, slice per-point captures, and manage async-local scopes. |
-| `src/runtime.d.ts` | Define `ExecutionPointRegistry`, `point()`, `Context`, and replacement types. |
-| `examples/` | Runnable applications and Vitest examples. |
-| `checks/verify.mjs` | End-to-end `tsc --runExternalCode`, live `tsc --lsp --stdio`, negative type checks, and no-write verification. |
+| `points.ep` | Target manifest and TypeScript 7.1 content-mapper anchor. |
+| `src/discovery.mjs` | Index selectable expressions and safe local bindings over TypeScript 7.1 ASTs. |
+| `src/contracts.mjs` | Extract result types and narrowed locals via warm incremental snapshots and emit virtual `ExecutionPointFileRegistry`. |
+| `src/content-mapper.mjs` | TypeScript 7.1 STDIO JSON-RPC content mapper server. |
+| `src/plugin.mjs` | Instrument configured target modules and register node metadata through Vite (test files are untouched). |
+| `src/runtime.mjs` | `select()`, `fromFile()`, `registerFile()`, `invoke()`, and async-local scopes. |
+| `src/runtime.d.ts` | `ExecutionPointFileRegistry`, narrowing visitor `select()`, fluent navigator `fromFile()`, and `Point` types. |
+| `examples/` | Runnable applications and Vitest examples exercising both APIs. |
+| `checks/verify.mjs` | End-to-end `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and no-write verification. |
 
 The native compiler API is currently a beta dependency. See the [TypeScript 7.1 beta announcement](https://devblogs.microsoft.com/typescript/announcing-typescript-7-1-beta/) for its API model.

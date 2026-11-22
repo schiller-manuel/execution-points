@@ -1,12 +1,18 @@
 import { beforeEach, expect, test } from 'vitest'
-import { point } from 'execution-points-prototype'
+import { fromFile, select } from 'execution-points-prototype'
 import { checkout, events } from './checkout'
 
-const quotePoint = point({
-  file: 'examples/checkout.ts',
-  query: 'FunctionDeclaration[name.escapedText="checkout"] CallExpression[expression.name.escapedText="send"]',
-  capture: ['region', 'user', 'attempt'],
+// Option A: Imperative narrowing visitor
+const quotePoint = select('examples/checkout.ts', (node) => {
+  if (node.inFunction === 'checkout' && node.kind === 'CallExpression' && node.callee === 'send') {
+    return node.capture('region', 'user', 'attempt')
+  }
 })
+
+// Option B: Typed fluent navigator (same target, different capture subset)
+const fluentQuotePoint = fromFile('examples/checkout.ts', (f) =>
+  f.fn('checkout').call('send').capture('user'),
+)
 
 const order = () => ({
   id: 'order-1',
@@ -32,6 +38,15 @@ test('reads narrowed locals and skips the whole selected expression', () => {
 
   expect(result.quote.total).toBe(7)
   expect(result.attempt).toBe(0)
+  expect(events).toEqual([])
+})
+
+test('supports fluent navigator API with independent capture sets', () => {
+  const result = fluentQuotePoint.withReplacement(({ locals }) => {
+    return { total: locals.user.isTestAccount ? 0 : 99, currency: 'EUR' }
+  }, () => checkout(order()))
+
+  expect(result.quote.total).toBe(0)
   expect(events).toEqual([])
 })
 

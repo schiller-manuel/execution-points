@@ -1,17 +1,17 @@
 import { expect, test } from 'vitest'
-import { point } from 'execution-points-prototype'
+import { fromFile, select } from 'execution-points-prototype'
 import { invoice, remoteTotal } from './expressions'
 
-const sumPoint = point({
-  file: 'examples/expressions.ts',
-  query: 'FunctionDeclaration[name.escapedText="invoice"] BinaryExpression',
-  capture: ['base', 'fee'],
-})
+// Option B: Typed fluent navigator
+const sumPoint = fromFile('examples/expressions.ts', (f) =>
+  f.fn('invoice').binary('+').capture('base', 'fee'),
+)
 
-const remotePoint = point({
-  file: 'examples/expressions.ts',
-  query: 'FunctionDeclaration[name.escapedText="remoteTotal"] CallExpression[expression.escapedText="fetchTotal"]',
-  capture: ['id', 'source'],
+// Option A: Imperative narrowing visitor
+const remotePoint = select('examples/expressions.ts', (node) => {
+  if (node.inFunction === 'remoteTotal' && node.kind === 'CallExpression' && node.callee === 'fetchTotal') {
+    return node.capture('id', 'source')
+  }
 })
 
 test('replaces an arithmetic expression, not only a function call', () => {

@@ -10,8 +10,8 @@ import { API, ModuleKind, ModuleResolutionKind } from 'typescript/sync'
 import { createFileSystemLayer } from 'typescript/fs'
 import { ScriptTarget } from 'typescript/ast'
 
-import { generateRegistryModule } from '../src/contracts.mjs'
-import { buildPlan, loadManifest } from '../src/discovery.mjs'
+import { generateFileRegistryModule } from '../src/contracts.mjs'
+import { buildTargetPlan, loadManifest } from '../src/discovery.mjs'
 
 const execFileAsync = promisify(execFile)
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -39,13 +39,13 @@ function describeDiagnostics(diagnostics) {
     .join('\n')
 }
 
-function analyze(overrides = new Map(), { tolerant = true } = {}) {
+function analyze(overrides = new Map()) {
   const api = new API({ cwd: root })
   let snapshot
   try {
-    const plan = buildPlan({ ...config, overrides, tolerant, api })
+    const plan = buildTargetPlan({ ...config, overrides, api })
     const virtualRegistryFile = join(root, '__execution_points_registry.d.ts')
-    const { text: registryText } = generateRegistryModule(plan, { fromFile: virtualRegistryFile, api, overrides })
+    const { text: registryText } = generateFileRegistryModule(plan, { fromFile: virtualRegistryFile, api, overrides })
     const tsCfg = existsSync(plan.tsconfig) ? api.parseConfigFile(plan.tsconfig) : undefined
     const compilerOptions = {
       strict: true,
@@ -61,8 +61,7 @@ function analyze(overrides = new Map(), { tolerant = true } = {}) {
       composite: false,
     }
     const files = new Map([[virtualRegistryFile, registryText]])
-    for (const t of plan.targets) files.set(t.file, t.source)
-    for (const t of plan.tests) files.set(t.file, t.source)
+    for (const f of plan.files) files.set(f.file, f.source)
     for (const [f, s] of overrides) files.set(f, s)
 
     const rootFiles = [...new Set([...(tsCfg?.fileNames ?? []).filter((f) => !f.endsWith('.ep')), ...files.keys()])]
@@ -101,8 +100,8 @@ function passed(name) {
 
 async function rejectsTestSource(name, source, expectedCodes, offendingText, messagePattern) {
   const codes = Array.isArray(expectedCodes) ? expectedCodes : [expectedCodes]
-  const result = await analyze(new Map([[testFile, source]]))
-  assert.equal(result.ok, false, `${name}: an invalid callback was accepted`)
+  const result = analyze(new Map([[testFile, source]]))
+  assert.equal(result.ok, false, `${name}: an invalid test was accepted`)
   const diagnostics = result.diagnostics.filter(
     (diagnostic) =>
       codes.includes(diagnostic.code) &&
@@ -169,20 +168,17 @@ async function verifyLsp() {
     }
   })
 
-  function send(payload) {
+  const send = (payload) => {
     const body = Buffer.from(JSON.stringify(payload), 'utf8')
     child.stdin.write(Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'), body]))
   }
-
-  function request(method, params) {
-    const id = nextId++
-    return new Promise((res, rej) => {
+  const request = (method, params) =>
+    new Promise((res, rej) => {
+      const id = nextId++
       pending.set(id, { resolve: res, reject: rej })
       send(params === undefined ? { jsonrpc: '2.0', id, method } : { jsonrpc: '2.0', id, method, params })
     })
-  }
-
-  function notify(method, params) {
+  const notify = (method, params) => {
     send(params === undefined ? { jsonrpc: '2.0', method } : { jsonrpc: '2.0', method, params })
   }
 
@@ -208,69 +204,93 @@ async function verifyLsp() {
       textDocument: { uri: testUri, languageId: 'typescript', version: 1, text: testSource },
     })
 
-    const cleanDiag = await request('textDocument/diagnostic', {
-      textDocument: { uri: testUri },
-    })
+    const cleanDiag = await request('textDocument/diagnostic', { textDocument: { uri: testUri } })
     assert.equal(
       cleanDiag.items?.length ?? 0,
       0,
       `Expected 0 LSP diagnostics on valid checkout.test.ts, got:\n${JSON.stringify(cleanDiag.items, null, 2)}`,
     )
-    passed('TypeScript 7.1 LSP (VS Code language server) typechecks checkout.test.ts natively with 0 errors')
+    passed('TypeScript 7.1 LSP typechecks both select() and fromFile() natively with 0 errors')
 
-    const userPos = positionOf(testSource, 'user.id')
     const userHover = await request('textDocument/hover', {
       textDocument: { uri: testUri },
-      position: userPos,
+      position: positionOf(testSource, 'user.id'),
     })
-    const userHoverText = typeof userHover?.contents === 'string'
-      ? userHover.contents
-      : userHover?.contents?.value ?? ''
+    const userHoverText = typeof userHover?.contents === 'string' ? userHover.contents : userHover?.contents?.value ?? ''
     assert.match(userHoverText, /\buser:\s*User\b/, `Expected hover on locals.user to show narrowed User type, got: ${userHoverText}`)
 
-    const originalPos = positionOf(testSource, 'original()')
     const originalHover = await request('textDocument/hover', {
       textDocument: { uri: testUri },
-      position: originalPos,
+      position: positionOf(testSource, 'original()'),
     })
-    const originalHoverText = typeof originalHover?.contents === 'string'
-      ? originalHover.contents
-      : originalHover?.contents?.value ?? ''
+    const originalHoverText = typeof originalHover?.contents === 'string' ? originalHover.contents : originalHover?.contents?.value ?? ''
     assert.match(originalHoverText, /Quote/, `Expected hover on original() to show Quote return type, got: ${originalHoverText}`)
     passed('VS Code LSP hover resolves real private User and Quote types directly from checkout.ts')
 
-    // Edit buffer in-memory in LSP: mutate capture list to include nonexistent local & break return type
+    // Autocomplete in Option A & Option B while typing new string arguments (exact VS Code editing UX!)
+    const typingText = replaceOnce(
+      replaceOnce(
+        replaceOnce(testSource, "node.capture('region', 'user', 'attempt')", "node.capture('region', '')"),
+        "f.fn('checkout').call('send')",
+        "f.fn('checkout').call('')",
+      ),
+      "fluentQuotePoint = fromFile('examples/checkout.ts', (f) =>",
+      "fluentQuotePoint = fromFile('examples/checkout.ts', (f) => { f.fn(''); return",
+    ).replace(
+      "f.fn('checkout').call('').capture('user'),",
+      "f.fn('checkout').call('').capture('user') },",
+    )
+    notify('textDocument/didChange', {
+      textDocument: { uri: testUri, version: 2 },
+      contentChanges: [{ text: typingText }],
+    })
+
+    const capturePos = positionOf(typingText, "node.capture('region', '')")
+    const captureCompletions = await request('textDocument/completion', {
+      textDocument: { uri: testUri },
+      position: { line: capturePos.line, character: capturePos.character + "node.capture('region', '".length },
+    })
+    const captureLabels = (Array.isArray(captureCompletions) ? captureCompletions : captureCompletions?.items ?? []).map((i) => i.label)
+    for (const name of ['attempt', 'order', 'region', 'user']) {
+      assert.ok(captureLabels.includes(name), `Expected capture autocomplete to include "${name}", got: ${JSON.stringify(captureLabels)}`)
+    }
+
+    const fnPos = positionOf(typingText, "f.fn('')")
+    const fnCompletions = await request('textDocument/completion', {
+      textDocument: { uri: testUri },
+      position: { line: fnPos.line, character: fnPos.character + "f.fn('".length },
+    })
+    const fnLabels = (Array.isArray(fnCompletions) ? fnCompletions : fnCompletions?.items ?? []).map((i) => i.label)
+    for (const name of ['checkout', 'getClient', 'send']) {
+      assert.ok(fnLabels.includes(name), `Expected f.fn() autocomplete to include "${name}", got: ${JSON.stringify(fnLabels)}`)
+    }
+
+    const callPos = positionOf(typingText, ".call('')")
+    const callCompletions = await request('textDocument/completion', {
+      textDocument: { uri: testUri },
+      position: { line: callPos.line, character: callPos.character + ".call('".length },
+    })
+    const callLabels = (Array.isArray(callCompletions) ? callCompletions : callCompletions?.items ?? []).map((i) => i.label)
+    for (const name of ['getClient', 'send']) {
+      assert.ok(callLabels.includes(name), `Expected .call() autocomplete to include "${name}", got: ${JSON.stringify(callLabels)}`)
+    }
+    passed('VS Code LSP autocompletes function names, callees, and in-scope locals across both APIs')
+
+    // Instant keystroke check: unknown capture + wrong return + ambiguous visitor
     const edited = replaceOnce(
-      replaceOnce(testSource, "'user'", "'missingLocal'"),
+      replaceOnce(testSource, "'user', 'attempt'", "'missingLocal', 'attempt'"),
       '/* invalid-return */ 7',
       '/* invalid-return */ "oops"',
     )
     notify('textDocument/didChange', {
-      textDocument: { uri: testUri, version: 2 },
+      textDocument: { uri: testUri, version: 3 },
       contentChanges: [{ text: edited }],
     })
-    const dirtyDiag = await request('textDocument/diagnostic', {
-      textDocument: { uri: testUri },
-    })
+    const dirtyDiag = await request('textDocument/diagnostic', { textDocument: { uri: testUri } })
     const messages = (dirtyDiag.items ?? []).map((item) => item.message).join('\n')
     assert.match(messages, /missingLocal/, `Expected LSP to flag unknown capture immediately:\n${messages}`)
-    assert.match(messages, /not assignable/i, `Expected LSP to flag wrong replacement return type:\n${messages}`)
-    passed('VS Code LSP immediately flags unknown captures and wrong replacement return types on keystrokes')
-
-    // Check capture autocomplete in VS Code LSP (includes in-scope 'order' even though not yet captured!)
-    const capturePos = positionOf(testSource, "'region'")
-    const completions = await request('textDocument/completion', {
-      textDocument: { uri: testUri },
-      position: { line: capturePos.line, character: capturePos.character + 1 },
-    })
-    const completionLabels = (Array.isArray(completions) ? completions : completions?.items ?? []).map((item) => item.label)
-    for (const expectedLocal of ['attempt', 'order', 'region', 'user']) {
-      assert.ok(
-        completionLabels.includes(expectedLocal),
-        `Expected capture autocomplete to include "${expectedLocal}", got: ${JSON.stringify(completionLabels)}`,
-      )
-    }
-    passed('VS Code LSP autocompletes all in-scope local bindings inside capture: [...]')
+    assert.match(messages, /not assignable/i, `Expected LSP to flag wrong return type:\n${messages}`)
+    passed('VS Code LSP immediately flags invalid captures and return types on keystrokes')
 
     await request('shutdown')
     notify('exit')
@@ -280,119 +300,85 @@ async function verifyLsp() {
 }
 
 // 1. Real CLI tsc --noEmit --runExternalCode
-const tscResult = await execFileAsync(process.execPath, [tscBin, '--noEmit', '--runExternalCode'], {
-  cwd: root,
-})
+const tscResult = await execFileAsync(process.execPath, [tscBin, '--noEmit', '--runExternalCode'], { cwd: root })
 assert.equal(tscResult.stdout.trim(), '')
 assert.equal(tscResult.stderr.trim(), '')
-passed('regular `tsc --noEmit --runExternalCode` typechecks the entire repository natively')
+passed('regular `tsc --noEmit --runExternalCode` typechecks both APIs natively')
 
 // 2. Real TypeScript 7.1 LSP (VS Code language server)
 await verifyLsp()
 
-// 3. Programmatic checkPlan verification
-const valid = await analyze()
+// 3. Negative type-safety checks
+const valid = analyze()
 assert.equal(valid.ok, true, `Valid example failed:\n${describeDiagnostics(valid.diagnostics)}`)
-assert.equal(valid.diagnostics.length, 0, describeDiagnostics(valid.diagnostics))
-passed('the ordinary TypeScript example type-checks through the shared registry compiler')
+passed('valid select() and fromFile() examples typecheck through the file schema')
 
-const originalPlan = buildPlan(config)
-const originalPoints = originalPlan.tests.find((test) => test.file === testFile).points
-assert.ok(originalPoints.length > 0, 'The fixture must include a real imported point declaration')
-const shadowedSource =
-  testSource +
-  `
-function ordinaryLocalPointUsage() {
-  function point(value: string) { return value }
-  return point('ordinary local call')
-}
-`
-const shadowedPlan = buildPlan({ ...config, overrides: new Map([[testFile, shadowedSource]]) })
-assert.deepEqual(
-  shadowedPlan.tests.find((test) => test.file === testFile).points,
-  originalPoints,
-  'A nested function named point must not be treated as the imported execution-point API',
-)
-assert.deepEqual(shadowedPlan.targets, originalPlan.targets)
-passed('a shadowed local point function is ignored while the imported point remains discoverable')
-
-const invalidReturn = replaceOnce(
-  testSource,
-  '/* invalid-return */ 7',
-  '/* invalid-return */ "not a number"',
-)
 await rejectsTestSource(
   'a replacement with the wrong result type is rejected',
-  invalidReturn,
+  replaceOnce(testSource, '/* invalid-return */ 7', '/* invalid-return */ "not a number"'),
   [2345, 2322],
   '({ locals }) => {',
   /not assignable/i,
 )
 
-const invalidLocal = replaceOnce(
-  testSource,
-  '/* captured-region */ locals.region',
-  '/* captured-region */ locals.notCaptured',
-)
 await rejectsTestSource(
   'only explicitly captured locals are exposed',
-  invalidLocal,
+  replaceOnce(testSource, '/* captured-region */ locals.region', '/* captured-region */ locals.notCaptured'),
   2339,
   'locals.notCaptured',
   /notCaptured/,
 )
 
-const uncapturedInScopeLocal = replaceOnce(
-  testSource,
-  '/* captured-region */ locals.region',
-  '/* captured-region */ locals.order',
-)
 await rejectsTestSource(
   'in-scope locals not listed in capture remain hidden from locals',
-  uncapturedInScopeLocal,
+  replaceOnce(testSource, '/* captured-region */ locals.region', '/* captured-region */ locals.order'),
   2339,
   'locals.order',
   /order/,
 )
 
-const invalidAssignment = replaceOnce(
-  testSource,
-  '/* binding-check */',
-  "/* binding-check */ locals.region = 'US';",
-)
 await rejectsTestSource(
   'captured bindings cannot be reassigned by the replacement',
-  invalidAssignment,
+  replaceOnce(testSource, '/* binding-check */', "/* binding-check */ locals.region = 'US';"),
   2540,
   "locals.region = 'US'",
   /read.only|cannot assign/i,
 )
 
-const captureLists = [...testSource.matchAll(/\bcapture\s*:\s*\[[^\]]*\]/g)].filter(([list]) =>
-  /(['"])user\1/.test(list),
-)
-assert.equal(captureLists.length, 1, 'Expected one capture list containing user')
-const captureList = captureLists[0][0]
-const invalidCapture = replaceOnce(testSource, captureList, captureList.replace(/(['"])user\1/, "'missingLocal'"))
 await rejectsTestSource(
-  'a nonexistent capture fails directly on the capture literal with valid local names',
-  invalidCapture,
-  [2322, 2345],
+  'an unknown capture name is rejected at the capture() call',
+  replaceOnce(testSource, "'user', 'attempt'", "'missingLocal', 'attempt'"),
+  2345,
   "'missingLocal'",
   /missingLocal/,
 )
 
-const badSelector = replaceOnce(
-  testSource,
-  'CallExpression[expression.name.escapedText="send"]',
-  'CallExpression[expression.name.escapedText="doesNotExist"]',
-)
 await rejectsTestSource(
-  'an invalid selector reports the discovery error directly on the point() call',
-  badSelector,
+  'an ambiguous select() visitor (matching 2+ nodes) is rejected at compile time',
+  replaceOnce(
+    testSource,
+    "if (node.inFunction === 'checkout' && node.kind === 'CallExpression' && node.callee === 'send')",
+    "if (node.inFunction === 'checkout')",
+  ),
+  2339,
+  'quotePoint.withReplacement',
+  /multiple expressions|withReplacement/i,
+)
+
+await rejectsTestSource(
+  'a nonexistent callee in select() is rejected at compile time by TS narrowing',
+  replaceOnce(testSource, "node.callee === 'send'", "node.callee === 'doesNotExist'"),
+  2367,
+  "node.callee === 'doesNotExist'",
+  /no overlap/i,
+)
+
+await rejectsTestSource(
+  'a nonexistent function or callee in fromFile() is rejected at compile time',
+  replaceOnce(testSource, "f.fn('checkout').call('send')", "f.fn('checkout').call('doesNotExist')"),
   2345,
-  "file: 'examples/checkout.ts'",
-  /matched 0/i,
+  "'doesNotExist'",
+  /doesNotExist/,
 )
 
 const after = await fingerprintProject()

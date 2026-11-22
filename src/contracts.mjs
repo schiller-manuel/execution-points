@@ -35,14 +35,28 @@ function walk(node, visit) {
   node.forEachChild((child) => { walk(child, visit) })
 }
 
-function project(source, edits = []) {
-  const ordered = [...edits].sort((a, b) => a.pos - b.pos || (a.order ?? 0) - (b.order ?? 0))
-  let text = '', cursor = 0
-  for (const edit of ordered) {
-    text += source.slice(cursor, edit.pos) + edit.text
-    cursor = edit.pos
+function projectNested(source, nodes, prefixOf, suffixOf) {
+  const buckets = new Map()
+  const at = (offset) => {
+    let b = buckets.get(offset)
+    if (!b) { b = { opens: [], closes: [] }; buckets.set(offset, b) }
+    return b
   }
-  return text + source.slice(cursor)
+  for (const node of nodes) {
+    at(node.start).opens.push({ start: node.start, end: node.end, id: node.id, text: prefixOf(node) })
+    at(node.end).closes.push({ start: node.start, end: node.end, id: node.id, text: suffixOf(node) })
+  }
+  const offsets = [...buckets.keys()].sort((a, b) => a - b)
+  let out = '', cursor = 0
+  for (const offset of offsets) {
+    out += source.slice(cursor, offset)
+    const b = buckets.get(offset)
+    b.closes.sort((a, b) => b.start - a.start || b.id.localeCompare(a.id))
+    b.opens.sort((a, b) => b.end - a.end || a.id.localeCompare(b.id))
+    out += b.closes.map((e) => e.text).join('') + b.opens.map((e) => e.text).join('')
+    cursor = offset
+  }
+  return out + source.slice(cursor)
 }
 
 const sameFile = (a, b) => Boolean(a && b) && (a === b || a.toLowerCase() === b.toLowerCase())
@@ -344,28 +358,19 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
 }
 
 /**
- * Analyze all targets in a plan using a warm TypeScript 7.1 snapshot cache
- * (strictly excluding .ep files and contentMappers to avoid recursion)
- * and generate the virtual `declare module 'execution-points-prototype'` text.
+ * Analyze all target files in a plan using a warm TypeScript 7.1 snapshot cache
+ * (excluding .ep files and contentMappers to avoid recursion) and generate the
+ * virtual `declare module 'execution-points-prototype'` ExecutionPointFileRegistry.
  */
-export function generateRegistryModule(plan, { fromFile, api: externalApi, cache, compilerOptions: hostOptions, overrides = new Map() } = {}) {
+export function generateFileRegistryModule(plan, { fromFile, api: externalApi, cache, compilerOptions: hostOptions, overrides = new Map() } = {}) {
   const registryRoot = fromFile ?? path.join(plan.root, 'points.ep')
   const ownApi = !externalApi
   const api = externalApi ?? new API({ cwd: plan.root })
   const byFile = new Map()
-  const setEntry = (relFile, query, entry) => {
-    if (!relFile || !query) return
-    let queries = byFile.get(relFile)
-    if (!queries) { queries = new Map(); byFile.set(relFile, queries) }
-    queries.set(query, entry)
-  }
 
-  for (const err of plan.errors ?? []) {
-    if (err.file && err.query) setEntry(err.file, err.query, { error: err.message })
-  }
-  if (!plan.targets.length) {
+  if (!plan.files.length) {
     if (ownApi) api.close()
-    return { text: renderModule([], byFile), contracts: [] }
+    return { text: renderFileModule([], byFile), files: [] }
   }
 
   let ownBaseSnapshot
@@ -387,14 +392,13 @@ export function generateRegistryModule(plan, { fromFile, api: externalApi, cache
       composite: false,
     }
 
-    const testFiles = new Set(plan.tests.map((t) => t.file))
     const originals = new Map()
-    for (const t of plan.targets) originals.set(t.file, t.source)
-    for (const [f, s] of overrides) if (!testFiles.has(f) && !f.endsWith('.ep')) originals.set(f, s)
+    for (const entry of plan.files) originals.set(entry.file, entry.source)
+    for (const [f, s] of overrides) if (!f.endsWith('.ep')) originals.set(f, s)
 
     const rootFiles = [
       ...new Set([
-        ...(config?.fileNames ?? []).filter((f) => !testFiles.has(f) && !f.endsWith('.ep')),
+        ...(config?.fileNames ?? []).filter((f) => !f.endsWith('.ep') && !f.endsWith('.test.ts') && !f.endsWith('.test.tsx')),
         ...originals.keys(),
       ]),
     ].sort()
@@ -439,61 +443,55 @@ export function generateRegistryModule(plan, { fromFile, api: externalApi, cache
     const shared = { defs: [], bySymbolId: new Map(), counter: 0 }
     const emitter = createTypeEmitter(api, baseChecker, baseProgram, registryRoot, shared)
 
-    const targetMeta = new Map()
-    const targetsByFile = new Map()
+    const nodeMeta = new Map()
+    const nodesByFile = new Map()
 
-    for (const target of plan.targets) {
-      const sf = baseProgram.getSourceFile(target.file)
-      if (!sf?.externalModuleIndicator) {
-        const msg = 'Targets must be in a TypeScript module with an import or export. Global scripts are not supported.'
-        for (const q of target.queries) setEntry(target.relativeFile, q, { error: msg })
-        continue
-      }
-      let expr
-      walk(sf, (node) => { if (node.getStart(sf) === target.start && node.end === target.end) expr = node })
-      if (!expr) {
-        for (const q of target.queries) setEntry(target.relativeFile, q, { error: 'Target expression could not be matched in the TypeScript program.' })
-        continue
-      }
+    for (const entry of plan.files) {
+      const sf = baseProgram.getSourceFile(entry.file)
+      if (!sf?.externalModuleIndicator) continue
 
-      let resultTypeText
-      try {
-        resultTypeText = emitter.emit(baseChecker.getTypeAtLocation(expr), expr)
-      } catch (err) {
-        for (const q of target.queries) setEntry(target.relativeFile, q, { error: `Cannot expose this point's result type: ${err.message}` })
-        continue
-      }
-
-      const validExplicit = target.captures.filter((name) => Boolean(baseChecker.resolveName(name, SymbolFlags.Value, expr)))
-      const autoLocals = (baseChecker.getSymbolsInScope(expr, SymbolFlags.Value) ?? [])
-        .filter((sym) => !validExplicit.includes(sym.name) && isSafeAutoLocal(baseChecker, sym, sf, target.start))
-        .map((sym) => sym.name)
-
-      targetMeta.set(target.id, {
-        target,
-        resultTypeText,
-        explicitSet: new Set(validExplicit),
-        probeNames: [...new Set([...validExplicit, ...autoLocals])].sort(),
+      const spanMap = new Map()
+      for (const node of entry.nodes) spanMap.set(`${SyntaxKind[node.kind]}:${node.start}:${node.end}`, node)
+      const astById = new Map()
+      walk(sf, (astNode) => {
+        const match = spanMap.get(`${astNode.kind}:${astNode.getStart(sf)}:${astNode.end}`)
+        if (match && !astById.has(match.id)) astById.set(match.id, astNode)
       })
-      const list = targetsByFile.get(target.file) ?? []
-      list.push(target)
-      targetsByFile.set(target.file, list)
-    }
 
-    const probeFiles = new Map()
-    for (const [file, targets] of targetsByFile) {
-      const edits = []
-      for (const t of targets) {
-        const meta = targetMeta.get(t.id)
-        if (!meta) continue
-        const captures = meta.probeNames.map((n) => `${JSON.stringify(n)}: ${n}`).join(', ')
-        edits.push({ pos: t.start, text: `(void { ${JSON.stringify(markerName(t.id))}: 0${captures ? `, ${captures}` : ''} }, (`, order: 1 })
-        edits.push({ pos: t.end, text: '))', order: 0 })
+      const activeNodes = []
+      for (const node of entry.nodes) {
+        const expr = astById.get(node.id)
+        if (!expr) continue
+        let resultTypeText
+        try {
+          resultTypeText = emitter.emit(baseChecker.getTypeAtLocation(expr), expr)
+        } catch {
+          // Skip unportable expressions (e.g. `any` or unresolved local generic) instead of failing the file.
+          continue
+        }
+        const validLocals = node.captures.filter((name) => Boolean(baseChecker.resolveName(name, SymbolFlags.Value, expr)))
+        nodeMeta.set(node.id, { node, resultTypeText, probeNames: validLocals })
+        activeNodes.push(node)
       }
-      probeFiles.set(file, project(originals.get(file), edits))
+      if (activeNodes.length) nodesByFile.set(entry.file, activeNodes)
     }
 
-    const contracts = []
+    // Phase 2: Nested incremental probe snapshot for exact narrowed local types
+    const probeFiles = new Map()
+    for (const [file, activeNodes] of nodesByFile) {
+      const projected = projectNested(
+        originals.get(file),
+        activeNodes,
+        (node) => {
+          const names = nodeMeta.get(node.id).probeNames
+          const captures = names.map((n) => `${JSON.stringify(n)}: ${n}`).join(', ')
+          return `(void { ${JSON.stringify(markerName(node.id))}: 0${captures ? `, ${captures}` : ''} }, (`
+        },
+        () => '))',
+      )
+      probeFiles.set(file, projected)
+    }
+
     if (probeFiles.size > 0) {
       probeSnapshot = baseSnapshot.update({
         fileSystem: createFileSystemLayer([...probeFiles]),
@@ -503,39 +501,38 @@ export function generateRegistryModule(plan, { fromFile, api: externalApi, cache
       const probeChecker = probeProgram.getProject().checker
       const probeEmitter = createTypeEmitter(api, probeChecker, probeProgram, registryRoot, shared)
 
-      for (const [targetId, { target, resultTypeText, explicitSet }] of targetMeta) {
-        const sf = probeProgram.getSourceFile(target.file)
-        let captureObj
-        walk(sf, (node) => {
-          if (node.kind === SyntaxKind.ObjectLiteralExpression && node.properties[0]?.name?.text === markerName(target.id)) {
-            captureObj = node
+      for (const [file, activeNodes] of nodesByFile) {
+        const sf = probeProgram.getSourceFile(file)
+        const probeObjs = new Map()
+        walk(sf, (astNode) => {
+          if (astNode.kind === SyntaxKind.ObjectLiteralExpression) {
+            const first = astNode.properties[0]?.name?.text
+            if (first?.startsWith('__execution_point_')) probeObjs.set(first, astNode)
           }
         })
-        if (!captureObj) {
-          for (const q of target.queries) setEntry(target.relativeFile, q, { error: 'Could not analyze captured bindings at the target expression.' })
-          continue
-        }
 
-        const locals = {}
-        let failure
-        for (const prop of captureObj.properties.slice(1)) {
-          const name = prop.name.text
-          try {
-            locals[name] = probeEmitter.emit(probeChecker.getTypeAtLocation(prop.initializer), prop.initializer)
-          } catch (err) {
-            if (explicitSet.has(name)) { failure = `Cannot expose captured binding "${name}": ${err.message}`; break }
+        const emittedNodes = []
+        for (const node of activeNodes) {
+          const { resultTypeText } = nodeMeta.get(node.id)
+          const captureObj = probeObjs.get(markerName(node.id))
+          const locals = {}
+          if (captureObj) {
+            for (const prop of captureObj.properties.slice(1)) {
+              try {
+                locals[prop.name.text] = probeEmitter.emit(probeChecker.getTypeAtLocation(prop.initializer), prop.initializer)
+              } catch {
+                // Silently omit unportable locals for this node
+              }
+            }
           }
+          emittedNodes.push({ ...node, result: resultTypeText, locals })
         }
-        if (failure) {
-          for (const q of target.queries) setEntry(target.relativeFile, q, { error: failure })
-          continue
-        }
-        contracts.push({ id: targetId, file: target.relativeFile, result: resultTypeText, locals })
-        for (const q of target.queries) setEntry(target.relativeFile, q, { result: resultTypeText, locals })
+        const relFile = activeNodes[0].relativeFile
+        byFile.set(relFile, emittedNodes)
       }
     }
 
-    return { text: renderModule(shared.defs, byFile), contracts }
+    return { text: renderFileModule(shared.defs, byFile), files: [...byFile.keys()] }
   } finally {
     probeSnapshot?.dispose()
     ownBaseSnapshot?.dispose()
@@ -543,28 +540,33 @@ export function generateRegistryModule(plan, { fromFile, api: externalApi, cache
   }
 }
 
-function renderModule(helperDefs, byFile) {
+function renderFileModule(helperDefs, byFile) {
   const lines = [
-    '// Virtual execution-points type registry (generated in memory by TypeScript 7.1 content mapper).',
+    '// Virtual execution-points file schema (generated in memory by TypeScript 7.1 content mapper).',
     "import type {} from 'execution-points-prototype';",
     '',
   ]
   for (const def of helperDefs) lines.push(def, '')
-  lines.push("declare module 'execution-points-prototype' {", '  interface ExecutionPointRegistry {')
-  for (const [file, queries] of [...byFile.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    lines.push(`    ${JSON.stringify(file)}: {`)
-    for (const [query, entry] of [...queries.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-      if (entry.error) {
-        lines.push(`      ${JSON.stringify(query)}: { readonly __error: ${JSON.stringify(entry.error)} };`)
-      } else {
-        const localEntries = Object.entries(entry.locals)
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([name, type]) => `readonly ${JSON.stringify(name)}: ${type};`)
-          .join(' ')
-        lines.push(`      ${JSON.stringify(query)}: { readonly result: ${entry.result}; readonly locals: { ${localEntries} } };`)
-      }
+  lines.push("declare module 'execution-points-prototype' {", '  interface ExecutionPointFileRegistry {')
+  for (const [file, nodes] of [...byFile.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    lines.push(`    ${JSON.stringify(file)}:`)
+    for (const node of nodes) {
+      const localEntries = Object.entries(node.locals)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, type]) => `readonly ${JSON.stringify(name)}: ${type};`)
+        .join(' ')
+      const extra =
+        node.kind === 'CallExpression'
+          ? ` readonly callee: ${JSON.stringify(node.callee)};`
+          : node.kind === 'BinaryExpression'
+            ? ` readonly operator: ${JSON.stringify(node.operator)};`
+            : ''
+      lines.push(
+        `      | { readonly id: ${JSON.stringify(node.id)}; readonly kind: ${JSON.stringify(node.kind)}; readonly inFunction: ${JSON.stringify(node.inFunction)};${extra} readonly nth: ${node.nth}; readonly result: ${node.result}; readonly locals: { ${localEntries} } }`,
+      )
     }
-    lines.push('    };')
+    if (!nodes.length) lines.push('      never')
+    lines[lines.length - 1] += ';'
   }
   lines.push('  }', '}', '')
   return lines.join('\n')

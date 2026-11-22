@@ -3,11 +3,11 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { API } from 'typescript/sync'
-import { generateRegistryModule } from './contracts.mjs'
-import { buildPlan, resolveTestFiles } from './discovery.mjs'
+import { generateFileRegistryModule } from './contracts.mjs'
+import { buildTargetPlan, resolveTargetFiles } from './discovery.mjs'
 
 const projects = new Map()
-const snapshotCaches = new Map() // keyed by projectRoot so close+reopen in TS 7.1 reuses the warm snapshot!
+const snapshotCaches = new Map()
 let sharedApi
 
 const getApi = (cwd) => (sharedApi ??= new API({ cwd }))
@@ -24,19 +24,19 @@ function getSnapshotCache(projectRoot) {
 
 function parseManifest(content, manifestFile) {
   const trimmed = (content ?? '').trim()
-  if (!trimmed) return { config: { testFiles: [] }, diagnostics: [] }
+  if (!trimmed) return { config: { targets: [] }, diagnostics: [] }
   try {
     const parsed = JSON.parse(trimmed)
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return {
-        config: { testFiles: [] },
-        diagnostics: [{ messageText: 'points.ep must contain a JSON object with a "testFiles" array.', start: 0, length: content.length, code: 90101 }],
+        config: { targets: [] },
+        diagnostics: [{ messageText: 'points.ep must contain a JSON object with a "targets" array.', start: 0, length: content.length, code: 90101 }],
       }
     }
     return { config: parsed, diagnostics: [] }
   } catch (error) {
     return {
-      config: { testFiles: [] },
+      config: { targets: [] },
       diagnostics: [{ messageText: `Invalid JSON in ${path.basename(manifestFile)}: ${error.message}`, start: 0, length: Math.max(1, content.length), code: 90100 }],
     }
   }
@@ -49,7 +49,7 @@ function scanProject(projectRoot, configFileName, options) {
   const manifestText = existsSync(manifestFile) ? safeRead(manifestFile) : undefined
   const { config } = parseManifest(manifestText ?? '', manifestFile)
   const tsconfig = config.tsconfig ?? (configFileName ? path.relative(projectRoot, configFileName) : 'tsconfig.json')
-  const plan = buildPlan({ root: projectRoot, tsconfig, testFiles: config.testFiles ?? [], tolerant: true, api: getApi(projectRoot) })
+  const plan = buildTargetPlan({ root: projectRoot, tsconfig, targets: config.targets ?? [], api: getApi(projectRoot) })
 
   const watched = new Set()
   const hash = createHash('sha256')
@@ -58,21 +58,9 @@ function scanProject(projectRoot, configFileName, options) {
     watched.add(configFileName)
     hash.update(`\0tsconfig:${safeRead(configFileName) ?? ''}`)
   }
-  for (const file of resolveTestFiles(projectRoot, config.testFiles ?? [])) {
+  for (const file of resolveTargetFiles(projectRoot, config.targets ?? [])) {
     watched.add(file)
-    hash.update(`\0test:${file}\0${safeRead(file) ?? ''}`)
-  }
-  for (const target of plan.targets) {
-    watched.add(target.file)
-    hash.update(`\0target:${target.file}\0${target.source ?? ''}`)
-  }
-  for (const err of plan.errors) {
-    if (!err.file) continue
-    const targetPath = path.resolve(projectRoot, err.file)
-    if (existsSync(targetPath)) {
-      watched.add(targetPath)
-      hash.update(`\0errtarget:${targetPath}\0${safeRead(targetPath) ?? ''}`)
-    }
+    hash.update(`\0target:${file}\0${safeRead(file) ?? ''}`)
   }
   if (existsSync(manifestFile)) watched.delete(manifestFile)
 
@@ -104,18 +92,16 @@ const handlers = {
       return { extension: '.ts', text: "import type {} from 'execution-points-prototype';\n", diagnostics, mappings: [] }
     }
 
-    // Reuse the plan already built in openProject when points.ep hasn't changed in memory
     const plan = project && project.manifestText === content
       ? project.plan
-      : buildPlan({
+      : buildTargetPlan({
           root,
           tsconfig: config.tsconfig ?? (project?.configFileName ? path.relative(root, project.configFileName) : 'tsconfig.json'),
-          testFiles: config.testFiles ?? [],
-          tolerant: true,
+          targets: config.targets ?? [],
           api: getApi(root),
         })
 
-    const { text } = generateRegistryModule(plan, {
+    const { text } = generateFileRegistryModule(plan, {
       fromFile: fileName,
       api: getApi(root),
       cache: getSnapshotCache(root),

@@ -7,7 +7,7 @@ const points = loadManifest(import.meta.dirname)
 export default defineConfig({
   plugins: [executionPoints(points)],
   test: {
-    include: points.testFiles,
+    include: ['examples/**/*.test.ts'],
     environment: 'node',
     isolate: true,
   },

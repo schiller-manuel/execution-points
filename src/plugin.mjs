@@ -2,11 +2,11 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import MagicString from 'magic-string'
-import { buildPlan } from './discovery.mjs'
+import { buildTargetPlan } from './discovery.mjs'
 
 const runtimeModule = 'execution-points-prototype/runtime'
 
-/** Instrument only the tests and expressions discovered from explicit points. */
+/** Instrument target modules listed in points.ep; test files need no transformation. */
 export function executionPoints(options = {}) {
   let root = resolve(options.root ?? process.cwd())
   let plan
@@ -16,7 +16,7 @@ export function executionPoints(options = {}) {
 
   function watchFiles(context, nextPlan) {
     if (!context?.addWatchFile) return
-    for (const file of planFileNames(nextPlan)) context.addWatchFile(file)
+    for (const file of nextPlan.files) context.addWatchFile(file.file)
     if (nextPlan.tsconfig) context.addWatchFile(resolve(root, nextPlan.tsconfig))
     const manifestFile = resolve(root, 'points.ep')
     if (readSource(manifestFile) !== undefined) context.addWatchFile(manifestFile)
@@ -35,25 +35,18 @@ export function executionPoints(options = {}) {
     if (plan && !dirty && !sourcesChanged()) return plan
 
     pendingPlan = Promise.resolve().then(() => {
-      const nextPlan = buildPlan({ ...options, root })
-      const nextObservedFiles = new Map()
-      for (const test of nextPlan.tests) {
-        nextObservedFiles.set(resolve(root, test.file), test.source)
-      }
-      for (const target of nextPlan.targets) {
-        nextObservedFiles.set(resolve(root, target.file), target.source)
-      }
+      const nextPlan = buildTargetPlan({ ...options, root })
+      const nextObserved = new Map()
+      for (const entry of nextPlan.files) nextObserved.set(entry.file, entry.source)
       if (nextPlan.tsconfig) {
         const configFile = resolve(root, nextPlan.tsconfig)
-        nextObservedFiles.set(configFile, readSource(configFile))
+        nextObserved.set(configFile, readSource(configFile))
       }
       const manifestFile = resolve(root, 'points.ep')
       const manifestContent = readSource(manifestFile)
-      if (manifestContent !== undefined) {
-        nextObservedFiles.set(manifestFile, manifestContent)
-      }
+      if (manifestContent !== undefined) nextObserved.set(manifestFile, manifestContent)
       plan = nextPlan
-      observedFiles = nextObservedFiles
+      observedFiles = nextObserved
       dirty = false
       watchFiles(context, plan)
       return plan
@@ -64,13 +57,6 @@ export function executionPoints(options = {}) {
     } finally {
       pendingPlan = undefined
     }
-  }
-
-  function planFileNames(value) {
-    return new Set([
-      ...value.tests.map((test) => resolve(root, test.file)),
-      ...value.targets.map((target) => resolve(root, target.file)),
-    ])
   }
 
   return {
@@ -89,99 +75,71 @@ export function executionPoints(options = {}) {
       dirty = true
     },
 
-    async handleHotUpdate(context) {
-      const previousFiles = plan ? planFileNames(plan) : new Set()
-      const nextPlan = await getPlan(undefined, true)
-      const files = new Set([...previousFiles, ...planFileNames(nextPlan)])
-      const modules = new Set(context.modules)
-
-      // A changed test selector can require new instrumentation in an unchanged
-      // application file, so invalidate both sides of the previous/new plan.
-      for (const file of files) {
-        for (const module of context.server.moduleGraph.getModulesByFile(file) ?? []) {
-          context.server.moduleGraph.invalidateModule(module)
-          modules.add(module)
-        }
-      }
-      return [...modules]
-    },
-
     async transform(code, id) {
       const file = sourceFileName(id)
       if (!file) return null
 
       const currentPlan = await getPlan(this)
-      const tests = currentPlan.tests.filter((test) => resolve(root, test.file) === file)
-      const targets = currentPlan.targets.filter((target) => resolve(root, target.file) === file)
-      if (tests.length === 0 && targets.length === 0) return null
+      const entry = currentPlan.files.find((item) => item.file === file)
+      if (!entry || entry.nodes.length === 0) return null
 
-      for (const entry of [...tests, ...targets]) {
-        if (entry.source !== code) {
-          throw new Error(
-            `[execution-points] Source changed before instrumentation for ${file}. ` +
-              'The plugin requires the original source text at its recorded AST positions. ' +
-              'Put executionPoints before other source-transforming plugins and retry after saving the file.',
-          )
-        }
+      if (entry.source !== code) {
+        throw new Error(
+          `[execution-points] Source changed before instrumentation for ${file}. ` +
+            'Put executionPoints before other source-transforming plugins.',
+        )
       }
 
       const source = new MagicString(code)
       const insertions = new Map()
       const at = (offset) => {
-        if (!Number.isInteger(offset) || offset < 0 || offset > code.length) {
-          throw new Error(`[execution-points] Invalid transform position ${offset} in ${file}.`)
+        let bucket = insertions.get(offset)
+        if (!bucket) {
+          bucket = { before: [], opens: [], closes: [] }
+          insertions.set(offset, bucket)
         }
-        let entry = insertions.get(offset)
-        if (!entry) {
-          entry = { before: [], opens: [], closes: [] }
-          insertions.set(offset, entry)
-        }
-        return entry
+        return bucket
       }
 
-      for (const test of tests) {
-        for (const point of test.points) {
-          at(point.runtimeInsert).before.push(`, ${JSON.stringify(point.targetId)}`)
-        }
+      const invokeName = uniqueName(code, '__epInvoke')
+      const registerName = uniqueName(code, '__epRegister')
+      const metadata = entry.nodes.map(({ id: nodeId, kind, inFunction, callee, operator, nth }) => ({
+        id: nodeId,
+        kind,
+        inFunction,
+        ...(callee !== undefined ? { callee } : {}),
+        ...(operator !== undefined ? { operator } : {}),
+        nth,
+      }))
+
+      at(importOffset(code)).before.unshift(
+        `import { invoke as ${invokeName}, registerFile as ${registerName} } from ${JSON.stringify(runtimeModule)};\n` +
+          `${registerName}(${JSON.stringify(entry.relativeFile)}, ${JSON.stringify(metadata)});\n`,
+      )
+
+      for (const node of entry.nodes) {
+        const captures = node.captures.map((name) => `[${JSON.stringify(name)}]: () => (${name})`).join(', ')
+        at(node.start).opens.push({
+          ...node,
+          text: `${invokeName}(${JSON.stringify(node.id)}, () => (`,
+        })
+        at(node.end).closes.push({
+          ...node,
+          text: `), () => ({${captures}}))`,
+        })
       }
 
-      if (targets.length > 0) {
-        const invokeName = uniqueName(code, '__epInvoke')
-        at(importOffset(code)).before.unshift(
-          `import { invoke as ${invokeName} } from ${JSON.stringify(runtimeModule)};\n`,
-        )
-        for (const target of targets) {
-          if (target.start >= target.end) {
-            throw new Error(`[execution-points] Invalid expression span for ${target.id} in ${file}.`)
-          }
-          const captures = target.captures
-            .map((name) => `[${JSON.stringify(name)}]: () => (${name})`)
-            .join(', ')
-          at(target.start).opens.push({
-            ...target,
-            text: `${invokeName}(${JSON.stringify(target.id)}, () => (`,
-          })
-          at(target.end).closes.push({
-            ...target,
-            text: `), () => ({${captures}}))`,
-          })
-        }
-      }
-
-      for (const [offset, entry] of insertions) {
-        // Prefixes go outer-to-inner; suffixes go inner-to-outer. Inserting at
-        // boundaries keeps the original expression tokens and source map intact.
-        entry.opens.sort((a, b) => b.end - a.end || a.id.localeCompare(b.id))
-        entry.closes.sort((a, b) => b.start - a.start || b.id.localeCompare(a.id))
+      for (const [offset, bucket] of insertions) {
+        bucket.opens.sort((a, b) => b.end - a.end || a.id.localeCompare(b.id))
+        bucket.closes.sort((a, b) => b.start - a.start || b.id.localeCompare(a.id))
         source.appendLeft(
           offset,
-          entry.closes.map((item) => item.text).join('') +
-            entry.before.join('') +
-            entry.opens.map((item) => item.text).join(''),
+          bucket.closes.map((item) => item.text).join('') +
+            bucket.before.join('') +
+            bucket.opens.map((item) => item.text).join(''),
         )
       }
 
-      if (insertions.size === 0) return null
       return {
         code: source.toString(),
         map: source.generateMap({ source: file, includeContent: true, hires: true }),

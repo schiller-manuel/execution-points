@@ -22,7 +22,6 @@
     "verify": "node checks/verify.mjs"
   },
   "dependencies": {
-    "esquery": "^1.7.0",
     "magic-string": "1.4.5",
     "typescript": "7.1.0-dev.20261121.1"
   },
