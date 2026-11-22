@@ -4,21 +4,30 @@
   "private": true,
   "type": "module",
   "description": "Experimental AST-selected expression replacement with local capture and virtual TypeScript checking",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "exports": {
-    ".": { "types": "./src/runtime.d.ts", "default": "./src/runtime.mjs" },
+    ".": {
+      "types": "./src/runtime.d.ts",
+      "default": "./src/runtime.mjs"
+    },
     "./runtime": "./src/runtime.mjs",
     "./vite": "./src/plugin.mjs"
   },
   "typescript": {
     "contentMapper": {
-      "exec": ["node", "./src/content-mapper.mjs"],
+      "exec": [
+        "node",
+        "./src/content-mapper.mjs"
+      ],
       "dynamicConfig": true
     }
   },
   "scripts": {
     "check": "tsc --noEmit --runExternalCode",
     "test": "vitest run",
+    "test:oracles": "vitest run tests/",
     "verify": "node checks/verify.mjs"
   },
   "dependencies": {
@@ -26,7 +35,10 @@
     "typescript": "7.1.0-dev.20261121.1"
   },
   "devDependencies": {
+    "@tanstack/eslint-plugin-oracles": "https://pkg.pr.new/TanStack/oracles/@tanstack/eslint-plugin-oracles@6d05f05",
+    "@tanstack/oracles": "https://pkg.pr.new/TanStack/oracles/@tanstack/oracles@6d05f05",
     "@types/node": "^24.0.0",
+    "fast-check": "^4.10.3",
     "vite": "8.3.8",
     "vitest": "5.1.1"
   }

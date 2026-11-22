@@ -101,43 +101,6 @@ type SelectedPoint<R> =
         }
       : SelectablePoint<ExtractNode<R>, ExtractCapturedLocals<R>>
 
-type NthParam<Matching extends NodeDescriptor, Nth extends number> =
-  IsUnion<Matching['nth']> extends true
-    ? [nth: Nth]
-    : [nth?: Nth]
-
-export interface ScopeNavigator<Nodes extends NodeDescriptor> {
-  call<
-    const Callee extends Extract<Nodes, { kind: 'CallExpression' }>['callee'] & string,
-    const Nth extends Extract<Nodes, { kind: 'CallExpression'; callee: Callee }>['nth'] = 0,
-  >(
-    callee: Callee,
-    ...nth: NthParam<Extract<Nodes, { kind: 'CallExpression'; callee: Callee }>, Nth>
-  ): SelectablePoint<Extract<Nodes, { kind: 'CallExpression'; callee: Callee; nth: Nth }>>
-
-  binary<
-    const Operator extends Extract<Nodes, { kind: 'BinaryExpression' }>['operator'] & string,
-    const Nth extends Extract<Nodes, { kind: 'BinaryExpression'; operator: Operator }>['nth'] = 0,
-  >(
-    operator: Operator,
-    ...nth: NthParam<Extract<Nodes, { kind: 'BinaryExpression'; operator: Operator }>, Nth>
-  ): SelectablePoint<Extract<Nodes, { kind: 'BinaryExpression'; operator: Operator; nth: Nth }>>
-
-  conditional<
-    const Nth extends Extract<Nodes, { kind: 'ConditionalExpression' }>['nth'] = 0,
-  >(
-    ...nth: NthParam<Extract<Nodes, { kind: 'ConditionalExpression' }>, Nth>
-  ): SelectablePoint<Extract<Nodes, { kind: 'ConditionalExpression'; nth: Nth }>>
-}
-
-export interface FileNavigator<Nodes extends NodeDescriptor> extends ScopeNavigator<Nodes> {
-  fn<const Name extends Exclude<Nodes['inFunction'], null>>(
-    name: Name,
-  ): ScopeNavigator<Extract<Nodes, { inFunction: Name }>>
-
-  topLevel(): ScopeNavigator<Extract<Nodes, { inFunction: null }>>
-}
-
 type VisitorReturn =
   | { readonly __node: NodeDescriptor }
   | CapturedSelection<NodeDescriptor, readonly string[]>
@@ -145,7 +108,6 @@ type VisitorReturn =
   | void
 
 /**
- * Option A — Imperative narrowing visitor.
  * Select an expression in `file` using ordinary TypeScript control-flow narrowing
  * over the file's typed AST node union.
  */
@@ -156,18 +118,6 @@ export declare function select<
   file: File,
   visitor: (node: VisitorNode<FileNodes<NoInfer<File>>>) => R,
 ): SelectedPoint<R>
-
-/**
- * Option B — Typed fluent navigator.
- * Navigate a file's functions and expressions with full autocomplete at every step.
- */
-export declare function fromFile<
-  const File extends RegisteredTargetFile,
-  ResultPoint extends Point<any, any>,
->(
-  file: File,
-  navigate: (file: FileNavigator<FileNodes<NoInfer<File>>>) => ResultPoint,
-): ResultPoint
 
 /** Internal transform entry points; application code does not call these. */
 export declare function registerFile(

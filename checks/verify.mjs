@@ -227,18 +227,11 @@ async function verifyLsp() {
     assert.match(originalHoverText, /Quote/, `Expected hover on original() to show Quote return type, got: ${originalHoverText}`)
     passed('VS Code LSP hover resolves real private User and Quote types directly from checkout.ts')
 
-    // Autocomplete in Option A & Option B while typing new string arguments (exact VS Code editing UX!)
+    // Autocomplete in select() while typing new string arguments (exact VS Code editing UX!)
     const typingText = replaceOnce(
-      replaceOnce(
-        replaceOnce(testSource, "node.capture('region', 'user', 'attempt')", "node.capture('region', '')"),
-        "f.fn('checkout').call('send')",
-        "f.fn('checkout').call('')",
-      ),
-      "fluentQuotePoint = fromFile('examples/checkout.ts', (f) =>",
-      "fluentQuotePoint = fromFile('examples/checkout.ts', (f) => { f.fn(''); return",
-    ).replace(
-      "f.fn('checkout').call('').capture('user'),",
-      "f.fn('checkout').call('').capture('user') },",
+      testSource,
+      "node.capture('region', 'user', 'attempt')",
+      "node.capture('region', '')",
     )
     notify('textDocument/didChange', {
       textDocument: { uri: testUri, version: 2 },
@@ -254,27 +247,7 @@ async function verifyLsp() {
     for (const name of ['attempt', 'order', 'region', 'user']) {
       assert.ok(captureLabels.includes(name), `Expected capture autocomplete to include "${name}", got: ${JSON.stringify(captureLabels)}`)
     }
-
-    const fnPos = positionOf(typingText, "f.fn('')")
-    const fnCompletions = await request('textDocument/completion', {
-      textDocument: { uri: testUri },
-      position: { line: fnPos.line, character: fnPos.character + "f.fn('".length },
-    })
-    const fnLabels = (Array.isArray(fnCompletions) ? fnCompletions : fnCompletions?.items ?? []).map((i) => i.label)
-    for (const name of ['checkout', 'getClient', 'send']) {
-      assert.ok(fnLabels.includes(name), `Expected f.fn() autocomplete to include "${name}", got: ${JSON.stringify(fnLabels)}`)
-    }
-
-    const callPos = positionOf(typingText, ".call('')")
-    const callCompletions = await request('textDocument/completion', {
-      textDocument: { uri: testUri },
-      position: { line: callPos.line, character: callPos.character + ".call('".length },
-    })
-    const callLabels = (Array.isArray(callCompletions) ? callCompletions : callCompletions?.items ?? []).map((i) => i.label)
-    for (const name of ['getClient', 'send']) {
-      assert.ok(callLabels.includes(name), `Expected .call() autocomplete to include "${name}", got: ${JSON.stringify(callLabels)}`)
-    }
-    passed('VS Code LSP autocompletes function names, callees, and in-scope locals across both APIs')
+    passed('VS Code LSP autocompletes in-scope locals in select()')
 
     // Instant keystroke check: unknown capture + wrong return + ambiguous visitor
     const edited = replaceOnce(
@@ -371,14 +344,6 @@ await rejectsTestSource(
   2367,
   "node.callee === 'doesNotExist'",
   /no overlap/i,
-)
-
-await rejectsTestSource(
-  'a nonexistent function or callee in fromFile() is rejected at compile time',
-  replaceOnce(testSource, "f.fn('checkout').call('send')", "f.fn('checkout').call('doesNotExist')"),
-  2345,
-  "'doesNotExist'",
-  /doesNotExist/,
 )
 
 const after = await fingerprintProject()

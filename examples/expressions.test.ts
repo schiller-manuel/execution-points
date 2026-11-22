@@ -1,13 +1,13 @@
 import { expect, test } from 'vitest'
-import { fromFile, select } from 'execution-points-prototype'
+import { select } from 'execution-points-prototype'
 import { invoice, remoteTotal } from './expressions'
 
-// Option B: Typed fluent navigator
-const sumPoint = fromFile('examples/expressions.ts', (f) =>
-  f.fn('invoice').binary('+').capture('base', 'fee'),
-)
+const sumPoint = select('examples/expressions.ts', (node) => {
+  if (node.inFunction === 'invoice' && node.kind === 'BinaryExpression' && node.operator === '+') {
+    return node.capture('base', 'fee')
+  }
+})
 
-// Option A: Imperative narrowing visitor
 const remotePoint = select('examples/expressions.ts', (node) => {
   if (node.inFunction === 'remoteTotal' && node.kind === 'CallExpression' && node.callee === 'fetchTotal') {
     return node.capture('id', 'source')

@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 import {
   API,
+  ElementFlags,
   ModuleKind,
   ModuleResolutionKind,
   NodeBuilderFlags,
@@ -82,29 +83,20 @@ function hasLocalDeclaration(sym) {
   })
 }
 
-function getSourceFileCI(program, filePath, byLower) {
-  return program.getSourceFile(filePath) ?? byLower.get(filePath.toLowerCase())
+function getSourceFileCached(program, filePath, sfCache) {
+  if (!sfCache.has(filePath)) sfCache.set(filePath, program.getSourceFile(filePath))
+  return sfCache.get(filePath)
 }
 
-function isAmbientOrGlobal(checker, sym, program, byLower) {
+function isAmbientOrGlobal(checker, sym, program, sfCache) {
   const resolved = resolveAlias(checker, sym)
   if (!resolved?.declarations.length) return true
-  return resolved.declarations.every((h) => !getSourceFileCI(program, h.path, byLower)?.externalModuleIndicator)
+  return resolved.declarations.every((h) => !getSourceFileCached(program, h.path, sfCache)?.externalModuleIndicator)
 }
 
 function isDeclaredInFile(checker, sym, filePath) {
   const resolved = resolveAlias(checker, sym)
   return Boolean(resolved?.declarations.some((h) => sameFile(h.path, filePath)))
-}
-
-function isSafeAutoLocal(checker, sym, sf, targetStart) {
-  if (!sym?.name || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(sym.name) || sym.name.startsWith('__execution_point_')) return false
-  if (sym.flags & (SymbolFlags.Alias | SymbolFlags.TypeParameter | SymbolFlags.Module)) return false
-  if (!isDeclaredInFile(checker, sym, sf.fileName) || !hasLocalDeclaration(sym)) return false
-  return sym.declarations.every((h) => {
-    const d = h.resolve()
-    return d && (d.kind === SyntaxKind.Parameter || d.kind === SyntaxKind.FunctionDeclaration || d.end <= targetStart)
-  })
 }
 
 function isNominalUnexported(checker, sym) {
@@ -123,7 +115,7 @@ function isNominalUnexported(checker, sym) {
 }
 
 /** Find shortest export-anchored type paths for exported and export-reachable private types. */
-function buildExportIndex(checker, program, sf, fromFile, byLower) {
+function buildExportIndex(checker, program, sf, fromFile, sfCache) {
   const bySymbolId = new Map()
   const modSym = checker.getSymbolOfSourceFile(sf.fileName)
   if (!modSym) return bySymbolId
@@ -184,7 +176,7 @@ function buildExportIndex(checker, program, sf, fromFile, byLower) {
       enqueue(sig.getReturnType(), `ReturnType<${expr}>`, depth + 1)
       sig.getParameters().forEach((_, i) => enqueue(checker.getParameterType(sig, i), `Parameters<${expr}>[${i}]`, depth + 1))
     }
-    if (type.isObjectType() && !isAmbientOrGlobal(checker, sym, program, byLower)) {
+    if (type.isObjectType() && !isAmbientOrGlobal(checker, sym, program, sfCache)) {
       const props = type.getProperties()
       if (props.length <= 24) {
         for (const prop of props) {
@@ -199,16 +191,15 @@ function buildExportIndex(checker, program, sf, fromFile, byLower) {
 }
 
 function createTypeEmitter(api, checker, program, fromFile, shared) {
-  const byLower = new Map()
-  for (const sf of program.getSourceFiles?.() ?? []) byLower.set(sf.fileName.toLowerCase(), sf)
+  const sfCache = new Map()
   const exportIndices = new Map()
 
   const getExportIndex = (filePath) => {
     const key = filePath.toLowerCase()
     let idx = exportIndices.get(key)
     if (!idx) {
-      const sf = getSourceFileCI(program, filePath, byLower)
-      idx = sf ? buildExportIndex(checker, program, sf, fromFile, byLower) : new Map()
+      const sf = getSourceFileCached(program, filePath, sfCache)
+      idx = sf ? buildExportIndex(checker, program, sf, fromFile, sfCache) : new Map()
       exportIndices.set(key, idx)
     }
     return idx
@@ -217,7 +208,7 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
   const resolveExternal = (sym) => {
     const resolved = resolveAlias(checker, sym)
     if (!resolved) return undefined
-    if (isAmbientOrGlobal(checker, resolved, program, byLower)) return resolved.name
+    if (isAmbientOrGlobal(checker, resolved, program, sfCache)) return resolved.name
     const id = symbolIdentity(checker, resolved)
     for (const h of resolved.declarations) {
       const found = getExportIndex(h.path).get(id)
@@ -243,11 +234,23 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
 
   function emitSig(sig, loc, seen, isNew = false) {
     if (sig.getTypeParameters().length) throw new Error('Generic function-valued captures are not supported.')
-    const params = sig.getParameters().map((p, i) => {
-      const opt = p.flags & SymbolFlags.Optional ? '?' : ''
-      const rest = p.declarations?.some((h) => Boolean(h.resolve()?.dotDotDotToken)) ? '...' : ''
+    const sigParams = sig.getParameters()
+    const params = sigParams.map((p, i) => {
+      const decls = p.declarations?.map((h) => h.resolve()).filter(Boolean) ?? []
+      const isRest = Boolean(sig.hasRestParameter && i === sigParams.length - 1) || decls.some((d) => Boolean(d.dotDotDotToken))
+      const isOpt = Boolean(p.flags & SymbolFlags.Optional) || decls.some((d) => Boolean(d.questionToken || d.initializer))
+      const opt = isOpt && !isRest ? '?' : ''
+      const rest = isRest ? '...' : ''
       const name = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(p.name) ? p.name : `arg${i}`
-      return `${rest}${name}${opt}: ${emit(checker.getParameterType(sig, i), loc, new Set(seen))}`
+      const rawType = isRest ? checker.getTypeOfSymbolAtLocation(p, loc) : checker.getParameterType(sig, i)
+      const paramType =
+        isOpt && !isRest && (rawType.flags & TypeFlags.Union)
+          ? (() => {
+              const nonUndef = (rawType.getTypes() ?? []).filter((m) => !(m.flags & TypeFlags.Undefined))
+              return nonUndef.length === 1 ? nonUndef[0] : rawType
+            })()
+          : rawType
+      return `${rest}${name}${opt}: ${emit(paramType, loc, new Set(seen))}`
     })
     return `${isNew ? 'new ' : ''}(${params.join(', ')}) => ${emit(sig.getReturnType(), loc, new Set(seen))}`
   }
@@ -263,13 +266,22 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
       out.push(`${s.slice(0, i)}: ${s.slice(i + 4)};`)
     }
     for (const info of type.getIndexInfos()) {
-      out.push(`${info.isReadonly ? 'readonly ' : ''}[key: ${emit(info.keyType, loc, new Set(seen))}]: ${emit(info.type, loc, new Set(seen))};`)
+      out.push(`${info.isReadonly ? 'readonly ' : ''}[key: ${emit(info.keyType, loc, new Set(seen))}]: ${emit(info.valueType, loc, new Set(seen))};`)
     }
     for (const prop of type.getProperties()) {
       if (isPrivateMember(prop)) continue
       const ro = isReadonlyProp(prop) ? 'readonly ' : ''
-      const opt = prop.flags & SymbolFlags.Optional ? '?' : ''
-      out.push(`${ro}${JSON.stringify(prop.name)}${opt}: ${emit(checker.getTypeOfSymbolAtLocation(prop, loc), loc, new Set(seen))};`)
+      const isOpt = Boolean(prop.flags & SymbolFlags.Optional)
+      const opt = isOpt ? '?' : ''
+      const rawPropType = checker.getTypeOfSymbolAtLocation(prop, loc)
+      const propType =
+        isOpt && (rawPropType.flags & TypeFlags.Union)
+          ? (() => {
+              const nonUndef = (rawPropType.getTypes() ?? []).filter((m) => !(m.flags & TypeFlags.Undefined))
+              return nonUndef.length === 1 ? nonUndef[0] : rawPropType
+            })()
+          : rawPropType
+      out.push(`${ro}${JSON.stringify(prop.name)}${opt}: ${emit(propType, loc, new Set(seen))};`)
     }
     return out
   }
@@ -293,16 +305,14 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
 
   function emit(type, loc, seen = new Set()) {
     if (!type || type.isErrorType()) throw new Error('TypeScript could not determine this type.')
-    if (type.flags & TypeFlags.Any) throw new Error('This type is any; execution-points requires a concrete checked type.')
     if (type.isTypeParameter()) throw new Error(`The type parameter ${checker.typeToString(type)} is local to a generic scope.`)
 
-    if (type.flags & (TypeFlags.String | TypeFlags.Number | TypeFlags.Boolean | TypeFlags.BigInt | TypeFlags.Void |
-        TypeFlags.Undefined | TypeFlags.Null | TypeFlags.Never | TypeFlags.Unknown | TypeFlags.ESSymbol |
-        TypeFlags.StringLiteral | TypeFlags.NumberLiteral | TypeFlags.BigIntLiteral | TypeFlags.BooleanLiteral)) {
-      const node = checker.typeToTypeNode(type, undefined, NodeBuilderFlags.NoTruncation)
-      if (!node) throw new Error('TypeScript could not represent this primitive/literal type.')
-      return api.printer.printNode(node)
+    if (type.flags & TypeFlags.Boolean) return 'boolean'
+    if (type.isIntrinsicType?.()) return type.intrinsicName
+    if (type.isStringLiteralType?.() || type.isNumberLiteralType?.() || type.isBooleanLiteralType?.()) {
+      return JSON.stringify(type.value)
     }
+    if (type.isBigIntLiteralType?.()) return `${type.value}n`
 
     if (type.flags & TypeFlags.UniqueESSymbol) {
       const sym = type.getSymbol()
@@ -323,8 +333,23 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
     }
 
     if (type.isTupleType?.() || (type.objectFlags & ObjectFlags.Tuple)) {
+      const target = type.isTupleType?.() ? type.getTarget() : type
+      const elemFlags = target.elementFlags ?? []
       const args = checker.getTypeArguments(type) ?? []
-      return `${type.getTargetType?.()?.readonly ? 'readonly ' : ''}[${args.map((a) => emit(a, loc, new Set(seen))).join(', ')}]`
+      const elems = args.map((a, i) => {
+        const flag = elemFlags[i] ?? 0
+        if (flag & ElementFlags.Rest) return `...${emit(a, loc, new Set(seen))}[]`
+        if (flag & ElementFlags.Variadic) return `...${emit(a, loc, new Set(seen))}`
+        if (flag & ElementFlags.Optional) {
+          const nonUndef = (a.flags & TypeFlags.Union)
+            ? (a.getTypes() ?? []).filter((m) => !(m.flags & TypeFlags.Undefined))
+            : [a]
+          const inner = nonUndef.length === 1 ? emit(nonUndef[0], loc, new Set(seen)) : emit(a, loc, new Set(seen))
+          return `${inner}?`
+        }
+        return emit(a, loc, new Set(seen))
+      })
+      return `${target.readonly ? 'readonly ' : ''}[${elems.join(', ')}]`
     }
 
     const sym = type.getSymbol()
@@ -459,18 +484,32 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
       })
 
       const activeNodes = []
+      const exprs = []
       for (const node of entry.nodes) {
         const expr = astById.get(node.id)
-        if (!expr) continue
+        if (expr) exprs.push({ node, expr })
+      }
+      const exprTypes = exprs.length ? baseChecker.getTypeAtLocation(exprs.map((e) => e.expr)) : []
+
+      for (let i = 0; i < exprs.length; i++) {
+        const { node, expr } = exprs[i]
         let resultTypeText
         try {
-          resultTypeText = emitter.emit(baseChecker.getTypeAtLocation(expr), expr)
+          resultTypeText = emitter.emit(exprTypes[i], expr)
         } catch {
-          // Skip unportable expressions (e.g. `any` or unresolved local generic) instead of failing the file.
+          // Skip unportable expressions (e.g. unresolved local generic) instead of failing the file.
           continue
         }
         const validLocals = node.captures.filter((name) => Boolean(baseChecker.resolveName(name, SymbolFlags.Value, expr)))
-        nodeMeta.set(node.id, { node, resultTypeText, probeNames: validLocals })
+        const isStatementExpr =
+          expr.parent?.kind === SyntaxKind.ExpressionStatement &&
+          [
+            SyntaxKind.Block,
+            SyntaxKind.SourceFile,
+            SyntaxKind.CaseClause,
+            SyntaxKind.DefaultClause,
+          ].includes(expr.parent.parent?.kind)
+        nodeMeta.set(node.id, { node, resultTypeText, probeNames: validLocals, isStatementExpr })
         activeNodes.push(node)
       }
       if (activeNodes.length) nodesByFile.set(entry.file, activeNodes)
@@ -483,11 +522,12 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
         originals.get(file),
         activeNodes,
         (node) => {
-          const names = nodeMeta.get(node.id).probeNames
-          const captures = names.map((n) => `${JSON.stringify(n)}: ${n}`).join(', ')
-          return `(void { ${JSON.stringify(markerName(node.id))}: 0${captures ? `, ${captures}` : ''} }, (`
+          const { probeNames, isStatementExpr } = nodeMeta.get(node.id)
+          const captures = probeNames.map((n) => `${JSON.stringify(n)}: ${n}`).join(', ')
+          const markerObj = `{ ${JSON.stringify(markerName(node.id))}: 0${captures ? `, ${captures}` : ''} }`
+          return isStatementExpr ? `void ${markerObj}; ` : `(void ${markerObj}, (`
         },
-        () => '))',
+        (node) => (nodeMeta.get(node.id).isStatementExpr ? '' : '))'),
       )
       probeFiles.set(file, projected)
     }
@@ -511,22 +551,38 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
           }
         })
 
-        const emittedNodes = []
+        const initProps = []
         for (const node of activeNodes) {
-          const { resultTypeText } = nodeMeta.get(node.id)
           const captureObj = probeObjs.get(markerName(node.id))
-          const locals = {}
           if (captureObj) {
             for (const prop of captureObj.properties.slice(1)) {
-              try {
-                locals[prop.name.text] = probeEmitter.emit(probeChecker.getTypeAtLocation(prop.initializer), prop.initializer)
-              } catch {
-                // Silently omit unportable locals for this node
-              }
+              initProps.push({ nodeId: node.id, name: prop.name.text, initializer: prop.initializer })
             }
           }
-          emittedNodes.push({ ...node, result: resultTypeText, locals })
         }
+        const initTypes = initProps.length
+          ? probeChecker.getTypeAtLocation(initProps.map((p) => p.initializer))
+          : []
+        const localsByNodeId = new Map()
+        for (let i = 0; i < initProps.length; i++) {
+          const { nodeId, name, initializer } = initProps[i]
+          try {
+            let map = localsByNodeId.get(nodeId)
+            if (!map) {
+              map = {}
+              localsByNodeId.set(nodeId, map)
+            }
+            map[name] = probeEmitter.emit(initTypes[i], initializer)
+          } catch {
+            // Silently omit unportable locals for this node
+          }
+        }
+
+        const emittedNodes = activeNodes.map((node) => ({
+          ...node,
+          result: nodeMeta.get(node.id).resultTypeText,
+          locals: localsByNodeId.get(node.id) ?? {},
+        }))
         const relFile = activeNodes[0].relativeFile
         byFile.set(relFile, emittedNodes)
       }

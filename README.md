@@ -2,9 +2,9 @@
 
 A prototype for replacing expressions inside application code from a test with full native TypeScript inference—without editing application code or writing generated `.d.ts` files to disk.
 
-A TypeScript 7.1 content mapper (`points.ep`) indexes the configured target modules into a virtual `ExecutionPointFileRegistry`. Tests select expressions imperatively using either a **narrowing visitor (`select`)** or a **typed fluent navigator (`fromFile`)**, and a Vite plugin instruments only the target modules in memory.
+A TypeScript 7.1 content mapper (`points.ep`) indexes the configured target modules into a virtual `ExecutionPointFileRegistry`. Tests select expressions imperatively using a **narrowing visitor (`select`)**, and a Vite plugin instruments only the target modules in memory.
 
-**Status:** the runtime, Vitest integration, both imperative APIs (`select` and `fromFile`), and native TypeScript 7.1 content mapper (`tsc --noEmit --runExternalCode` + VS Code TypeScript 7.1 LSP) all work with zero generated files on disk.
+**Status:** the runtime, Vitest integration, the `select` visitor API, and native TypeScript 7.1 content mapper (`tsc --noEmit --runExternalCode` + VS Code TypeScript 7.1 LSP) all work with zero generated files on disk.
 
 ## Run it
 
@@ -26,8 +26,6 @@ pnpm verify
 ## Select an execution point in a test
 
 The package is currently named `execution-points-prototype`.
-
-### Option A: Imperative narrowing visitor (`select`)
 
 ```ts
 import { select } from 'execution-points-prototype'
@@ -59,24 +57,6 @@ const result = quotePoint.withReplacement(
 - `node` is a discriminated union of every selectable expression in `'examples/checkout.ts'` (`kind`, `inFunction`, `callee` / `operator`, `nth`).
 - Returning 0 nodes or 2+ nodes (ambiguous match) is rejected at compile time.
 - `.capture(...)` autocompletes every in-scope local at that expression and rejects unknown binding names immediately.
-
-### Option B: Typed fluent navigator (`fromFile`)
-
-```ts
-import { fromFile } from 'execution-points-prototype'
-import { invoice } from './expressions'
-
-const sumPoint = fromFile('examples/expressions.ts', (f) =>
-  f.fn('invoice').binary('+').capture('base', 'fee'),
-)
-
-const result = sumPoint.withReplacement(({ locals, original }) => {
-  return original() * 2 + locals.fee
-}, () => invoice(10))
-```
-
-- Every step autocompletes (`f.fn(...)` → `.call(...)` / `.binary(...)` / `.conditional()` → `.capture(...)`).
-- If a scope has multiple matching calls/operators, TypeScript requires the 0-based `nth` index (e.g. `.call('send', 0)`).
 
 The replacement's result must match the selected expression's inferred type. A `Promise<number>` expression requires a `Promise<number>` replacement; a synchronous `Quote` expression requires a `Quote` replacement. The checker does not automatically unwrap promises.
 

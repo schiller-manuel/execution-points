@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { existsSync, globSync, readFileSync } from 'node:fs'
 import { relative, resolve } from 'node:path'
 import { API } from 'typescript/sync'
@@ -10,6 +9,8 @@ const indexableKinds = new Set([
   SyntaxKind.BinaryExpression,
   SyntaxKind.ConditionalExpression,
 ])
+let defaultApi
+const getDefaultApi = () => (defaultApi ??= new API())
 
 export function loadManifest(root = process.cwd(), file = 'points.ep') {
   const manifestPath = resolve(root, file)
@@ -30,9 +31,6 @@ export function resolveTargetFiles(root, configuredTargets = []) {
 }
 
 function isSelectableExpression(node) {
-  if (!indexableKinds.has(node.kind)) return false
-  if (node.kind === SyntaxKind.BinaryExpression && isAssignmentOp(node.operatorToken.kind)) return false
-
   let cur = node
   while (
     cur.parent &&
@@ -47,42 +45,35 @@ function isSelectableExpression(node) {
     cur = cur.parent
   }
   const p = cur.parent
-  if (
-    p &&
-    (((p.kind === SyntaxKind.CallExpression || p.kind === SyntaxKind.NewExpression) && p.expression === cur) ||
-      (p.kind === SyntaxKind.TaggedTemplateExpression && p.tag === cur) ||
-      (p.kind === SyntaxKind.BinaryExpression && p.left === cur && isAssignmentOp(p.operatorToken.kind)) ||
-      p.kind === SyntaxKind.DeleteExpression ||
-      p.kind === SyntaxKind.PostfixUnaryExpression ||
-      (p.kind === SyntaxKind.PrefixUnaryExpression &&
-        [SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken].includes(p.operator)))
-  ) {
-    return false
-  }
+  return (
+    indexableKinds.has(node.kind) &&
+    !(node.kind === SyntaxKind.BinaryExpression && isAssignmentOp(node.operatorToken.kind)) &&
+    !(
+      p &&
+      (((p.kind === SyntaxKind.CallExpression || p.kind === SyntaxKind.NewExpression) && p.expression === cur) ||
+        p.kind === SyntaxKind.TaggedTemplateExpression ||
+        (p.kind === SyntaxKind.BinaryExpression && p.left === cur && isAssignmentOp(p.operatorToken.kind)) ||
+        p.kind === SyntaxKind.DeleteExpression ||
+        p.kind === SyntaxKind.PostfixUnaryExpression ||
+        (p.kind === SyntaxKind.PrefixUnaryExpression &&
+          [SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken].includes(p.operator)))
+    ) &&
+    !hasUnsupportedSyntax(node)
+  )
+}
 
-  let unsupported = false
-  const check = (part) => {
-    if (unsupported) return
-    if (
-      [SyntaxKind.AwaitExpression, SyntaxKind.YieldExpression, SyntaxKind.SuperKeyword].includes(part.kind) ||
-      part.questionDotToken ||
-      (part.flags & NodeFlags.OptionalChain)
-    ) {
-      unsupported = true
-      return
-    }
-    if (
-      part.kind === SyntaxKind.CallExpression &&
+function hasUnsupportedSyntax(part) {
+  if (
+    [SyntaxKind.AwaitExpression, SyntaxKind.YieldExpression, SyntaxKind.SuperKeyword].includes(part.kind) ||
+    part.questionDotToken ||
+    (part.flags & NodeFlags.OptionalChain) ||
+    (part.kind === SyntaxKind.CallExpression &&
       (part.expression.kind === SyntaxKind.ImportKeyword ||
-        (part.expression.kind === SyntaxKind.Identifier && part.expression.text === 'eval'))
-    ) {
-      unsupported = true
-      return
-    }
-    part.forEachChild(check)
+        (part.expression.kind === SyntaxKind.Identifier && part.expression.text === 'eval')))
+  ) {
+    return true
   }
-  check(node)
-  return !unsupported
+  return Boolean(part.forEachChild(hasUnsupportedSyntax))
 }
 
 function enclosingFunctionName(node) {
@@ -96,13 +87,13 @@ function enclosingFunctionName(node) {
       return 'constructor'
     case SyntaxKind.FunctionExpression:
     case SyntaxKind.ArrowFunction: {
-      if (node.name?.text) return node.name.text
-      const parent = node.parent
-      if (parent?.kind === SyntaxKind.VariableDeclaration && parent.name?.kind === SyntaxKind.Identifier) {
+      if (node.name) return node.name.text
+      const { parent } = node
+      if (parent.kind === SyntaxKind.VariableDeclaration && parent.name.kind === SyntaxKind.Identifier) {
         return parent.name.text
       }
-      if (parent?.kind === SyntaxKind.PropertyAssignment && parent.name?.text) {
-        return parent.name.text
+      if (parent.kind === SyntaxKind.PropertyAssignment) {
+        return parent.name.text ?? '(anonymous)'
       }
       return '(anonymous)'
     }
@@ -115,7 +106,7 @@ function callCalleeName(node) {
   const expr = node.expression
   if (expr.kind === SyntaxKind.Identifier) return expr.text
   if (expr.kind === SyntaxKind.PropertyAccessExpression) return expr.name.text
-  if (expr.kind === SyntaxKind.ElementAccessExpression && expr.argumentExpression?.kind === SyntaxKind.StringLiteral) {
+  if (expr.kind === SyntaxKind.ElementAccessExpression && expr.argumentExpression.kind === SyntaxKind.StringLiteral) {
     return expr.argumentExpression.text
   }
   return '(anonymous)'
@@ -124,34 +115,36 @@ function callCalleeName(node) {
 function collectBindingEntries(nameNode, endPos, out) {
   if (!nameNode) return
   if (nameNode.kind === SyntaxKind.Identifier) {
-    if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(nameNode.text)) {
-      out.push({ name: nameNode.text, readyAt: endPos })
-    }
+    out.push({ name: nameNode.text, readyAt: endPos })
     return
   }
-  if (nameNode.elements) {
-    for (const el of nameNode.elements) collectBindingEntries(el.name, endPos, out)
-  }
+  for (const el of nameNode.elements) collectBindingEntries(el.name, endPos, out)
 }
 
 function scopeBindingsOf(node) {
+  if (node.kind === SyntaxKind.SourceFile) return []
   const entries = []
   if (node.parameters) {
-    for (const p of node.parameters) collectBindingEntries(p.name, -1, entries)
+    for (const p of node.parameters) collectBindingEntries(p.name, p.end, entries)
   }
   if (node.variableDeclaration) {
-    collectBindingEntries(node.variableDeclaration.name, -1, entries)
+    collectBindingEntries(node.variableDeclaration.name, node.variableDeclaration.end, entries)
+  }
+  if (
+    (node.kind === SyntaxKind.ForInStatement || node.kind === SyntaxKind.ForOfStatement) &&
+    node.initializer.kind === SyntaxKind.VariableDeclarationList
+  ) {
+    for (const decl of node.initializer.declarations) {
+      collectBindingEntries(decl.name, node.expression.end, entries)
+    }
+    return entries
   }
   const statements =
-    node.statements ??
-    ([SyntaxKind.ForStatement, SyntaxKind.ForInStatement, SyntaxKind.ForOfStatement].includes(node.kind)
-      ? [node.initializer]
-      : [])
+    node.statements ?? (node.kind === SyntaxKind.ForStatement && node.initializer ? [node.initializer] : [])
   for (const stmt of statements) {
-    if (!stmt) continue
-    if (stmt.kind === SyntaxKind.FunctionDeclaration && stmt.name) {
+    if (stmt.kind === SyntaxKind.FunctionDeclaration) {
       entries.push({ name: stmt.name.text, readyAt: -1 })
-    } else if (stmt.kind === SyntaxKind.ClassDeclaration && stmt.name) {
+    } else if (stmt.kind === SyntaxKind.ClassDeclaration) {
       entries.push({ name: stmt.name.text, readyAt: stmt.end })
     } else if (stmt.kind === SyntaxKind.VariableStatement) {
       for (const decl of stmt.declarationList.declarations) collectBindingEntries(decl.name, decl.end, entries)
@@ -178,6 +171,7 @@ export function indexTargetFile(file, source, root, api) {
       for (const frame of localScopeStack) {
         for (const entry of frame) {
           if (entry.readyAt <= pos) names.add(entry.name)
+          else names.delete(entry.name)
         }
       }
       return [...names].sort()
@@ -186,15 +180,13 @@ export function indexTargetFile(file, source, root, api) {
     const visit = (node) => {
       const fnName = enclosingFunctionName(node)
       if (fnName !== undefined) fnStack.push(fnName)
-
-      const isLocalScope = node.kind !== SyntaxKind.SourceFile
-      const frame = isLocalScope ? scopeBindingsOf(node) : []
-      if (frame.length) localScopeStack.push(frame)
+      localScopeStack.push(scopeBindingsOf(node))
 
       if (isSelectableExpression(node)) {
         const start = node.getStart(tree)
         const end = node.end
-        const inFunction = fnStack.length ? fnStack[fnStack.length - 1] : null
+        const inFunction =
+          fnStack.findLast((name) => name !== '(anonymous)') ?? (fnStack.length ? '(anonymous)' : null)
         const kind =
           node.kind === SyntaxKind.CallExpression
             ? 'CallExpression'
@@ -207,14 +199,11 @@ export function indexTargetFile(file, source, root, api) {
             : kind === 'BinaryExpression'
               ? { operator: source.slice(node.operatorToken.getStart(tree), node.operatorToken.end) }
               : {}
-        const counterKey = `${inFunction ?? ''}\0${kind}\0${extra.callee ?? extra.operator ?? ''}`
-        const nth = nthCounters.get(counterKey) ?? 0
-        nthCounters.set(counterKey, nth + 1)
-
-        const id = createHash('sha256')
-          .update(`${relativeFile}\0${source}\0${start}:${end}`)
-          .digest('hex')
-          .slice(0, 12)
+        const namePart = extra.callee ?? extra.operator ?? '?'
+        const scopePrefix = `${relativeFile}#${inFunction ?? '<top>'}:${kind}:${namePart}`
+        const nth = nthCounters.get(scopePrefix) ?? 0
+        nthCounters.set(scopePrefix, nth + 1)
+        const id = `${scopePrefix}:${nth}`
 
         nodes.push({
           id,
@@ -232,7 +221,7 @@ export function indexTargetFile(file, source, root, api) {
 
       node.forEachChild(visit)
 
-      if (frame.length) localScopeStack.pop()
+      localScopeStack.pop()
       if (fnName !== undefined) fnStack.pop()
     }
 
@@ -248,21 +237,16 @@ export function buildTargetPlan(options) {
   const root = resolve(options.root ?? process.cwd())
   const overrides = options.overrides ?? new Map()
   const read = (file) => (overrides.has(file) ? overrides.get(file) : readFileSync(file, 'utf8'))
-  const ownApi = !options.api
-  const api = options.api ?? new API({ cwd: root })
+  const api = options.api ?? getDefaultApi()
 
-  try {
-    const files = []
-    for (const file of resolveTargetFiles(root, options.targets ?? [])) {
-      if (!overrides.has(file) && !existsSync(file)) continue
-      files.push(indexTargetFile(file, read(file), root, api))
-    }
-    return {
-      root,
-      tsconfig: resolve(root, options.tsconfig ?? 'tsconfig.json'),
-      files,
-    }
-  } finally {
-    if (ownApi) api.close()
+  const files = []
+  for (const file of resolveTargetFiles(root, options.targets ?? [])) {
+    if (!overrides.has(file) && !existsSync(file)) continue
+    files.push(indexTargetFile(file, read(file), root, api))
+  }
+  return {
+    root,
+    tsconfig: resolve(root, options.tsconfig ?? 'tsconfig.json'),
+    files,
   }
 }
