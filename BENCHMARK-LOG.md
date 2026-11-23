@@ -203,3 +203,23 @@ A second probe-backed re-review of `c4c9e6f` (`bench-v2.1-re-review.md`) confirm
    - Meanwhile `claude-opus-5.5` in Control spent **316.5s / 112.8 credits / 1.42M tokens** struggling on `stale-cache` and failed (`adqRed=NO`, `3/3` FG), whereas Treatment `claude-opus-5.5` solved cleanly with `execution-points` in **99.2s / 49.3 credits** (`0/3` FG).
 3. **Discordance & power calibration for the full matrix:**
    - `io-seam` (`stale-cache-seam`, `single-flight`) is at ceiling (`6/6` in both arms — 0 discordant pairs!). Future matrix budget should focus on harder tasks with real discordance (`cancel-commit`, `cross-module-transfer`, `retry-storm`, `debounce-search`, `event-order`) and closed-module Stratum A (`stale-cache`, `token-session`, `double-submit`), plus `low` reasoning levels where task difficulty isn't saturated.
+
+### 2026-11-23 — v2.2 Remaining 6 Tasks & Full 10-Task Pooled Pilot (58 Started Trials / 29 Matched Blocks, `c70758a`)
+*Batch 2 Run ID: `2edc0402-1b2c-4a92-91f7-298c5a83382e` · Output: `/Users/caligano/.ep-bench-results/v2-2026-11-23T18-59-46-092Z` · 36 trials / 18 blocks (`retry-storm`, `event-order`, `cross-module-transfer`, `debounce-search`, `token-session`, `double-submit`) · `1,230.3` credits · Seed 43 · Identical provenance hashes to Batch 1 (`harness=72980c4288ec98f3`, `cal=7eba7597662f8546`, `tool=b3c2647af9f71716`), pooled cleanly by `bench/analyze.mjs` with zero warnings.*
+
+- **Batch 2 health:** Preflight PASS (`17.8` credits), `0/36` infra failures, `0/36` write denials, `0/36` global monkey-patching, `34/36` hidden oracle passes (both oracle failures were `claude-opus-5.5` Control & Treatment on `double-submit`, hitting the unstated `D-05` concurrent-joiner-failure law where a per-key queue retries and succeeds instead of sharing the first caller's error).
+
+#### Pooled 10-Task Results (58 Started Trials / 29 Matched Blocks, `bench/analyze.mjs`)
+
+| Stratum | Blocks | Control `solved` | Treatment `solved` | EP Adoption (Trt) | E9 FG (adq) | E9 VFPass (adq) | Billed Credits (Ctrl vs. Trt / solved) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **Stratum B (`io-seam`, 5 tasks)** | 15 | 15/15 (100.0%) | 15/15 (100.0%) | 10/15 (66.7%) | 0/30 vs. 0/30 | 24/24 vs. 24/24 | `37.1` vs. `37.5` |
+| **Stratum C (`real-async`, 2 tasks)** | 6 | 4/6 (66.7%) | 5/6 (83.3%) | 2/6 (33.3%) | 0/8 vs. 0/10 | 4/4 vs. 5/5 | `54.6` vs. `50.0` |
+| **Primary (Strata B + C equal-capability)** | **21** | **19/21 (90.5%)** | **20/21 (95.2%)** | **12/21 (57.1%)** | **0/38 vs. 0/40** | **28/28 vs. 29/29** | CMH `p=1`, exact McNemar `p=1`, Newcombe RD `+4.8pp [-9.3, +21.7]` |
+| **Stratum A (`closed-module`, 3 tasks, separate)** | **8** | **3/8 (37.5%)** | **7/8 (87.5%)** | **8/8 (100.0%)** | **1/7 (14.3%) vs. 0/19 (0.0%)** | **7/7 vs. 21/25 (`sel=4`, `assert=0`, `to=0`)** | **`121.5` vs. `42.0`** · CMH `p=0.134`, exact McNemar `p=0.125`, Newcombe RD **`+50.0pp [+10.4, +73.0]`** |
+
+#### Model Adoption & Cost Breakdown (All 29 Matched Blocks)
+- **Organic `execution-points` adoption in Treatment:** `20/29` (69.0%) overall — `gemini-4-neon` **9/9 (100%)**, `claude-opus-5.5` **8/10 (80%)**, `gpt-6.2-astra` **3/10 (30%, 3/3 on Stratum A)**.
+- **Per-task Stratum A breakdown:** `token-session` Control `0/3` vs. Treatment `3/3`; `stale-cache` Control `1/2` (via `createHook`+`receiveMessageOnPort`, `1/3` FG) vs. Treatment `2/2` (`0/6` FG); `double-submit` Control `2/3` vs. Treatment `2/3` (both non-solves hit `D-05`).
+- **Total credits:** Control `1,139.8` cr (`51.8`/solved) vs. Treatment `1,106.1` cr (`41.0`/solved) — across Stratum A, Treatment was **2.9× cheaper per solved task** (`42.0` vs. `121.5` cr/solved).
+- **Zero discordant losses:** Across all 29 matched blocks, there were **5 Treatment-only wins and 0 Control-only wins** (`4` in Stratum A, `1` in Stratum C). Note: Pilot 1's 1 `ungradable` row (`cancel-commit | control | gemini`) was traced by the reviewer via `pmset -g log` to macOS Clamshell Sleep on battery; re-graded cleanly at `c70758a`, it remains `solved=false` (missed `CC-M1`). Batch 2 ran under `caffeinate -i -m` with zero sleep interruptions.
