@@ -337,7 +337,7 @@ export function computeProvenance() {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim()
-    const status = execFileSync('git', ['status', '--porcelain'], {
+    const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
