@@ -46,7 +46,9 @@ export function estimateUsdForUsage(modelId, usage) {
 export function extractUsageMetrics(usageJson, requestedModel) {
   if (!usageJson || typeof usageJson !== 'object') {
     return {
-      servedModel: requestedModel,
+      usageMissing: true,
+      servedModel: null,
+      requestedModel,
       modelCalls: 0,
       inputTokens: 0,
       outputTokens: 0,
@@ -54,8 +56,8 @@ export function extractUsageMetrics(usageJson, requestedModel) {
       cacheWriteTokens: 0,
       reasoningTokens: 0,
       totalTokens: 0,
-      aiCredits: 0,
-      premiumRequests: 0,
+      aiCredits: null,
+      premiumRequests: null,
       apiDurationMs: 0,
       estimatedUsd: null,
       perModelBreakdown: {},
@@ -129,7 +131,9 @@ export function extractUsageMetrics(usageJson, requestedModel) {
       : 0
 
   return {
-    servedModel: usageJson.currentModel ?? modelIds[0] ?? requestedModel,
+    usageMissing: false,
+    servedModel: usageJson.currentModel ?? modelIds[0] ?? null,
+    requestedModel,
     modelCalls,
     inputTokens,
     outputTokens,

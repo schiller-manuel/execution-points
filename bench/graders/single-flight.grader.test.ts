@@ -5,10 +5,11 @@ import { failNextRefresh, getRefreshCallCount } from './src/auth-client'
 import { getToken, invalidateToken, resetTokenCache } from './src/token-cache'
 
 describe('hidden oracle grader: single-flight (yield-engine)', () => {
-  test('preserves warm-cache hits and basic invalidation', async () => {
+  test('preserves cold yields, warm-cache hits, and basic invalidation', async () => {
     resetTokenCache()
-    const t1 = await getToken('acme')
+    const { result: t1, yields: coldYields } = await countYields(() => getToken('acme'))
     expect(t1).toMatch(/^tok-acme-/)
+    expect(coldYields).toBeGreaterThanOrEqual(1)
     expect(getRefreshCallCount('acme')).toBe(1)
 
     const { result: t2, yields } = await countYields(() => getToken('acme'))

@@ -23,22 +23,29 @@ async function assertConsistentProfile(id: string, expectedName: string) {
 }
 
 describe('hidden oracle grader: stale-cache (yield-engine)', () => {
-  test('preserves baseline behavior, validation, and warm-cache hits', async () => {
+  test('preserves baseline behavior, validation, async I/O yields, and warm-cache hits', async () => {
     resetStore()
     expect(await getProfile('missing')).toBeNull()
 
     seedProfile('u1', 'Alice')
-    const first = await getProfile('u1')
+    // Cold read must perform real async I/O (catches E-04 sync bypass)
+    const { result: first, yields: coldYields } = await countYields(() => getProfile('u1'))
     expect(first).toEqual({ id: 'u1', name: 'Alice', displayName: 'ALICE' })
+    expect(coldYields).toBeGreaterThanOrEqual(2)
 
     // Warm-cache read must NOT bypass the cache (0 async yields)
     const { result: warm, yields } = await countYields(() => getProfile('u1'))
     expect(warm).toEqual({ id: 'u1', name: 'Alice', displayName: 'ALICE' })
     expect(yields).toBe(0)
 
+    // Update must perform real async I/O (catches E-04 sync bypass)
+    const { result: updated, yields: updateYields } = await countYields(() => updateProfile('u1', 'Alice2'))
+    expect(updated).toEqual({ id: 'u1', name: 'Alice2', displayName: 'ALICE2' })
+    expect(updateYields).toBeGreaterThanOrEqual(3)
+
     // Empty/whitespace names must reject without corrupting cache or DB
     await expect(updateProfile('u1', '   ')).rejects.toThrow()
-    await assertConsistentProfile('u1', 'Alice')
+    await assertConsistentProfile('u1', 'Alice2')
   })
 
   test('exhaustive staggered cold-read vs update interleavings (catches V0 and V1 residual race)', async () => {

@@ -133,4 +133,33 @@ We rebuilt `bench/` to address every **P0, P1, and P2** finding from the critica
 | `control` | **FAIL** | PASS | **NO** (`timeout` on V0/V2/V3) | YES | 0/3 / 0/3 | `module-mock` (`node:timers/promises` rewrite) | 150,942 | `$0.1296` | 83.0 |
 | `treatment` | **PASS** | PASS | **YES** (3/3 genuine assertions) | YES | 0/3 / 0/3 | `execution-points` (`select()` + `withReplacement()`) | 211,659 | `$0.1514` | 60.3 |
 
-*Takeaway:* With all P0 + P1 + P2 safeguards active, Treatment organically adopted `execution-points`, passed virtual contract checking (`tsc --noEmit --runExternalCode`), reproduced both bugs on untouched baseline and single-bug mutants with zero false greens and zero false red assertions, and finished 23s faster than Control—while Control's production-seam rewrite was cleanly caught by `timeout != true_red`. Ready for larger multi-task, multi-model matrix runs across all 10 tasks and 3 strata.
+*Takeaway:* With all P0 + P1 + P2 safeguards active, Treatment organically adopted `execution-points`, passed virtual contract checking (`tsc --noEmit --runExternalCode`), reproduced both bugs on untouched baseline and single-bug mutants with zero false greens, and finished 23s faster than Control—while Control's production-seam rewrite was caught by `timeout != true_red`. Note: this 2-trial run predated `d84f5b4` (`--testTimeout=1500`) and did not constitute an effect estimate.
+
+---
+
+## v2.1 — Adversarial Re-Review & Hardening (2026-11-23)
+
+After `d84f5b4`, we had the independent reviewer (`Benchmark critical review`, `claude-opus-5.5` `max`) probe v2 end-to-end (`bench-v2-re-review.md`). While the new `yield-engine` hidden oracles graded **60/60** variants accurately (including all 17 independently written v0 variants), adversarial probing exposed critical grading, isolation, and operational holes—all of which we closed in v2.1:
+
+1. **Config shadowing (`R-19`):** Own-fix tests ran inside the agent's workspace without `--config`, so an agent-written `vitest.config.ts` with `passWithNoTests: true` overrode pristine `vitest.config.mjs`. **Fixed:** Own-fix runs now execute in a brand-new sandbox with pristine configs, explicit `--config <pristine>`, 0-test runs never pass, and workspace diffs record `addedRootFiles` / `modifiedConfigs`.
+2. **`.spec.ts` oracle escape (`R-01`):** `yield-plugin.mjs` skipped `*.spec.*` by filename while `copyNonTestSrc` excluded only `*.test.ts`. **Fixed:** `yield-plugin.mjs` now transforms by role (skipping only `__grader__.test.ts` and `__visible__.test.ts`), `copyProductionSrcFromMap` uses one predicate (`excludeTestRel`), and `auditProductionAst` rejects unverified re-exports.
+3. **Runtime enforcement + full-tree AST audit (`E-01`, `E-05`, `A-01`, `R-11`, `R-12`, `R-14`, `R-15`):** All 33 AST evasions (aliases, bracket access, support files, `Reflect.defineProperty`, `EventTarget`, `Atomics.wait`, dead-code fake timers, `export namespace`/`enum`) are now blocked BOTH at runtime via `bench/runtime-guard.setup.mjs` (non-configurable global/prototype traps + real-sleep detector injected via `setupFiles`) AND by a hardened full-tree AST audit across all files under `src/`.
+4. **Sync-bypass (`E-04`):** Keeping private helpers `async` without calling them is now caught by BOTH AST uncalled-private checks AND minimum cold-yield assertions (`countYields`) in the hidden oracles.
+5. **Two-sided adequacy + deadlock-free guides (`E-06`, `L-11`, `G-01`, `R-09`, `E9-01`, `E9-02`):** Both guides previously told agents to `await` an overlapping same-key operation while holding a barrier (deadlocking queue-based fixes like `V9`, causing 3 of 4 live trials to hang on `V9`). Updated both guides to start overlapping operations without awaiting + `settle()` (with symmetric `vi.mock` and `select()` examples), added `refFixPass` to `adequateReproduction` (killing `E-06` fingerprint cheats), added design-diverse `V9_REV` (non-queue revision guard) to `VALID_FIX_VARIANTS`, and changed E9's headline to `validFixPassRate` counting timeouts as false-red.
+6. **True isolation, blinding & safe CLI (`I-01`–`I-04`, `R-02`–`R-06`, `OPS-01`, `OPS-02`):**
+   - `bench/toolchain.mjs` rewrites pnpm `.bin` shims to remove all hardcoded `REPO_ROOT` `NODE_PATH` strings (`I-03`) and hashes all grader source files + `runtime-guard.setup.mjs` (`R-02`).
+   - Replaced `--allow-all-paths` / `--allow-all-tools` with `--disallow-temp-dir --add-dir <workspaceDir> --allow-tool "write(<ws>/src/**)" --allow-tool "shell(npm test)" --allow-tool "shell(npm run)"` + `--excluded-tools web_fetch web_search` (`I-02`), explicit environment allowlist + per-trial `TMPDIR` (`I-04`), blinded paths/package names (`R-06`), startup sweep of stale `ep-*` dirs (`I-01`), and immediate Phase-1 workspace snapshot + delete (`R-03`).
+   - Guarded `main()` behind entry-point check, required explicit `--run --tasks ... --models ...` (printing dry-run plan otherwise), added `--max-total-credits`, and added `SIGINT`/`SIGTERM` handlers that kill agent process groups and write `aborted` ITT rows (`OPS-01`, `OPS-02`, `R-04`).
+7. **Provenance, telemetry & statistics (`L-01`, `L-05`, `R-17`, `ST-01`–`ST-07`):**
+   - Every row stamps `runId`, `gitCommit`, `gitDirty`, `harnessSha256`, `toolSha256`, `tasksSha256`; `usageMissing: true` when `usage.json` is absent (`ST-07`); `parseCopilotEvents` parses every file inside `apply_patch` (`L-05`) and scans shell reads (`R-17`).
+   - `bench/analyze.mjs` deduplicates by `(runId, trialId)`, refuses to pool mismatched provenance without `--allow-mixed`, stratifies by `taskId × actualModel × reasoning × promptStyle`, prints exact two-sided McNemar p-values + Newcombe paired-difference 95% CIs (no zero-width bootstrap intervals), reports Stratum A separately from equal-capability Strata B+C, and reports `ungradable` sensitivity.
+
+### 2026-11-23 — v2.1 Hardened Self-Test (`node bench/run.mjs --self-test`)
+- **Toolchain symlink + `.bin` shim leak scan & full grader checksum:** PASS.
+- **Hardened AST auditor (20 test cases including A-01 evasions + 7 prod cases):** PASS.
+- **Treatment virtual contract check & `timeout != true_red`:** PASS.
+- **6 adversarial must-reject cheats (`E-01`, `E-04`, `E-05`, `E-06`, `R-19`, `R-01`):** 6/6 REJECTED (`solved=false`).
+- **3 legal adequacy witnesses (`W-01` Treatment on `V9` and `V9_REV`, Control on `stale-cache-seam`):** 3/3 PASSED (`solved=true`, `adequateReproduction=true`).
+- **Baseline workspaces (10 tasks × 2 arms, including `debounce-search` with `src/search-controller.ts`):** 20/20 PASS.
+- **Grader calibration corpus (44 variants including `V9r` revision design):** 44/44 PASS.
+- **Production AST audit on 10 reference fixes:** 10/10 PASS.

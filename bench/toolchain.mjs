@@ -2,12 +2,15 @@
  * Hermetic outside-repo toolchain provisioning using APFS Copy-on-Write (`cp -cR`)
  * on macOS or `--reflink=auto` on Linux.
  *
- * Guarantees:
- * - No symlink inside any trial workspace resolves inside REPO_ROOT.
+ * Guarantees (closes I-01, I-03, R-02):
+ * - No symlink AND no `.bin` shim anywhere inside trial/grader `node_modules`
+ *   references REPO_ROOT (rewrites pnpm's embedded `NODE_PATH` shims!).
  * - Trial workspaces never share a writable `node_modules` with each other or the grader.
  * - Trial workspaces never contain `@tanstack/oracles`, `fast-check`, or hidden graders.
  * - Treatment workspaces receive a real file copy of `execution-points-prototype`
  *   (`package.json` + `src/`), never a symlink back to the repository.
+ * - Full grader checksum hashes BOTH grader `node_modules` binaries AND every file
+ *   under `bench/graders/` plus `bench/runtime-guard.setup.mjs`.
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -21,13 +24,14 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 function hashFiles(paths) {
   const h = createHash('sha256')
-  for (const p of paths) {
+  for (const p of [...paths].sort()) {
     if (existsSync(p)) {
       h.update(p)
       h.update(readFileSync(p))
@@ -53,17 +57,84 @@ export function cloneDirCoW(src, dest) {
 }
 
 /**
- * Recursively checks top-level and .bin entries (up to depth 3) to verify
- * no symlink resolves inside `forbiddenRoot`.
+ * Rewrites pnpm's `.bin` shell shims inside `nmDir` so hardcoded `NODE_PATH`
+ * paths pointing back into `repoRoot` are replaced with `nmDir` (closes I-03).
+ */
+function rewriteBinShims(nmDir, repoRoot) {
+  const rawRoot = path.resolve(repoRoot)
+  const realRoot = realpathSync(repoRoot)
+  const realNm = realpathSync(nmDir)
+  const needles = [
+    ...new Set([
+      path.join(rawRoot, 'node_modules'),
+      path.join(realRoot, 'node_modules'),
+      rawRoot,
+      realRoot,
+    ]),
+  ]
+
+  function walkBins(dir) {
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      if (entry.isSymbolicLink()) continue
+      if (entry.isDirectory()) {
+        if (entry.name === '.bin') {
+          let binEntries = []
+          try {
+            binEntries = readdirSync(full, { withFileTypes: true })
+          } catch {
+            continue
+          }
+          for (const b of binEntries) {
+            if (!b.isFile() || b.isSymbolicLink()) continue
+            const bf = path.join(full, b.name)
+            let content
+            try {
+              content = readFileSync(bf, 'utf8')
+            } catch {
+              continue
+            }
+            if (content.includes('\0')) continue
+            let updated = content
+            for (const needle of needles) {
+              if (updated.includes(needle)) {
+                const replacement = needle.endsWith('node_modules') ? realNm : path.dirname(realNm)
+                updated = updated.replaceAll(needle, replacement)
+              }
+            }
+            if (updated !== content) {
+              writeFileSync(bf, updated, { mode: lstatSync(bf).mode })
+            }
+          }
+        } else {
+          walkBins(full)
+        }
+      }
+    }
+  }
+
+  walkBins(nmDir)
+}
+
+/**
+ * Verifies NO symlink AND NO `.bin` shim anywhere in `dir` resolves or refers
+ * to `forbiddenRoot` (closes I-03).
  */
 export function assertNoRepoLeak(dir, forbiddenRoot) {
+  const forbiddenRaw = path.resolve(forbiddenRoot)
   const forbiddenReal = realpathSync(forbiddenRoot)
-  const forbiddenPrefix = forbiddenReal.endsWith(path.sep)
-    ? forbiddenReal
-    : forbiddenReal + path.sep
+  const forbiddenPrefixes = [
+    forbiddenReal.endsWith(path.sep) ? forbiddenReal : forbiddenReal + path.sep,
+    forbiddenRaw.endsWith(path.sep) ? forbiddenRaw : forbiddenRaw + path.sep,
+  ]
 
   function walk(current, depth) {
-    if (depth > 3) return
     let entries
     try {
       entries = readdirSync(current)
@@ -85,11 +156,33 @@ export function assertNoRepoLeak(dir, forbiddenRoot) {
         } catch {
           continue
         }
-        if (resolved === forbiddenReal || resolved.startsWith(forbiddenPrefix)) {
-          throw new Error(`Toolchain isolation leak: ${full} resolves into repo (${resolved})`)
+        if (
+          resolved === forbiddenReal ||
+          resolved === forbiddenRaw ||
+          forbiddenPrefixes.some((p) => resolved.startsWith(p))
+        ) {
+          throw new Error(`Toolchain symlink leak: ${full} resolves into repo (${resolved})`)
         }
-      } else if (st.isDirectory() && name !== '.pnpm') {
-        walk(full, depth + 1)
+      } else if (st.isDirectory()) {
+        if (name === '.bin') {
+          for (const bName of readdirSync(full)) {
+            const bf = path.join(full, bName)
+            let bst
+            try {
+              bst = lstatSync(bf)
+            } catch {
+              continue
+            }
+            if (!bst.isFile() || bst.isSymbolicLink()) continue
+            const text = readFileSync(bf, 'utf8')
+            if (text.includes('\0')) continue
+            if (text.includes(forbiddenReal) || text.includes(forbiddenRaw)) {
+              throw new Error(`Toolchain shim leak: ${bf} contains repo path (${forbiddenReal})`)
+            }
+          }
+        } else if (depth < 6) {
+          walk(full, depth + 1)
+        }
       }
     }
   }
@@ -109,7 +202,6 @@ function stripNonTrialEntries(nmDir) {
   for (const rel of remove) {
     rmSync(path.join(nmDir, rel), { recursive: true, force: true })
   }
-  // Remove any @tanstack or fast-check packages inside .pnpm store as well
   const pnpmDir = path.join(nmDir, '.pnpm')
   if (existsSync(pnpmDir)) {
     for (const entry of readdirSync(pnpmDir)) {
@@ -122,6 +214,35 @@ function stripNonTrialEntries(nmDir) {
       }
     }
   }
+}
+
+/**
+ * Startup sweep of any orphaned `ep-grader-*` / `ep-bench-toolchains-*` / `ep-ws-*`
+ * temp dirs left behind by killed prior runs (closes I-01).
+ */
+export function sweepStaleTempDirs() {
+  const root = tmpdir()
+  const prefixes = [
+    'ep-grader-',
+    'ep-bench-toolchains-',
+    'ep-bench-',
+    'ep-ws-',
+    'ep-test-eval-',
+    'ep-copilot-home-',
+    'ep-trial-tmp-',
+  ]
+  let removed = 0
+  try {
+    for (const name of readdirSync(root)) {
+      if (prefixes.some((p) => name.startsWith(p))) {
+        rmSync(path.join(root, name), { recursive: true, force: true })
+        removed++
+      }
+    }
+  } catch {
+    // best-effort
+  }
+  return removed
 }
 
 export function prepareToolchains(repoRoot) {
@@ -142,15 +263,17 @@ export function prepareToolchains(repoRoot) {
   const treatmentNm = path.join(treatmentRoot, 'node_modules')
   const graderNm = path.join(graderRoot, 'node_modules')
 
-  // 1. Grader toolchain (retains fast-check, vitest, magic-string, typescript)
+  // 1. Grader toolchain
   cloneDirCoW(srcNm, graderNm)
   for (const cacheDir of ['.vite', '.vite-temp', '.vitest-cache']) {
     rmSync(path.join(graderNm, cacheDir), { recursive: true, force: true })
   }
+  rewriteBinShims(graderNm, repoRoot)
 
-  // 2. Trial control toolchain (stripped of oracle/fast-check/cache dirs)
+  // 2. Trial control toolchain
   cloneDirCoW(srcNm, controlNm)
   stripNonTrialEntries(controlNm)
+  rewriteBinShims(controlNm, repoRoot)
 
   // 3. Trial treatment toolchain = control + REAL copy of execution-points-prototype
   cloneDirCoW(controlNm, treatmentNm)
@@ -158,17 +281,25 @@ export function prepareToolchains(repoRoot) {
   mkdirSync(epDest, { recursive: true })
   cpSync(path.join(repoRoot, 'package.json'), path.join(epDest, 'package.json'))
   cpSync(path.join(repoRoot, 'src'), path.join(epDest, 'src'), { recursive: true })
+  rewriteBinShims(treatmentNm, repoRoot)
 
-  // Verify zero symlinks escape back to REPO_ROOT
+  // Verify zero symlinks AND zero `.bin` text shims leak REPO_ROOT (I-03)
   assertNoRepoLeak(controlNm, repoRoot)
   assertNoRepoLeak(treatmentNm, repoRoot)
   assertNoRepoLeak(graderNm, repoRoot)
 
+  // Full grader checksum: binaries + ALL grader source files + runtime guard (R-02)
+  const gradersDir = path.join(repoRoot, 'bench/graders')
+  const graderSourceFiles = existsSync(gradersDir)
+    ? readdirSync(gradersDir).map((f) => path.join(gradersDir, f))
+    : []
   const graderFilesToCheck = [
     path.join(graderNm, '.bin/vitest'),
     path.join(graderNm, 'vitest/package.json'),
     path.join(graderNm, 'fast-check/package.json'),
     path.join(graderNm, 'typescript/package.json'),
+    path.join(repoRoot, 'bench/runtime-guard.setup.mjs'),
+    ...graderSourceFiles,
   ]
   const initialGraderChecksum = hashFiles(graderFilesToCheck)
 
@@ -182,7 +313,7 @@ export function prepareToolchains(repoRoot) {
       const current = hashFiles(graderFilesToCheck)
       if (current !== initialGraderChecksum) {
         throw new Error(
-          `Grader toolchain checksum mismatch: expected ${initialGraderChecksum}, got ${current}`,
+          `Grader toolchain/source checksum mismatch: expected ${initialGraderChecksum}, got ${current}`,
         )
       }
       return current

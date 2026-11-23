@@ -599,6 +599,100 @@ export async function getToken(tenantId: string): Promise<string> {
 }
 `
 
+export const STALE_CACHE_V9_REVISION = `export interface Profile {
+  id: string
+  name: string
+  displayName: string
+}
+
+const db = new Map<string, Profile>()
+const cache = new Map<string, Profile>()
+const dbRevisions = new Map<string, number>()
+const latestWriteSeq = new Map<string, number>()
+let seq = 0
+
+${YIELD_IO}
+
+async function readFromDb(id: string): Promise<Profile | null> {
+  await yieldIo()
+  const row = db.get(id)
+  return row ? { ...row } : null
+}
+
+async function formatProfile(profile: Profile): Promise<Profile> {
+  await yieldIo()
+  return { ...profile, displayName: profile.name.trim().toUpperCase() }
+}
+
+async function validateName(name: string): Promise<string> {
+  await yieldIo()
+  const trimmed = name.trim()
+  if (!trimmed) throw new Error('Profile name cannot be empty')
+  return trimmed
+}
+
+async function writeToDb(id: string, profile: Profile, writeSeq: number): Promise<boolean> {
+  await yieldIo()
+  if ((latestWriteSeq.get(id) ?? 0) > writeSeq) {
+    return false
+  }
+  latestWriteSeq.set(id, writeSeq)
+  dbRevisions.set(id, ++seq)
+  db.set(id, { ...profile })
+  return true
+}
+
+async function auditUpdate(_id: string, _profile: Profile): Promise<void> {
+  await yieldIo()
+}
+
+export function resetStore(): void {
+  db.clear()
+  cache.clear()
+  dbRevisions.clear()
+  latestWriteSeq.clear()
+  seq = 0
+}
+
+export function clearCache(): void {
+  cache.clear()
+}
+
+export function seedProfile(id: string, name: string): void {
+  const clean = name.trim()
+  db.set(id, { id, name: clean, displayName: clean.toUpperCase() })
+  cache.delete(id)
+  dbRevisions.set(id, ++seq)
+  latestWriteSeq.set(id, seq)
+}
+
+export async function getProfile(id: string): Promise<Profile | null> {
+  const cached = cache.get(id)
+  if (cached) return { ...cached }
+  const startRev = dbRevisions.get(id) ?? 0
+  const raw = await readFromDb(id)
+  if (!raw) return null
+  const formatted = await formatProfile(raw)
+  if ((dbRevisions.get(id) ?? 0) === startRev) {
+    cache.set(id, formatted)
+  }
+  return { ...formatted }
+}
+
+export async function updateProfile(id: string, name: string): Promise<Profile> {
+  const mySeq = ++seq
+  const clean = await validateName(name)
+  const next: Profile = { id, name: clean, displayName: clean.toUpperCase() }
+  const wrote = await writeToDb(id, next, mySeq)
+  await auditUpdate(id, next)
+  if (wrote && (latestWriteSeq.get(id) ?? 0) === mySeq) {
+    dbRevisions.set(id, ++seq)
+    cache.set(id, next)
+  }
+  return { ...next }
+}
+`
+
 export const P2_REFERENCE_FIXES = {
   'double-submit': { 'src/payment-processor.ts': DOUBLE_SUBMIT_REF },
   'debounce-search': { 'src/search-controller.ts': DEBOUNCE_SEARCH_REF },

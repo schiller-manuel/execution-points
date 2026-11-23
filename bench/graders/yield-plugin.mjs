@@ -26,10 +26,24 @@ function containsSuperOrYield(node) {
   return found
 }
 
-export function benchYieldPlugin({ root }) {
+export function benchYieldPlugin({ root, skipFiles = [] }) {
   const realRoot = realpathSync(root)
   const srcRoot = path.resolve(realRoot, 'src') + path.sep
   const engineModulePath = path.resolve(realRoot, 'yield-engine.mjs')
+  // Transform by role, NEVER by filename (*.spec.ts under src/ MUST be transformed - fixes R-01!)
+  const skipSet = new Set(
+    [
+      path.resolve(realRoot, '__grader__.test.ts'),
+      path.resolve(realRoot, '__visible__.test.ts'),
+      ...skipFiles.map((f) => {
+        try {
+          return realpathSync(f)
+        } catch {
+          return path.resolve(f)
+        }
+      }),
+    ],
+  )
   let api
 
   return {
@@ -55,7 +69,7 @@ export function benchYieldPlugin({ root }) {
         file = path.resolve(rawFile)
       }
       if (!file.startsWith(srcRoot)) return null
-      if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file)) return null
+      if (skipSet.has(file)) return null
       if (!/\.[cm]?[jt]sx?$/.test(file)) return null
 
       if (!api) api = new API({ cwd: realRoot })

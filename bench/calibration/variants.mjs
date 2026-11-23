@@ -22,6 +22,7 @@ import {
   RETRY_STORM_REF,
   SINGLE_FLIGHT_M1_STAMPEDE_ONLY,
   SINGLE_FLIGHT_M2_INVALIDATION_ONLY,
+  STALE_CACHE_V9_REVISION,
   TOKEN_SESSION_T1B_LOGOUT_BROKEN,
 } from './p2-variants.mjs'
 
@@ -1153,6 +1154,7 @@ export const SINGLE_BUG_MUTANTS = {
 export const VALID_FIX_VARIANTS = {
   'stale-cache': [
     { id: 'V9-ref', files: { 'src/profile-store.ts': STALE_CACHE_V9 } },
+    { id: 'V9-rev-design', files: { 'src/profile-store.ts': STALE_CACHE_V9_REVISION } },
     { id: 'V5-two-callsites', files: { 'src/profile-store.ts': STALE_CACHE_V5 } },
     { id: 'V7-multifile', files: { 'src/profile-helpers.ts': STALE_CACHE_V7_HELPERS, 'src/profile-store.ts': STALE_CACHE_V7_MAIN } },
   ],
@@ -1205,6 +1207,7 @@ export const CALIBRATION_VARIANTS = [
   { id: 'V7', task: 'stale-cache', expectPass: true, label: 'valid V9 with helpers extracted to second file', files: { 'src/profile-helpers.ts': STALE_CACHE_V7_HELPERS, 'src/profile-store.ts': STALE_CACHE_V7_MAIN } },
   { id: 'V8', task: 'stale-cache', expectPass: false, label: 'skips empty-name validation', files: { 'src/profile-store.ts': STALE_CACHE_V8 } },
   { id: 'V9', task: 'stale-cache', expectPass: true, label: 'full V9 reference fix', files: { 'src/profile-store.ts': STALE_CACHE_V9 } },
+  { id: 'V9r', task: 'stale-cache', expectPass: true, label: 'design-diverse V9 revision-guard fix (no queue)', files: { 'src/profile-store.ts': STALE_CACHE_V9_REVISION } },
 
   // token-session T0–T5
   { id: 'T0', task: 'token-session', expectPass: false, label: 'original buggy code', useBaseline: true },
@@ -1386,13 +1389,33 @@ export function buildBuggyRefactors(taskId, baselineFiles) {
         'src/search-api.ts': api.replace('await yieldIo()\n  searchSeq', 'await yieldIo()\n  await yieldIo()\n  searchSeq'),
       },
     })
+    refactors.push({
+      id: 'R2-setImmediate-io',
+      files: {
+        ...baselineFiles,
+        'src/search-api.ts': api.replace(
+          /function yieldIo\(\): Promise<void> \{[\s\S]*?\n\}/,
+          'function yieldIo(): Promise<void> {\n  return new Promise<void>((resolve) => setImmediate(resolve))\n}',
+        ),
+      },
+    })
   } else if (taskId === 'retry-storm') {
     const up = baselineFiles['src/upstream.ts']
     refactors.push({
       id: 'R1-extra-yield',
       files: {
         ...baselineFiles,
-        'src/upstream.ts': up.replace('await yieldIo()\n  if (failRemaining', 'await yieldIo()\n  await yieldIo()\n  if (failRemaining'),
+        'src/upstream.ts': up.replace('await yieldIo()\n  if (shouldFail', 'await yieldIo()\n  await yieldIo()\n  if (shouldFail'),
+      },
+    })
+    refactors.push({
+      id: 'R2-setImmediate-io',
+      files: {
+        ...baselineFiles,
+        'src/upstream.ts': up.replace(
+          /function yieldIo\(\): Promise<void> \{[\s\S]*?\n\}/,
+          'function yieldIo(): Promise<void> {\n  return new Promise<void>((resolve) => setImmediate(resolve))\n}',
+        ),
       },
     })
   } else if (taskId === 'event-order') {
@@ -1404,6 +1427,16 @@ export function buildBuggyRefactors(taskId, baselineFiles) {
         'src/order-repo.ts': repo.replace('await yieldIo()\n  const row', 'await yieldIo()\n  await yieldIo()\n  const row'),
       },
     })
+    refactors.push({
+      id: 'R2-setImmediate-io',
+      files: {
+        ...baselineFiles,
+        'src/order-repo.ts': repo.replace(
+          /function yieldIo\(\): Promise<void> \{[\s\S]*?\n\}/,
+          'function yieldIo(): Promise<void> {\n  return new Promise<void>((resolve) => setImmediate(resolve))\n}',
+        ),
+      },
+    })
   } else if (taskId === 'cross-module-transfer') {
     const store = baselineFiles['src/account-store.ts']
     refactors.push({
@@ -1411,6 +1444,16 @@ export function buildBuggyRefactors(taskId, baselineFiles) {
       files: {
         ...baselineFiles,
         'src/account-store.ts': store.replace('await yieldIo()\n  return balances', 'await yieldIo()\n  await yieldIo()\n  return balances'),
+      },
+    })
+    refactors.push({
+      id: 'R2-setImmediate-io',
+      files: {
+        ...baselineFiles,
+        'src/account-store.ts': store.replace(
+          /function yieldIo\(\): Promise<void> \{[\s\S]*?\n\}/,
+          'function yieldIo(): Promise<void> {\n  return new Promise<void>((resolve) => setImmediate(resolve))\n}',
+        ),
       },
     })
   }

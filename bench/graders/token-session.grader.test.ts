@@ -9,19 +9,21 @@ import {
 } from './src/session-manager'
 
 describe('hidden oracle grader: token-session (yield-engine)', () => {
-  test('preserves baseline behavior and caches active tokens', async () => {
+  test('preserves baseline behavior, async I/O yields, and caches active tokens', async () => {
     resetSessions()
     expect(await getActiveToken('alice')).toBeNull()
 
     login('alice')
-    const tok1 = await getActiveToken('alice')
+    const { result: tok1, yields: coldYields } = await countYields(() => getActiveToken('alice'))
     expect(tok1).toBeTruthy()
+    expect(coldYields).toBeGreaterThanOrEqual(2)
 
     const { result: tok2, yields } = await countYields(() => getActiveToken('alice'))
     expect(tok2).toBe(tok1)
     expect(yields).toBe(0)
 
-    await logout('alice')
+    const { yields: logoutYields } = await countYields(() => logout('alice'))
+    expect(logoutYields).toBeGreaterThanOrEqual(3)
     expect(await getActiveToken('alice')).toBeNull()
   })
 
