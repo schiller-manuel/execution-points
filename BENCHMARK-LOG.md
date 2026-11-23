@@ -171,3 +171,35 @@ A second probe-backed re-review of `c4c9e6f` (`bench-v2.1-re-review.md`) confirm
 - **Grader calibration corpus (49 variants including `N-11` `V9sw`/`SCS2` and `N-14` `V9ra`/`SCS3`/`SF3`):** 49/49 PASS.
 - **Hidden oracle rejection across ALL 16 single-bug mutants (`N-18`, including `CC-M1-shared-stage-file`):** 16/16 REJECTED.
 - **Production AST audit on 10 reference fixes:** 10/10 PASS.
+
+### 2026-11-23 — v2.2 Multi-Model Pilot (22 Started Trials + 2 `not_started`, `afdd5a5`)
+*Run ID: `576a8346-1e65-4f19-9fea-bc0b2e67b236` · Output: `/Users/caligano/.ep-bench-results/v2-2026-11-23T17-51-32-082Z` · Copilot CLI 1.0.114 · Hardened `--sandbox` · `--phase-split` · `--prompt-style symptom` · `--seed 42` · `--max-total-credits 1000`*
+
+- **Live preflight (`N-00` + `N-30`):** PASS (`srcWritten=true`, `rootBlocked=true`, `17.8` credits).
+- **Zero infrastructure failures, zero write denials, zero global monkey-patching, zero out-of-workspace escapes** across all 22 started trials (`B12` `stale-cache / gemini-4-neon` cleanly marked `not_started` at block boundary after `1051.2/1000` cumulative credits).
+- **Hidden oracle pass rate:** 22/22 (100% — every agent produced an oracle-passing production fix).
+
+#### Results by Stratum (`bench/analyze.mjs`)
+
+| Stratum | Arm | Solved | Adequate RED | EP Adoption | E9 False-Green (adq only) | E9 Valid-Fix Pass (adq only) | Billed Credits (per solved) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **Stratum B (`io-seam`: `stale-cache-seam`, `single-flight`)** | Control | **6/6** (100.0%) | 6/6 | 0/6 | 0.0% (0/12) | 15/15 (100.0%) | 243.1 (`40.5`/solved) |
+| **Stratum B (`io-seam`)** | Treatment | **6/6** (100.0%) | 6/6 | **4/6** | 0.0% (0/12) | 15/15 (100.0%) | 253.9 (`42.3`/solved) |
+| **Stratum C (`real-async`: `cancel-commit`)** | Control | **1/3** (33.3%) | 1/3 | 0/3 | 0.0% (0/2) | 1/1 (100.0%) | 138.4 (`138.4`/solved) |
+| **Stratum C (`real-async`: `cancel-commit`)** | Treatment | **2/3** (66.7%) | 2/3 | **1/3** | 0.0% (0/4) | 2/2 (100.0%) | 168.2 (`84.1`/solved) |
+| **Primary (Strata B + C equal-capability, 9 blocks)** | Control vs. Treatment | **7/9 vs. 8/9** | 7/9 vs. 8/9 | 0/9 vs. 5/9 | 0/14 vs. 0/16 | 16/16 vs. 17/17 | CMH `p=1`, exact McNemar `p=1`, Newcombe RD `+11.1pp [-13.8, +38.5]` |
+| **Stratum A (`closed-module`: `stale-cache`, separate)** | Control | **1/2** (50.0%) | 1/2 | 0/2 | **33.3%** (1/3) | 5/5 (100.0%) | 150.3 (`150.3`/solved) |
+| **Stratum A (`closed-module`, separate)** | Treatment | **2/2** (100.0%) | 2/2 | **2/2** | **0.0%** (0/6) | 8/10 (80.0%, `sel=2`, `assert=0`, `to=0`) | 79.4 (`39.7`/solved) |
+
+#### Notable Empirical Findings from the Pilot
+1. **Organic adoption varies sharply by model (7/11 = 63.6% overall in Treatment):**
+   - `gemini-4-neon` chose `execution-points` on **3/3** started tasks (including `cancel-commit`, where it was the sole Treatment discordant solve over Control!).
+   - `claude-opus-5.5` chose `execution-points` on **3/4** tasks (`stale-cache-seam`, `single-flight`, `stale-cache`), using `vi.mock` only on `cancel-commit`.
+   - `gpt-6.2-astra` chose `module-mock` on **3/3** Strata B+C tasks and `execution-points` on **1/1** Stratum A task.
+   - Across all 7 Treatment trials that actually used `execution-points`, **7/7 (100%) solved** with **0/17 (0.0%) false greens** and **0 assertion/timeout false reds** (only 2 loud `selector_or_compile_break`s on `V7-multifile`).
+2. **Ingenious Control workaround on closed-module `stale-cache` (`gpt-6.2-astra`):**
+   - Without touching a single global, `gpt-6.2-astra` imported `node:async_hooks.createHook` + `node:worker_threads.receiveMessageOnPort` to intercept raw `MESSAGEPORT` libuv handles created inside `yieldIo()`, dequeue the message off the receiver port, hold it behind a barrier, and re-post it after release!
+   - It achieved `solved=PASS` (`5/5` valid-fix passes), **but** went falsely green (`1/3` FG) on `R3-setImmediate-io` because it depended on the `MessageChannel` implementation detail.
+   - Meanwhile `claude-opus-5.5` in Control spent **316.5s / 112.8 credits / 1.42M tokens** struggling on `stale-cache` and failed (`adqRed=NO`, `3/3` FG), whereas Treatment `claude-opus-5.5` solved cleanly with `execution-points` in **99.2s / 49.3 credits** (`0/3` FG).
+3. **Discordance & power calibration for the full matrix:**
+   - `io-seam` (`stale-cache-seam`, `single-flight`) is at ceiling (`6/6` in both arms — 0 discordant pairs!). Future matrix budget should focus on harder tasks with real discordance (`cancel-commit`, `cross-module-transfer`, `retry-storm`, `debounce-search`, `event-order`) and closed-module Stratum A (`stale-cache`, `token-session`, `double-submit`), plus `low` reasoning levels where task difficulty isn't saturated.
