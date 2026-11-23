@@ -29,7 +29,8 @@ const namedTypeFlags =
   SymbolFlags.Interface |
   SymbolFlags.Class |
   SymbolFlags.Enum |
-  SymbolFlags.TypeParameter
+  SymbolFlags.TypeParameter |
+  SymbolFlags.UniqueESSymbol
 
 function walk(node, visit) {
   visit(node)
@@ -44,23 +45,22 @@ function projectNested(source, nodes, prefixOf, suffixOf) {
     return b
   }
   for (const node of nodes) {
-    at(node.start).opens.push({ start: node.start, end: node.end, id: node.id, text: prefixOf(node) })
-    at(node.end).closes.push({ start: node.start, end: node.end, id: node.id, text: suffixOf(node) })
+    at(node.start).opens.push({ start: node.start, end: node.end, text: prefixOf(node) })
+    at(node.end).closes.push({ start: node.start, end: node.end, text: suffixOf(node) })
   }
   const offsets = [...buckets.keys()].sort((a, b) => a - b)
   let out = '', cursor = 0
   for (const offset of offsets) {
     out += source.slice(cursor, offset)
     const b = buckets.get(offset)
-    b.closes.sort((a, b) => b.start - a.start || b.id.localeCompare(a.id))
-    b.opens.sort((a, b) => b.end - a.end || a.id.localeCompare(b.id))
+    b.closes.sort((a, b) => b.start - a.start)
+    b.opens.sort((a, b) => b.end - a.end)
     out += b.closes.map((e) => e.text).join('') + b.opens.map((e) => e.text).join('')
     cursor = offset
   }
   return out + source.slice(cursor)
 }
 
-const sameFile = (a, b) => Boolean(a && b) && (a === b || a.toLowerCase() === b.toLowerCase())
 const resolveAlias = (checker, sym) => (!sym ? undefined : sym.flags & SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym)
 
 function typeImportSpecifier(fromFile, targetFile) {
@@ -76,7 +76,7 @@ function symbolIdentity(checker, sym) {
 
 function hasLocalDeclaration(sym) {
   return sym.declarations.some((h) => {
-    for (let p = h.resolve()?.parent; p && p.kind !== SyntaxKind.SourceFile; p = p.parent) {
+    for (let p = h.resolve().parent; p && p.kind !== SyntaxKind.SourceFile; p = p.parent) {
       if (localScopes.has(p.kind)) return true
     }
     return false
@@ -90,13 +90,12 @@ function getSourceFileCached(program, filePath, sfCache) {
 
 function isAmbientOrGlobal(checker, sym, program, sfCache) {
   const resolved = resolveAlias(checker, sym)
-  if (!resolved?.declarations.length) return true
-  return resolved.declarations.every((h) => !getSourceFileCached(program, h.path, sfCache)?.externalModuleIndicator)
+  return !resolved?.declarations.length || resolved.declarations.every((h) => !getSourceFileCached(program, h.path, sfCache)?.externalModuleIndicator)
 }
 
 function isDeclaredInFile(checker, sym, filePath) {
   const resolved = resolveAlias(checker, sym)
-  return Boolean(resolved?.declarations.some((h) => sameFile(h.path, filePath)))
+  return Boolean(resolved?.declarations.some((h) => h.path.toLowerCase() === filePath.toLowerCase()))
 }
 
 function isNominalUnexported(checker, sym) {
@@ -149,7 +148,12 @@ function buildExportIndex(checker, program, sf, fromFile, sfCache) {
     if (alias && !(type.getAliasTypeArguments()?.length) && isDeclaredInFile(checker, alias, sf.fileName) && !hasLocalDeclaration(alias)) {
       record(alias, expr)
     }
-    if (sym && (sym.flags & namedTypeFlags) && isDeclaredInFile(checker, sym, sf.fileName) && !hasLocalDeclaration(sym)) {
+    if (
+      sym &&
+      ((sym.flags & namedTypeFlags) || (type.flags & TypeFlags.UniqueESSymbol)) &&
+      isDeclaredInFile(checker, sym, sf.fileName) &&
+      !hasLocalDeclaration(sym)
+    ) {
       if (!type.isTypeReference() || !(checker.getTypeArguments(type)?.length)) record(sym, expr)
     }
     if (depth >= 4) continue
@@ -256,6 +260,8 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
   }
 
   function emitMembers(type, loc, seen) {
+    const props = type.getProperties().filter((p) => !isPrivateMember(p))
+    if (props.length > 24) throw new Error('Object type has too many properties to inline in a virtual contract.')
     const out = []
     for (const sig of type.getCallSignatures()) {
       const s = emitSig(sig, loc, seen), i = s.lastIndexOf(' => ')
@@ -268,8 +274,7 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
     for (const info of type.getIndexInfos()) {
       out.push(`${info.isReadonly ? 'readonly ' : ''}[key: ${emit(info.keyType, loc, new Set(seen))}]: ${emit(info.valueType, loc, new Set(seen))};`)
     }
-    for (const prop of type.getProperties()) {
-      if (isPrivateMember(prop)) continue
+    for (const prop of props) {
       const ro = isReadonlyProp(prop) ? 'readonly ' : ''
       const isOpt = Boolean(prop.flags & SymbolFlags.Optional)
       const opt = isOpt ? '?' : ''
@@ -309,18 +314,22 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
 
     if (type.flags & TypeFlags.Boolean) return 'boolean'
     if (type.isIntrinsicType?.()) return type.intrinsicName
-    if (type.isStringLiteralType?.() || type.isNumberLiteralType?.() || type.isBooleanLiteralType?.()) {
-      return JSON.stringify(type.value)
+    if (!(type.flags & TypeFlags.EnumLiteral)) {
+      if (type.isStringLiteralType?.() || type.isNumberLiteralType?.() || type.isBooleanLiteralType?.()) {
+        return JSON.stringify(type.value)
+      }
+      if (type.isBigIntLiteralType?.()) return `${type.value}n`
     }
-    if (type.isBigIntLiteralType?.()) return `${type.value}n`
 
     if (type.flags & TypeFlags.UniqueESSymbol) {
       const sym = type.getSymbol()
       if (sym && hasLocalDeclaration(sym)) throw new Error(`The unique symbol ${sym.name} is declared inside a function or block.`)
       const ext = sym ? resolveExternal(sym) : undefined
-      return ext ? `typeof ${ext}` : emitHelper(symbolIdentity(checker, sym) || `sym_${type.id}`, sym?.name, type, loc, true)
+      return ext ? (ext.startsWith('typeof ') ? ext : `typeof ${ext}`) : emitHelper(symbolIdentity(checker, sym) || `sym_${type.id}`, sym?.name, type, loc, true)
     }
-    if (type.flags & TypeFlags.Union) return `(${(type.getTypes() ?? []).map((m) => emit(m, loc, new Set(seen))).join(' | ')})`
+    if ((type.flags & TypeFlags.Union) && !(type.flags & TypeFlags.EnumLiteral && type.getSymbol())) {
+      return `(${(type.getTypes() ?? []).map((m) => emit(m, loc, new Set(seen))).join(' | ')})`
+    }
     if (type.flags & TypeFlags.Intersection) return `(${(type.getTypes() ?? []).map((m) => emit(m, loc, new Set(seen))).join(' & ')})`
 
     const alias = type.getAliasSymbol()
@@ -329,7 +338,9 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
       const aliasArgs = type.getAliasTypeArguments() ?? []
       const ext = resolveExternal(alias)
       if (ext) return aliasArgs.length ? `${ext}<${aliasArgs.map((a) => emit(a, loc, new Set(seen))).join(', ')}>` : ext
-      if (!aliasArgs.length) return emitHelper(symbolIdentity(checker, alias), alias.name, type, loc, false)
+      if (!aliasArgs.length) {
+        return emitHelper(symbolIdentity(checker, alias), alias.name, type, loc, isNominalUnexported(checker, alias))
+      }
     }
 
     if (type.isTupleType?.() || (type.objectFlags & ObjectFlags.Tuple)) {
@@ -382,6 +393,9 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
   return { emit }
 }
 
+let defaultApi
+const getDefaultApi = () => (defaultApi ??= new API())
+
 /**
  * Analyze all target files in a plan using a warm TypeScript 7.1 snapshot cache
  * (excluding .ep files and contentMappers to avoid recursion) and generate the
@@ -389,12 +403,10 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
  */
 export function generateFileRegistryModule(plan, { fromFile, api: externalApi, cache, compilerOptions: hostOptions, overrides = new Map() } = {}) {
   const registryRoot = fromFile ?? path.join(plan.root, 'points.ep')
-  const ownApi = !externalApi
-  const api = externalApi ?? new API({ cwd: plan.root })
+  const api = externalApi ?? getDefaultApi()
   const byFile = new Map()
 
   if (!plan.files.length) {
-    if (ownApi) api.close()
     return { text: renderFileModule([], byFile), files: [] }
   }
 
@@ -404,29 +416,15 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
     const config = plan.tsconfig && existsSync(plan.tsconfig) ? api.parseConfigFile(plan.tsconfig) : undefined
     const compilerOptions = {
       strict: true,
-      target: ScriptTarget.ES2022,
-      module: ModuleKind.ESNext,
-      moduleResolution: ModuleResolutionKind.Bundler,
-      skipLibCheck: true,
       ...config?.options,
       ...hostOptions,
-      noEmit: true,
-      declaration: false,
-      emitDeclarationOnly: false,
-      incremental: false,
-      composite: false,
     }
 
     const originals = new Map()
     for (const entry of plan.files) originals.set(entry.file, entry.source)
     for (const [f, s] of overrides) if (!f.endsWith('.ep')) originals.set(f, s)
 
-    const rootFiles = [
-      ...new Set([
-        ...(config?.fileNames ?? []).filter((f) => !f.endsWith('.ep') && !f.endsWith('.test.ts') && !f.endsWith('.test.tsx')),
-        ...originals.keys(),
-      ]),
-    ].sort()
+    const rootFiles = [...originals.keys()].sort()
     const configKey = JSON.stringify({ rootFiles, compilerOptions })
 
     let baseSnapshot
@@ -592,7 +590,6 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
   } finally {
     probeSnapshot?.dispose()
     ownBaseSnapshot?.dispose()
-    if (ownApi) api.close()
   }
 }
 

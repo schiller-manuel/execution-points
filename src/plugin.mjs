@@ -11,52 +11,20 @@ export function executionPoints(options = {}) {
   let root = resolve(options.root ?? process.cwd())
   let plan
   let observedFiles = new Map()
-  let dirty = true
-  let pendingPlan
 
-  function watchFiles(context, nextPlan) {
-    if (!context?.addWatchFile) return
-    for (const file of nextPlan.files) context.addWatchFile(file.file)
-    if (nextPlan.tsconfig) context.addWatchFile(resolve(root, nextPlan.tsconfig))
-    const manifestFile = resolve(root, 'points.ep')
-    if (readSource(manifestFile) !== undefined) context.addWatchFile(manifestFile)
-  }
-
-  function sourcesChanged() {
-    for (const [file, expected] of observedFiles) {
-      if (readSource(file) !== expected) return true
-    }
-    return false
-  }
-
-  async function getPlan(context, force = false) {
-    if (force) dirty = true
-    if (pendingPlan) return pendingPlan
-    if (plan && !dirty && !sourcesChanged()) return plan
-
-    pendingPlan = Promise.resolve().then(() => {
-      const nextPlan = buildTargetPlan({ ...options, root })
-      const nextObserved = new Map()
-      for (const entry of nextPlan.files) nextObserved.set(entry.file, entry.source)
-      if (nextPlan.tsconfig) {
-        const configFile = resolve(root, nextPlan.tsconfig)
-        nextObserved.set(configFile, readSource(configFile))
-      }
-      const manifestFile = resolve(root, 'points.ep')
-      const manifestContent = readSource(manifestFile)
-      if (manifestContent !== undefined) nextObserved.set(manifestFile, manifestContent)
-      plan = nextPlan
-      observedFiles = nextObserved
-      dirty = false
-      watchFiles(context, plan)
+  function getPlan(context) {
+    if (
+      plan &&
+      [...observedFiles].every(([file, expected]) => readSource(file) === expected)
+    ) {
       return plan
-    })
-
-    try {
-      return await pendingPlan
-    } finally {
-      pendingPlan = undefined
     }
+    plan = buildTargetPlan({ ...options, root })
+    observedFiles = new Map(plan.files.map((entry) => [entry.file, entry.source]))
+    if (context.addWatchFile) {
+      for (const file of observedFiles.keys()) context.addWatchFile(file)
+    }
+    return plan
   }
 
   return {
@@ -67,19 +35,19 @@ export function executionPoints(options = {}) {
       if (!options.root) root = resolve(config.root)
     },
 
-    async buildStart() {
-      await getPlan(this)
+    buildStart() {
+      getPlan(this)
     },
 
     watchChange() {
-      dirty = true
+      plan = undefined
     },
 
-    async transform(code, id) {
+    transform(code, id) {
       const file = sourceFileName(id)
       if (!file) return null
 
-      const currentPlan = await getPlan(this)
+      const currentPlan = getPlan(this)
       const entry = currentPlan.files.find((item) => item.file === file)
       if (!entry || entry.nodes.length === 0) return null
 
@@ -119,24 +87,14 @@ export function executionPoints(options = {}) {
 
       for (const node of entry.nodes) {
         const captures = node.captures.map((name) => `[${JSON.stringify(name)}]: () => (${name})`).join(', ')
-        at(node.start).opens.push({
-          ...node,
-          text: `${invokeName}(${JSON.stringify(node.id)}, () => (`,
-        })
-        at(node.end).closes.push({
-          ...node,
-          text: `), () => ({${captures}}))`,
-        })
+        at(node.start).opens.push(`${invokeName}(${JSON.stringify(node.id)}, () => (`)
+        at(node.end).closes.unshift(`), () => ({${captures}}))`)
       }
 
       for (const [offset, bucket] of insertions) {
-        bucket.opens.sort((a, b) => b.end - a.end || a.id.localeCompare(b.id))
-        bucket.closes.sort((a, b) => b.start - a.start || b.id.localeCompare(a.id))
         source.appendLeft(
           offset,
-          bucket.closes.map((item) => item.text).join('') +
-            bucket.before.join('') +
-            bucket.opens.map((item) => item.text).join(''),
+          bucket.closes.join('') + bucket.before.join('') + bucket.opens.join(''),
         )
       }
 
@@ -151,14 +109,12 @@ export function executionPoints(options = {}) {
 function readSource(file) {
   try {
     return readFileSync(file, 'utf8')
-  } catch (error) {
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined
-    throw error
+  } catch {
+    return undefined
   }
 }
 
 function sourceFileName(id) {
-  if (id.startsWith('\0')) return undefined
   const [file, query] = id.split('?', 2)
   if (query && /(?:^|&)(?:raw|url|worker|sharedworker)(?:&|=|$)/.test(query)) return undefined
   if (file.startsWith('file:')) return resolve(fileURLToPath(file))

@@ -250,7 +250,7 @@ oracleProperty({
     authority:
       'README.md:171-173 ("Indexed target kinds are ordinary CallExpression, non-assignment BinaryExpression, and ConditionalExpression nodes (including nested expressions). Reference-only positions and expressions containing await, yield, super, optional chains, dynamic import(), or direct eval are skipped.").',
     limits:
-      'Only CallExpression, BinaryExpression, and ConditionalExpression kinds are selectable.',
+      'Only CallExpression, BinaryExpression, and ConditionalExpression kinds are selectable; histories are bounded-exhaustive over 25 representative expression templates with and without parenthesized and type-assertion wrappers.',
   },
   histories: {
     enumerated: enumeratedSelectableHistories,
@@ -755,6 +755,7 @@ oracleProperty({
       'for-of-header-tdz-masked',
       'hoisted-fn-and-class-tdz',
       'destructured-and-catch-bindings',
+      'catch-clause-binding-captured',
     ],
     constructed: [
       {
@@ -785,6 +786,11 @@ oracleProperty({
         name: 'destructured-bindings',
         enters: ['destructured-and-catch-bindings'],
         build: (base) => ({ ...base, scenario: 'destructured-object-and-array' }),
+      },
+      {
+        name: 'catch-clause-capture',
+        enters: ['catch-clause-binding-captured'],
+        build: (base) => ({ ...base, scenario: 'catch-clause-binding' }),
       },
     ],
   },
@@ -910,7 +916,7 @@ export default class {
       }
 
       // catch-clause-binding
-      observe('reach', 'destructured-and-catch-bindings')
+      observe('reach', 'catch-clause-binding-captured')
       const src = `export function work() {
   ${outerDecl}try {
     inTry();

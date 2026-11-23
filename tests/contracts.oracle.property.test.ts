@@ -110,6 +110,7 @@ function parseFirstNodeFromRegistry(text: string, callee: string) {
 
 const TYPE_CONSTRUCTS = [
   'primitives-and-literals',
+  'bigint-and-template-literal',
   'any-return-and-local',
   'readonly-tuple',
   'optional-tuple',
@@ -117,6 +118,7 @@ const TYPE_CONSTRUCTS = [
   'string-index-signature',
   'readonly-number-index-signature',
   'callable-and-constructable-object',
+  'callable-object-with-props-and-getters',
   'union-and-intersection',
 ] as const
 
@@ -136,6 +138,12 @@ function typeConstructModel(history: TypeConstructHistory) {
         found: true,
         result: '"ok"',
         localsRaw: 'readonly "b": true; readonly "n": number; readonly "s": string;',
+      }
+    case 'bigint-and-template-literal':
+      return {
+        found: true,
+        result: '42n',
+        localsRaw: 'readonly "tpl": `id-${number}`;',
       }
     case 'any-return-and-local':
       return {
@@ -179,6 +187,12 @@ function typeConstructModel(history: TypeConstructHistory) {
         result: '((x: number, y?: string, ...rest: Array<boolean>) => string)',
         localsRaw: 'readonly "ctor": { new (a: string): { "id": string; }; readonly "tag"?: string; };',
       }
+    case 'callable-object-with-props-and-getters':
+      return {
+        found: true,
+        result: '{ (x: number): string; readonly "id": number; readonly "ro": boolean; "rw": number; }',
+        localsRaw: '',
+      }
     case 'union-and-intersection':
       return {
         found: true,
@@ -200,7 +214,7 @@ oracleProperty({
     authority:
       'README.md:172 ("emit virtual ExecutionPointFileRegistry") and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-22: emit any, tuple elementFlags, and IndexInfo.valueType.',
     limits:
-      'Local generic type parameters without concrete instantiations are not emitted.',
+      'Local generic type parameters without concrete instantiations and inline objects with more than 24 properties are not emitted; histories are bounded-exhaustive over 11 representative type constructs.',
   },
   histories: {
     enumerated: enumeratedTypeConstructHistories,
@@ -223,6 +237,14 @@ oracleProperty({
 function target(): "ok" { return "ok" }
 export function work(n: number, s: string) {
   const b = true
+  return target()
+}`
+          break
+        case 'bigint-and-template-literal':
+          observe('reach', 'emitted-callable-and-composites')
+          src = `
+function target(): 42n { return 42n }
+export function work(tpl: \`id-\${number}\`) {
   return target()
 }`
           break
@@ -286,6 +308,16 @@ function target(): (x: number, y?: string, ...rest: boolean[]) => string {
   return () => "ok"
 }
 export function work(ctor: { new (a: string): { id: string }; readonly tag?: string }) {
+  return target()
+}`
+          break
+        case 'callable-object-with-props-and-getters':
+          observe('reach', 'emitted-callable-and-composites')
+          src = `
+function target(): { (x: number): string; readonly id: number; get ro(): boolean; get rw(): number; set rw(v: number) } {
+  return Object.assign((x: number) => String(x), { id: 1, ro: true, rw: 2 })
+}
+export function work() {
   return target()
 }`
           break
@@ -417,7 +449,7 @@ oracleProperty({
           observe('reach', 'narrowed-in-nested-call')
           body = `
   assertUser(user)
-  return outerWrap(send(user.id))`
+  return getClient().send("prefix:" + outerWrap(user.id))`
           break
       }
 
@@ -427,6 +459,7 @@ function isUser(u: User | null): u is User { return u !== null }
 function assertUser(u: User | null): asserts u is User { if (!u) throw new Error('missing') }
 function outerWrap(s: string) { return s }
 function send(id: string) { return id }
+function getClient() { return { send } }
 export function work(user: User | null) {${body}
 }
 `
@@ -471,10 +504,14 @@ const EXPORT_CASES = [
   'reachable-via-nonnullable-param',
   'reachable-via-awaited-return',
   'reachable-via-array-and-prop',
+  'exported-generic-alias',
+  'unique-symbols-exported-and-private',
   'unreachable-structural-interface',
+  'deep-beyond-bfs-limit-falls-back-to-helper',
   'unreachable-nominal-class-and-enum',
   'local-block-type-omitted',
   'mts-import-specifier',
+  'cts-import-specifier',
 ] as const
 
 type ExportCase = (typeof EXPORT_CASES)[number]
@@ -494,48 +531,84 @@ function exportModel(history: ExportHistory) {
         result: 'import("./examples/c3-target.js").Quote',
         hasBrand: false,
         hasHelperInterface: false,
+        leakedPrivateMember: false,
       }
     case 'reachable-via-nonnullable-param':
       return {
         result: 'NonNullable<Parameters<typeof import("./examples/c3-target.js").work>[0]>',
         hasBrand: false,
         hasHelperInterface: false,
+        leakedPrivateMember: false,
       }
     case 'reachable-via-awaited-return':
       return {
         result: 'Awaited<ReturnType<typeof import("./examples/c3-target.js").work>>',
         hasBrand: false,
         hasHelperInterface: false,
+        leakedPrivateMember: false,
       }
     case 'reachable-via-array-and-prop':
       return {
         result: '((ReturnType<typeof import("./examples/c3-target.js").work>)[number])["item"]',
         hasBrand: false,
         hasHelperInterface: false,
+        leakedPrivateMember: false,
+      }
+    case 'exported-generic-alias':
+      return {
+        result: 'import("./examples/c3-target.js").Box<__EP_InternalItem_1>',
+        hasBrand: false,
+        hasHelperInterface: true,
+        leakedPrivateMember: false,
+      }
+    case 'unique-symbols-exported-and-private':
+      return {
+        result: 'typeof import("./examples/c3-target.js").pubSym',
+        hasBrand: true,
+        hasHelperInterface: true,
+        leakedPrivateMember: false,
       }
     case 'unreachable-structural-interface':
       return {
         result: '__EP_InternalBox_1',
         hasBrand: false,
         hasHelperInterface: true,
+        leakedPrivateMember: false,
+      }
+    case 'deep-beyond-bfs-limit-falls-back-to-helper':
+      return {
+        result: '__EP_DeepLeaf_1',
+        hasBrand: false,
+        hasHelperInterface: true,
+        leakedPrivateMember: false,
       }
     case 'unreachable-nominal-class-and-enum':
       return {
-        result: '__EP_SecretVault_1',
+        result: '[__EP_PrivateStatus_1, __EP_SecretVault_2]',
         hasBrand: true,
         hasHelperInterface: true,
+        leakedPrivateMember: false,
       }
     case 'local-block-type-omitted':
       return {
         result: 'number',
         hasBrand: false,
         hasHelperInterface: false,
+        leakedPrivateMember: false,
       }
     case 'mts-import-specifier':
       return {
         result: 'import("./examples/c3-target.mjs").Quote',
         hasBrand: false,
         hasHelperInterface: false,
+        leakedPrivateMember: false,
+      }
+    case 'cts-import-specifier':
+      return {
+        result: 'import("./examples/c3-target.cjs").Quote',
+        hasBrand: false,
+        hasHelperInterface: false,
+        leakedPrivateMember: false,
       }
   }
 }
@@ -600,6 +673,28 @@ interface Leaf { code: number }
 function target(): Leaf { return { code: 1 } }
 export function work(): Array<{ item: Leaf }> { return [{ item: target() }] }`
           break
+        case 'exported-generic-alias':
+          observe('reach', 'direct-and-reachable-exports')
+          src = `
+export type Box<T> = { value: T }
+interface InternalItem { label: string }
+function target(): Box<InternalItem> { return { value: { label: "a" } } }
+export function work() {
+  const dup: InternalItem = { label: "b" }
+  return target().value.label
+}`
+          break
+        case 'unique-symbols-exported-and-private':
+          observe('reach', 'direct-and-reachable-exports')
+          src = `
+export const pubSym: unique symbol = Symbol()
+const privSym: unique symbol = Symbol()
+function target(): typeof pubSym { return pubSym }
+export function work() {
+  const s: typeof privSym = privSym
+  return target()
+}`
+          break
         case 'unreachable-structural-interface':
           observe('reach', 'structural-and-nominal-helpers')
           src = `
@@ -607,12 +702,22 @@ interface InternalBox { count: number }
 function target(): InternalBox { return { count: 1 } }
 export function work() { const b = target(); return b.count }`
           break
+        case 'deep-beyond-bfs-limit-falls-back-to-helper':
+          observe('reach', 'structural-and-nominal-helpers')
+          src = `
+interface DeepLeaf { count: number }
+function target(): DeepLeaf { return { count: 1 } }
+export function work(): { l1: { l2: { l3: { l4: DeepLeaf } } } } {
+  return { l1: { l2: { l3: { l4: target() } } } }
+}`
+          break
         case 'unreachable-nominal-class-and-enum':
           observe('reach', 'structural-and-nominal-helpers')
           src = `
-class SecretVault { private secret = 1; public id = "v" }
-function target(): SecretVault { return new SecretVault() }
-export function work() { const v = target(); return v.id }`
+enum PrivateStatus { Ok, Err }
+class SecretVault { #hash = 1; private secret = 1; protected prot = 2; public id = "v" }
+function target(): [PrivateStatus, SecretVault] { return [PrivateStatus.Ok, new SecretVault()] }
+export function work() { const [, v] = target(); return v.id }`
           break
         case 'local-block-type-omitted':
           observe('reach', 'local-type-omitted')
@@ -620,13 +725,24 @@ export function work() { const v = target(); return v.id }`
 function target(): number { return 42 }
 export function work() {
   interface LocalOnly { x: number }
+  type LocalAlias = { y: number }
+  const localSym: unique symbol = Symbol()
   const localObj: LocalOnly = { x: 1 }
+  const localAliasObj: LocalAlias = { y: 2 }
   return target()
 }`
           break
         case 'mts-import-specifier':
           observe('reach', 'direct-and-reachable-exports')
           relFile = 'examples/c3-target.mts'
+          src = `
+export interface Quote { total: number }
+function target(): Quote { return { total: 1 } }
+export function work() { return target() }`
+          break
+        case 'cts-import-specifier':
+          observe('reach', 'direct-and-reachable-exports')
+          relFile = 'examples/c3-target.cts'
           src = `
 export interface Quote { total: number }
 function target(): Quote { return { total: 1 } }
@@ -640,6 +756,8 @@ export function work() { return target() }`
         result: parsed?.result ?? 'missing',
         hasBrand: text.includes('unique symbol'),
         hasHelperInterface: text.includes('interface __EP_'),
+        leakedPrivateMember:
+          text.includes('"secret"') || text.includes('"prot"') || text.includes('"#hash"'),
       })
     } catch (err) {
       observe('export-path', { threw: err instanceof Error ? err.message : String(err) })

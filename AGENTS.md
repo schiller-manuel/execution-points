@@ -109,6 +109,6 @@ optimization project.
   `node_modules/@tanstack/oracles/skills/oracles-evaluate-review/SKILL.md` in
   full.
 - Lint: not available here (typescript-eslint does not support TypeScript 7.1 yet; its TypeScript peer range ends before 7).
-- Oracle files: `tests/**/*oracle*.test.ts`. Gap check: `pnpm exec oracle-gaps --package . --source src/runtime.mjs,src/discovery.mjs,src/contracts.mjs --seed 42`.
+- Oracle files: `tests/**/*oracle*.test.ts`. Gap check: `pnpm exec oracle-gaps --package . --source src/runtime.mjs,src/discovery.mjs,src/plugin.mjs,src/contracts.mjs,src/content-mapper.mjs --seed 42`.
 
 <!-- END @tanstack/oracles -->

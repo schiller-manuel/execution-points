@@ -157,7 +157,8 @@ function scopeBindingsOf(node) {
 
 /** Index all selectable expressions in a single target module using TypeScript 7.1's AST. */
 export function indexTargetFile(file, source, root, api) {
-  const lease = api.createSourceFile(file, source)
+  const bomOffset = source.charCodeAt(0) === 0xfeff ? 1 : 0
+  const lease = api.createSourceFile(file, bomOffset ? source.slice(1) : source)
   try {
     const tree = lease.sourceFile
     const relativeFile = relative(root, file).replaceAll('\\', '/')
@@ -183,8 +184,9 @@ export function indexTargetFile(file, source, root, api) {
       localScopeStack.push(scopeBindingsOf(node))
 
       if (isSelectableExpression(node)) {
-        const start = node.getStart(tree)
-        const end = node.end
+        const treeStart = node.getStart(tree)
+        const start = treeStart + bomOffset
+        const end = node.end + bomOffset
         const inFunction =
           fnStack.findLast((name) => name !== '(anonymous)') ?? (fnStack.length ? '(anonymous)' : null)
         const kind =
@@ -197,7 +199,12 @@ export function indexTargetFile(file, source, root, api) {
           kind === 'CallExpression'
             ? { callee: callCalleeName(node) }
             : kind === 'BinaryExpression'
-              ? { operator: source.slice(node.operatorToken.getStart(tree), node.operatorToken.end) }
+              ? {
+                  operator: source.slice(
+                    node.operatorToken.getStart(tree) + bomOffset,
+                    node.operatorToken.end + bomOffset,
+                  ),
+                }
               : {}
         const namePart = extra.callee ?? extra.operator ?? '?'
         const scopePrefix = `${relativeFile}#${inFunction ?? '<top>'}:${kind}:${namePart}`
@@ -215,7 +222,7 @@ export function indexTargetFile(file, source, root, api) {
           nth,
           start,
           end,
-          captures: activeLocalsAt(start),
+          captures: activeLocalsAt(treeStart),
         })
       }
 

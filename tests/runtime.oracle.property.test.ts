@@ -335,7 +335,7 @@ oracleProperty({
     authority:
       'README.md:79-81 ("Replacement returns a value | Use that value as the expression result. Replacement throws | Throw at the selected expression. Replacement calls original() | Evaluate the original expression") and README.md:104-107 ("async descendants retain the context in which they were created").',
     limits:
-      'original() evaluates originalThunk on every call without memoization (README.md:113).',
+      'original() evaluates originalThunk on every call without memoization (README.md:113); async descendants are tested across microtask (Promise.resolve) and macrotask (setImmediate) continuations.',
   },
   histories: {
     arbitrary: scopeArbitrary,
@@ -492,7 +492,13 @@ oracleProperty({
         observe('reach', 'async-descendant-outlives-action')
       }
       const waitTicks = async (ticks: number) => {
-        for (let i = 0; i < ticks; i += 1) await Promise.resolve()
+        for (let i = 0; i < ticks; i += 1) {
+          if (i % 2 === 1) {
+            await new Promise<void>((resolve) => setImmediate(resolve))
+          } else {
+            await Promise.resolve()
+          }
+        }
       }
       let descendantPromise!: Promise<number>
       await point.withReplacement(makeHandler(history.outerAdd), async () => {
@@ -870,6 +876,7 @@ oracleProperty({
       'rejected-multiple-matches',
       'rejected-unregistered-file',
       'rejected-invalid-callback',
+      'rejected-invalid-with-replacement-args',
     ],
     constructed: [
       {
@@ -907,6 +914,11 @@ oracleProperty({
         enters: ['rejected-invalid-callback'],
         build: (base) => ({ ...base, kind: 'invalid-visitor-arg' }),
       },
+      {
+        name: 'non-function-with-replacement-handler',
+        enters: ['rejected-invalid-with-replacement-args'],
+        build: (base) => ({ ...base, kind: 'invalid-with-replacement-args' }),
+      },
     ],
   },
   model: (history) => selectionModel(history),
@@ -933,7 +945,7 @@ oracleProperty({
     }
 
     if (history.kind === 'invalid-with-replacement-args') {
-      observe('reach', 'rejected-invalid-callback')
+      observe('reach', 'rejected-invalid-with-replacement-args')
       const file = 'oracle-sel-invalid-args.ts'
       try {
         registerFile(file, nodes)
