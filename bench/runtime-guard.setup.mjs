@@ -1,17 +1,30 @@
 /**
- * Runtime integrity guard injected via Vitest `setupFiles` during grading.
+ * Runtime integrity guard injected via Vitest `setupFiles` during grading (v2.2).
  *
- * Enforces anti-global-monkey-patching and anti-real-sleep rules AT RUNTIME,
- * so aliases (`const host = globalThis`), destructuring, `vi['spyOn']`,
- * `Reflect.defineProperty`, `eval`/`new Function`, and imported helper modules
- * cannot bypass the benchmark rules (closes E-01, E-05, A-01).
+ * Closes E-01, E-05, A-01, N-22, N-23, N-24:
+ * - Walks and locks the ENTIRE prototype chain (up to excluding Object.prototype)
+ *   of every protected built-in (including NodeEventTarget.prototype — N-22!).
+ * - Wraps Object.setPrototypeOf, Reflect.setPrototypeOf, and Object.prototype.__proto__
+ *   setter to block prototype replacement attacks.
+ * - Writes one unique per-worker report JSON inside `BENCH_GUARD_REPORT_DIR`
+ *   (never overwrites another worker's file — closes N-23!). Harness merges all
+ *   worker reports and fails closed if zero reports exist.
+ * - Protects Error.stackTraceLimit from being zeroed to hide real-sleep stacks.
  */
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { afterAll } from 'vitest'
 
-const reportPath = process.env.BENCH_GUARD_REPORT || ''
-const srcRoot = process.env.BENCH_GUARD_SRC_ROOT ? path.resolve(process.env.BENCH_GUARD_SRC_ROOT) : ''
+const reportDir = process.env.BENCH_GUARD_REPORT_DIR || ''
+const workerFile = reportDir
+  ? path.join(
+      reportDir,
+      `guard-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+    )
+  : ''
+const srcRoot = process.env.BENCH_GUARD_SRC_ROOT
+  ? path.resolve(process.env.BENCH_GUARD_SRC_ROOT)
+  : ''
 const allowedTimerFiles = new Set(
   (process.env.BENCH_GUARD_ALLOWED_TIMER_FILES || '')
     .split(',')
@@ -25,12 +38,15 @@ const violations = {
 }
 
 function persistReport() {
-  if (!reportPath) return
+  if (!workerFile) return
   try {
+    mkdirSync(reportDir, { recursive: true })
     writeFileSync(
-      reportPath,
+      workerFile,
       JSON.stringify(
         {
+          pid: process.pid,
+          loaded: true,
           globalPatches: [...new Set(violations.globalPatches)],
           realSleeps: [...new Set(violations.realSleeps)],
         },
@@ -39,9 +55,12 @@ function persistReport() {
       ),
     )
   } catch {
-    // best-effort write
+    // Harness fails closed if no report file exists
   }
 }
+
+// Write initial sentinel immediately on setup load so fail-closed check knows guard ran
+persistReport()
 
 function recordGlobalPatch(label) {
   violations.globalPatches.push(label)
@@ -53,8 +72,6 @@ function recordRealSleep(label) {
   persistReport()
 }
 
-// 1. Protect built-in globals and prototypes against both direct assignment AND
-//    Object.defineProperty / Reflect.defineProperty / Reflect.set / vi.spyOn / vi.stubGlobal.
 const PROTECTED_GLOBAL_KEYS = new Set([
   'Promise',
   'MessageChannel',
@@ -68,31 +85,49 @@ const PROTECTED_GLOBAL_KEYS = new Set([
   'AbortSignal',
 ])
 
-const PROTECTED_OBJECTS = new Map([
-  [Promise, 'Promise'],
-  [Promise.prototype, 'Promise.prototype'],
-  [MessageChannel, 'MessageChannel'],
-  [MessagePort, 'MessagePort'],
-  [MessagePort.prototype, 'MessagePort.prototype'],
-  [EventTarget, 'EventTarget'],
-  [EventTarget.prototype, 'EventTarget.prototype'],
-  [Map, 'Map'],
-  [Map.prototype, 'Map.prototype'],
-  [Set, 'Set'],
-  [Set.prototype, 'Set.prototype'],
-  [WeakMap.prototype, 'WeakMap.prototype'],
-  [WeakSet.prototype, 'WeakSet.prototype'],
-  [AbortController, 'AbortController'],
-  [AbortController.prototype, 'AbortController.prototype'],
-  [AbortSignal, 'AbortSignal'],
-  [AbortSignal.prototype, 'AbortSignal.prototype'],
-])
+// Walk full prototype chains (excluding Object.prototype) so NodeEventTarget.prototype etc. are protected (N-22!)
+const PROTECTED_OBJECTS = new Map()
+
+function registerWithPrototypeChain(obj, baseName) {
+  if (!obj || (typeof obj !== 'object' && typeof obj !== 'function')) return
+  let cur = obj
+  let depth = 0
+  while (cur && cur !== Object.prototype && cur !== Function.prototype) {
+    if (!PROTECTED_OBJECTS.has(cur)) {
+      const label = depth === 0 ? baseName : `${baseName}.__proto__^${depth}`
+      PROTECTED_OBJECTS.set(cur, label)
+    }
+    cur = Object.getPrototypeOf(cur)
+    depth += 1
+  }
+}
+
+registerWithPrototypeChain(Promise, 'Promise')
+registerWithPrototypeChain(Promise.prototype, 'Promise.prototype')
+registerWithPrototypeChain(MessageChannel, 'MessageChannel')
+registerWithPrototypeChain(MessageChannel.prototype, 'MessageChannel.prototype')
+registerWithPrototypeChain(MessagePort, 'MessagePort')
+registerWithPrototypeChain(MessagePort.prototype, 'MessagePort.prototype')
+registerWithPrototypeChain(EventTarget, 'EventTarget')
+registerWithPrototypeChain(EventTarget.prototype, 'EventTarget.prototype')
+registerWithPrototypeChain(Map, 'Map')
+registerWithPrototypeChain(Map.prototype, 'Map.prototype')
+registerWithPrototypeChain(Set, 'Set')
+registerWithPrototypeChain(Set.prototype, 'Set.prototype')
+registerWithPrototypeChain(WeakMap.prototype, 'WeakMap.prototype')
+registerWithPrototypeChain(WeakSet.prototype, 'WeakSet.prototype')
+registerWithPrototypeChain(AbortController, 'AbortController')
+registerWithPrototypeChain(AbortController.prototype, 'AbortController.prototype')
+registerWithPrototypeChain(AbortSignal, 'AbortSignal')
+registerWithPrototypeChain(AbortSignal.prototype, 'AbortSignal.prototype')
 
 const nativeDefineProperty = Object.defineProperty
 const nativeDefineProperties = Object.defineProperties
 const nativeReflectDefineProperty = Reflect.defineProperty
 const nativeReflectSet = Reflect.set
 const nativeObjectAssign = Object.assign
+const nativeSetPrototypeOf = Object.setPrototypeOf
+const nativeReflectSetPrototypeOf = Reflect.setPrototypeOf
 
 function checkTargetMutation(target, prop) {
   if (target === globalThis && PROTECTED_GLOBAL_KEYS.has(String(prop))) {
@@ -108,7 +143,7 @@ function checkTargetMutation(target, prop) {
   }
 }
 
-// Install non-configurable getter/setter traps on protected globalThis keys
+// 1. Non-configurable traps on protected globalThis keys
 for (const key of PROTECTED_GLOBAL_KEYS) {
   const original = globalThis[key]
   if (original === undefined) continue
@@ -128,20 +163,18 @@ for (const key of PROTECTED_GLOBAL_KEYS) {
   })
 }
 
-// Install non-configurable getter/setter traps on critical prototype/static methods
-const TRAPPED_MEMBERS = [
-  [Promise, ['resolve', 'reject', 'all', 'race', 'allSettled', 'any', 'withResolvers']],
-  [Promise.prototype, ['then', 'catch', 'finally']],
-  [MessagePort.prototype, ['postMessage', 'start', 'close', 'addEventListener', 'removeEventListener']],
-  [EventTarget.prototype, ['addEventListener', 'removeEventListener', 'dispatchEvent']],
-  [Map.prototype, ['get', 'set', 'has', 'delete', 'clear']],
-  [Set.prototype, ['add', 'has', 'delete', 'clear']],
-  [AbortController.prototype, ['abort']],
-]
-
-for (const [obj, keys] of TRAPPED_MEMBERS) {
-  const objName = PROTECTED_OBJECTS.get(obj) ?? 'Object'
-  for (const key of keys) {
+// 2. Lock EVERY string-keyed own property on EVERY protected object & prototype-chain link (closes N-22!)
+for (const [obj, objName] of PROTECTED_OBJECTS.entries()) {
+  for (const key of Reflect.ownKeys(obj)) {
+    if (
+      typeof key === 'symbol' ||
+      key === 'constructor' ||
+      key === 'prototype' ||
+      key === 'length' ||
+      key === 'name'
+    ) {
+      continue
+    }
     const desc = Object.getOwnPropertyDescriptor(obj, key)
     if (!desc || !desc.configurable) continue
     if ('value' in desc) {
@@ -153,7 +186,7 @@ for (const [obj, keys] of TRAPPED_MEMBERS) {
           return original
         },
         set() {
-          const label = `runtime:${objName}.${key}`
+          const label = `runtime:${objName}.${String(key)}`
           recordGlobalPatch(label)
           throw new TypeError(`Forbidden global monkey-patch: ${label}`)
         },
@@ -170,20 +203,7 @@ for (const [obj, keys] of TRAPPED_MEMBERS) {
   }
 }
 
-// Lock MessagePort.prototype.onmessage descriptor non-configurable while preserving instance setter
-{
-  const desc = Object.getOwnPropertyDescriptor(MessagePort.prototype, 'onmessage')
-  if (desc && desc.configurable) {
-    nativeDefineProperty(MessagePort.prototype, 'onmessage', {
-      configurable: false,
-      enumerable: desc.enumerable ?? true,
-      get: desc.get,
-      set: desc.set,
-    })
-  }
-}
-
-// Wrap reflection / defineProperty APIs so attempts to patch protected targets are logged explicitly
+// 3. Wrap reflection, defineProperty, and setPrototypeOf APIs (closes N-22!)
 Object.defineProperty = function guardedDefineProperty(target, prop, descriptor) {
   checkTargetMutation(target, prop)
   return nativeDefineProperty.call(Object, target, prop, descriptor)
@@ -216,13 +236,58 @@ Object.assign = function guardedObjectAssign(target, ...sources) {
   }
   return nativeObjectAssign.call(Object, target, ...sources)
 }
+Object.setPrototypeOf = function guardedSetPrototypeOf(target, proto) {
+  if (target === globalThis || PROTECTED_OBJECTS.has(target)) {
+    const label = `runtime:setPrototypeOf(${PROTECTED_OBJECTS.get(target) ?? 'globalThis'})`
+    recordGlobalPatch(label)
+    throw new TypeError(`Forbidden global monkey-patch: ${label}`)
+  }
+  return nativeSetPrototypeOf.call(Object, target, proto)
+}
+Reflect.setPrototypeOf = function guardedReflectSetPrototypeOf(target, proto) {
+  if (target === globalThis || PROTECTED_OBJECTS.has(target)) {
+    const label = `runtime:Reflect.setPrototypeOf(${PROTECTED_OBJECTS.get(target) ?? 'globalThis'})`
+    recordGlobalPatch(label)
+    throw new TypeError(`Forbidden global monkey-patch: ${label}`)
+  }
+  return nativeReflectSetPrototypeOf.call(Reflect, target, proto)
+}
+{
+  const protoDesc = Object.getOwnPropertyDescriptor(Object.prototype, '__proto__')
+  if (protoDesc && protoDesc.configurable && typeof protoDesc.set === 'function') {
+    const origSet = protoDesc.set
+    nativeDefineProperty(Object.prototype, '__proto__', {
+      configurable: false,
+      enumerable: protoDesc.enumerable ?? false,
+      get: protoDesc.get,
+      set(val) {
+        if (this === globalThis || PROTECTED_OBJECTS.has(this)) {
+          const label = `runtime:__proto__(${PROTECTED_OBJECTS.get(this) ?? 'globalThis'})`
+          recordGlobalPatch(label)
+          throw new TypeError(`Forbidden global monkey-patch: ${label}`)
+        }
+        return origSet.call(this, val)
+      },
+    })
+  }
+}
 
-// 2. Runtime sleep guard: block Atomics.wait and detect wall-clock setTimeout/setInterval
-//    called from agent test/helper files (ignoring Vitest fake timers and allowed timer production files).
+// 4. Runtime sleep guard: block Atomics.wait and detect wall-clock setTimeout/setInterval
 const nativeAtomicsWait = Atomics.wait
 Atomics.wait = function guardedAtomicsWait(...args) {
   recordRealSleep('runtime:Atomics.wait')
   throw new TypeError('Forbidden sleep: Atomics.wait')
+}
+
+function captureSafeStack() {
+  // Keep V8's native Error.stackTraceLimit intact (required by Vitest's vi.mock resolver),
+  // while defeating any cheat that zeroes Error.stackTraceLimit before sleeping.
+  const prev = Error.stackTraceLimit
+  const lowered = typeof prev !== 'number' || prev < 20
+  if (lowered) Error.stackTraceLimit = 20
+  const stack = new Error().stack ?? ''
+  if (lowered) Error.stackTraceLimit = prev
+  return stack
 }
 
 function isAgentNonAllowedStack(stack) {
@@ -244,25 +309,22 @@ function isAgentNonAllowedStack(stack) {
 const nativeSetTimeout = globalThis.setTimeout
 const nativeSetInterval = globalThis.setInterval
 
-// Note: vi.useFakeTimers() replaces globalThis.setTimeout with a fake clock, so this wrapper
-// runs ONLY when real wall-clock timers are active!
 globalThis.setTimeout = function guardedSetTimeout(fn, delay, ...args) {
   if (typeof delay === 'number' && delay > 0) {
-    const stack = new Error().stack ?? ''
+    const stack = captureSafeStack()
     if (isAgentNonAllowedStack(stack)) {
       recordRealSleep(`runtime:setTimeout(${delay})`)
     }
   }
   return nativeSetTimeout.call(globalThis, fn, delay, ...args)
 }
-// Copy custom promisify symbol so node:timers/promises interop stays intact
 for (const sym of Object.getOwnPropertySymbols(nativeSetTimeout)) {
   globalThis.setTimeout[sym] = nativeSetTimeout[sym]
 }
 
 globalThis.setInterval = function guardedSetInterval(fn, delay, ...args) {
   if (typeof delay === 'number' && delay > 0) {
-    const stack = new Error().stack ?? ''
+    const stack = captureSafeStack()
     if (isAgentNonAllowedStack(stack)) {
       recordRealSleep(`runtime:setInterval(${delay})`)
     }

@@ -26,6 +26,63 @@ function containsSuperOrYield(node) {
   return found
 }
 
+function enclosingFunctionName(node) {
+  let cur = node.parent
+  while (cur) {
+    if (
+      (cur.kind === SyntaxKind.FunctionDeclaration ||
+        cur.kind === SyntaxKind.FunctionExpression ||
+        cur.kind === SyntaxKind.MethodDeclaration) &&
+      cur.name?.text
+    ) {
+      return cur.name.text
+    }
+    if (
+      cur.kind === SyntaxKind.VariableDeclaration &&
+      cur.name?.kind === SyntaxKind.Identifier &&
+      cur.initializer &&
+      (cur.initializer.kind === SyntaxKind.ArrowFunction ||
+        cur.initializer.kind === SyntaxKind.FunctionExpression)
+    ) {
+      return cur.name.text
+    }
+    cur = cur.parent
+  }
+  return '<top>'
+}
+
+const LEAF_FS_METHODS = new Set([
+  'readFile',
+  'writeFile',
+  'rm',
+  'unlink',
+  'stat',
+  'lstat',
+  'mkdir',
+  'readdir',
+  'rename',
+  'open',
+  'access',
+])
+
+function isLeafIoExpression(expr) {
+  if (!expr) return false
+  if (expr.kind === SyntaxKind.CallExpression) {
+    const callee = expr.expression
+    if (callee?.kind === SyntaxKind.Identifier && callee.text === 'yieldIo') {
+      return true
+    }
+    if (
+      callee?.kind === SyntaxKind.PropertyAccessExpression &&
+      callee.name?.text &&
+      LEAF_FS_METHODS.has(callee.name.text)
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
 export function benchYieldPlugin({ root, skipFiles = [] }) {
   const realRoot = realpathSync(root)
   const srcRoot = path.resolve(realRoot, 'src') + path.sep
@@ -82,6 +139,8 @@ export function benchYieldPlugin({ root, skipFiles = [] }) {
             awaits.push({
               start: node.expression.getStart(sf),
               end: node.expression.end,
+              fnName: enclosingFunctionName(node),
+              isLeaf: isLeafIoExpression(node.expression),
             })
           }
           node.forEachChild(walk)
@@ -105,13 +164,14 @@ export function benchYieldPlugin({ root, skipFiles = [] }) {
           return b
         }
         for (const a of awaits) {
+          const site = `${rel}#${a.fnName}:${a.start}`
           at(a.start).opens.push({
             end: a.end,
-            text: `${helperName}(${JSON.stringify(`${rel}:${a.start}`)}, async () => (`,
+            text: `${helperName}(${JSON.stringify(site)}, async () => (`,
           })
           at(a.end).closes.push({
             start: a.start,
-            text: `))`,
+            text: a.isLeaf ? `), true)` : `))`,
           })
         }
         for (const [offset, b] of buckets) {

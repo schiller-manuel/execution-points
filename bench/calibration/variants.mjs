@@ -1151,10 +1151,69 @@ export const SINGLE_BUG_MUTANTS = {
  * for measuring regression-test false-red rate (separating silent assertion false
  * reds from loud selection/compile breaks).
  */
+// N-11 valid fix: serializes ALL operations per key (including warm cache hits inside the queue)
+const STALE_CACHE_V9_SERIAL_WARM = STALE_CACHE_V9.replace(
+  /export async function getProfile\(id: string\): Promise<Profile \| null> \{[\s\S]*?\n\}/,
+  `export async function getProfile(id: string): Promise<Profile | null> {
+  const prev = updateQueues.get(id) ?? Promise.resolve()
+  const task = prev
+    .catch(() => {})
+    .then(async () => {
+      const cached = cache.get(id)
+      if (cached) return { ...cached }
+      const raw = await readFromDb(id)
+      if (!raw) return null
+      const formatted = await formatProfile(raw)
+      cache.set(id, formatted)
+      return { ...formatted }
+    })
+  updateQueues.set(id, task)
+  return await task
+}`,
+)
+
+// N-11 valid fix for stale-cache-seam (mirrors live v2.1 pilot Control fix!)
+const STALE_CACHE_SEAM_SERIAL_WARM = STALE_CACHE_SEAM_REF.replace(
+  /export async function getProfile\(id: string\): Promise<Profile \| null> \{[\s\S]*?\n\}/,
+  `export async function getProfile(id: string): Promise<Profile | null> {
+  const prev = updateQueues.get(id) ?? Promise.resolve()
+  const task = prev
+    .catch(() => {})
+    .then(async () => {
+      const cached = cache.get(id)
+      if (cached) return { ...cached }
+      const raw = await readFromDb(id)
+      if (!raw) return null
+      const formatted = await formatProfile(raw)
+      cache.set(id, formatted)
+      return { ...formatted }
+    })
+  updateQueues.set(id, task)
+  return await task
+}`,
+)
+
+// N-14 valid fix: `return await` pass-through wrapper on updateProfile (behavior-preserving in JS!)
+const STALE_CACHE_V9_RETURN_AWAIT = STALE_CACHE_V9.replace(
+  'export function updateProfile(id: string, name: string): Promise<Profile> {',
+  'export async function updateProfile(id: string, name: string): Promise<Profile> {',
+).replace('  updateQueues.set(id, task)\n  return task', '  updateQueues.set(id, task)\n  return await task')
+
+const STALE_CACHE_SEAM_RETURN_AWAIT = STALE_CACHE_SEAM_REF.replace(
+  'export function updateProfile(id: string, name: string): Promise<Profile> {',
+  'export async function updateProfile(id: string, name: string): Promise<Profile> {',
+).replace('  updateQueues.set(id, task)\n  return task', '  updateQueues.set(id, task)\n  return await task')
+
+const SINGLE_FLIGHT_RETURN_AWAIT = SINGLE_FLIGHT_REF.replace(
+  'export function getToken(tenantId: string): Promise<string> {',
+  'export async function getToken(tenantId: string): Promise<string> {',
+).replace('  return promise\n}', '  return await promise\n}')
+
 export const VALID_FIX_VARIANTS = {
   'stale-cache': [
     { id: 'V9-ref', files: { 'src/profile-store.ts': STALE_CACHE_V9 } },
     { id: 'V9-rev-design', files: { 'src/profile-store.ts': STALE_CACHE_V9_REVISION } },
+    { id: 'V9-serial-warm', files: { 'src/profile-store.ts': STALE_CACHE_V9_SERIAL_WARM } },
     { id: 'V5-two-callsites', files: { 'src/profile-store.ts': STALE_CACHE_V5 } },
     { id: 'V7-multifile', files: { 'src/profile-helpers.ts': STALE_CACHE_V7_HELPERS, 'src/profile-store.ts': STALE_CACHE_V7_MAIN } },
   ],
@@ -1166,9 +1225,12 @@ export const VALID_FIX_VARIANTS = {
   ],
   'stale-cache-seam': [
     { id: 'SCS-ref', files: { 'src/profile-store.ts': STALE_CACHE_SEAM_REF } },
+    { id: 'SCS-serial-warm', files: { 'src/profile-store.ts': STALE_CACHE_SEAM_SERIAL_WARM } },
+    { id: 'SCS-return-await', files: { 'src/profile-store.ts': STALE_CACHE_SEAM_RETURN_AWAIT } },
   ],
   'single-flight': [
     { id: 'SF-ref', files: { 'src/token-cache.ts': SINGLE_FLIGHT_REF } },
+    { id: 'SF-return-await', files: { 'src/token-cache.ts': SINGLE_FLIGHT_RETURN_AWAIT } },
   ],
   'cancel-commit': [
     { id: 'CC-ref', files: { 'src/job-runner.ts': CANCEL_COMMIT_REF } },
@@ -1208,6 +1270,8 @@ export const CALIBRATION_VARIANTS = [
   { id: 'V8', task: 'stale-cache', expectPass: false, label: 'skips empty-name validation', files: { 'src/profile-store.ts': STALE_CACHE_V8 } },
   { id: 'V9', task: 'stale-cache', expectPass: true, label: 'full V9 reference fix', files: { 'src/profile-store.ts': STALE_CACHE_V9 } },
   { id: 'V9r', task: 'stale-cache', expectPass: true, label: 'design-diverse V9 revision-guard fix (no queue)', files: { 'src/profile-store.ts': STALE_CACHE_V9_REVISION } },
+  { id: 'V9sw', task: 'stale-cache', expectPass: true, label: 'N-11 per-key serialized warm-hit fix', files: { 'src/profile-store.ts': STALE_CACHE_V9_SERIAL_WARM } },
+  { id: 'V9ra', task: 'stale-cache', expectPass: true, label: 'N-14 return-await updateProfile fix', files: { 'src/profile-store.ts': STALE_CACHE_V9_RETURN_AWAIT } },
 
   // token-session T0–T5
   { id: 'T0', task: 'token-session', expectPass: false, label: 'original buggy code', useBaseline: true },
@@ -1221,11 +1285,14 @@ export const CALIBRATION_VARIANTS = [
   // stale-cache-seam
   { id: 'SCS0', task: 'stale-cache-seam', expectPass: false, label: 'buggy seam store', useBaseline: true },
   { id: 'SCS1', task: 'stale-cache-seam', expectPass: true, label: 'reference seam fix', files: { 'src/profile-store.ts': STALE_CACHE_SEAM_REF } },
+  { id: 'SCS2', task: 'stale-cache-seam', expectPass: true, label: 'N-11 serialized warm-hit seam fix', files: { 'src/profile-store.ts': STALE_CACHE_SEAM_SERIAL_WARM } },
+  { id: 'SCS3', task: 'stale-cache-seam', expectPass: true, label: 'N-14 return-await seam fix', files: { 'src/profile-store.ts': STALE_CACHE_SEAM_RETURN_AWAIT } },
 
   // single-flight
   { id: 'SF0', task: 'single-flight', expectPass: false, label: 'buggy single-flight', useBaseline: true },
   { id: 'SF1', task: 'single-flight', expectPass: false, label: 'rejection poisons inflight map', files: { 'src/token-cache.ts': SINGLE_FLIGHT_POISON } },
   { id: 'SF2', task: 'single-flight', expectPass: true, label: 'reference single-flight fix', files: { 'src/token-cache.ts': SINGLE_FLIGHT_REF } },
+  { id: 'SF3', task: 'single-flight', expectPass: true, label: 'N-14 return-await single-flight fix', files: { 'src/token-cache.ts': SINGLE_FLIGHT_RETURN_AWAIT } },
 
   // cancel-commit
   { id: 'CC0', task: 'cancel-commit', expectPass: false, label: 'buggy cancel-commit', useBaseline: true },

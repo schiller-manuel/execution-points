@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 /**
- * Intention-to-treat statistical analyzer for v2 benchmark `results.jsonl` files
- * (closes ST-02, ST-03, ST-04, ST-05, ST-07, E9-01).
+ * Intention-to-treat statistical analyzer for v2.2 benchmark `results.jsonl` files.
+ *
+ * Closes ST-02..ST-07, E9-01, N-05, N-06, N-07, N-08, N-09, N-13, N-21, N-26..N-28:
+ * - Deduplicates by (runId, trialId) and compares ALL provenance hashes + versions
+ *   (refusing dirty, missing, or mismatched provenance unless `--allow-mixed` is passed).
+ * - Primary analysis runs strictly over equal-capability Strata B + C (`io-seam` + `real-async`);
+ *   Stratum A (`closed-module`) is reported separately as a capability stratum.
+ * - E9 metrics are computed ONLY over `adequateReproduction === true` rows, reported per stratum & task.
+ * - Billed `aiCredits` is the primary cost metric (`estimatedUsd` labeled as list-price estimate).
+ * - Counts `notStarted`, `aborted`, `infraFailure`, `ungradable`, and `usageMissing` explicitly.
  *
  * Usage:
  *   node bench/analyze.mjs [--allow-mixed] <results.jsonl> [more.jsonl...]
@@ -27,15 +35,22 @@ for (const file of files) {
   }
 }
 
-// ST-02: Deduplicate by (runId, trialId) and detect provenance mismatches
+const PROVENANCE_FIELDS = [
+  'harnessSha256',
+  'calibrationSha256',
+  'lockfileSha256',
+  'toolSha256',
+  'tasksSha256',
+  'vitestVersion',
+  'typescriptVersion',
+]
+
 const seenKeys = new Set()
-const seenTrialIds = new Map()
 const rows = []
 let duplicateSkipped = 0
-let crossRunTrialIdCollisions = 0
-
-const harnessHashes = new Set()
-const toolHashes = new Set()
+const provenanceSets = Object.fromEntries(PROVENANCE_FIELDS.map((k) => [k, new Set()]))
+let dirtyRows = 0
+let missingProvRows = 0
 
 for (const { file, row } of rawRows) {
   const runKey = row.runId ?? file
@@ -46,19 +61,24 @@ for (const { file, row } of rawRows) {
   }
   seenKeys.add(dedupKey)
 
-  if (seenTrialIds.has(row.trialId) && seenTrialIds.get(row.trialId) !== runKey) {
-    crossRunTrialIdCollisions++
-  } else {
-    seenTrialIds.set(row.trialId, runKey)
+  if (row.gitDirty === true) dirtyRows++
+  let missingAny = false
+  for (const f of PROVENANCE_FIELDS) {
+    if (row[f] === undefined || row[f] === null) missingAny = true
+    else provenanceSets[f].add(String(row[f]))
   }
-
-  if (row.harnessSha256) harnessHashes.add(row.harnessSha256)
-  if (row.toolSha256) toolHashes.add(row.toolSha256)
+  if (missingAny) missingProvRows++
   rows.push(row)
 }
 
-if (harnessHashes.size > 1 || toolHashes.size > 1) {
-  const msg = `Provenance mismatch across pooled files (harnessSha256=${[...harnessHashes].join(',')}, toolSha256=${[...toolHashes].join(',')}).`
+// N-07: Enforce full provenance matching, clean tree, and non-missing hashes unless --allow-mixed
+const mismatchedFields = PROVENANCE_FIELDS.filter((f) => provenanceSets[f].size > 1)
+if (mismatchedFields.length > 0 || dirtyRows > 0 || missingProvRows > 0) {
+  const parts = []
+  if (mismatchedFields.length > 0) parts.push(`mismatched=[${mismatchedFields.join(',')}]`)
+  if (dirtyRows > 0) parts.push(`dirtyRows=${dirtyRows}`)
+  if (missingProvRows > 0) parts.push(`missingProvenanceRows=${missingProvRows}`)
+  const msg = `Provenance check failed (${parts.join(', ')}).`
   if (!allowMixed) {
     console.error(`ERROR: ${msg} Pass --allow-mixed to pool anyway.`)
     process.exit(2)
@@ -69,67 +89,72 @@ if (harnessHashes.size > 1 || toolHashes.size > 1) {
 if (duplicateSkipped > 0) {
   console.warn(`WARNING: Skipped ${duplicateSkipped} exact duplicate (runId, trialId) row(s).`)
 }
-if (crossRunTrialIdCollisions > 0) {
-  console.warn(
-    `NOTE: ${crossRunTrialIdCollisions} trialId(s) appear across distinct runs (kept separate via runId; verify these are independent replicates).`,
-  )
-}
 
 function summarizeGroup(items) {
-  const n = items.length
-  const solved = items.filter((r) => r.solved).length
-  const oracle = items.filter((r) => r.oraclePass).length
-  const red = items.filter((r) => r.redReproducesBug).length
-  const adequateRed = items.filter((r) => r.adequateReproduction ?? r.redReproducesBug).length
-  const monkeyPatch = items.filter((r) => !r.noGlobalMonkeyPatch).length
-  const adoptedEp = items.filter((r) => r.usesExecutionPoints).length
-  const harnessErrors = items.filter((r) => Boolean(r.harnessError || r.ungradable)).length
-  const aborted = items.filter((r) => Boolean(r.aborted)).length
-  const usageMissing = items.filter((r) => Boolean(r.usage?.usageMissing)).length
+  const active = items.filter((r) => !r.notStarted)
+  const notStarted = items.length - active.length
+  const n = active.length
+  const solved = active.filter((r) => r.solved).length
+  const oracle = active.filter((r) => r.oraclePass).length
+  const red = active.filter((r) => r.redReproducesBug).length
+  const adequateRed = active.filter((r) => r.adequateReproduction).length
+  // N-09: Only count explicit `noGlobalMonkeyPatch === false` (null on aborted/not_started is NOT a patch!)
+  const monkeyPatch = active.filter((r) => r.noGlobalMonkeyPatch === false).length
+  const adoptedEp = active.filter((r) => r.usesExecutionPoints).length
+  const infraFailures = active.filter((r) => Boolean(r.infraFailure)).length
+  const ungradable = active.filter((r) => Boolean(r.harnessError || r.ungradable)).length
+  const aborted = active.filter((r) => Boolean(r.aborted)).length
+  const usageMissing = active.filter((r) => Boolean(r.usage?.usageMissing)).length
 
+  // N-06: Compute E9 ONLY over rows with `adequateReproduction === true`!
   let fgNum = 0
   let fgDen = 0
   let loudBuggy = 0
-
   let vfPass = 0
   let vfTotal = 0
   let vfAssertFail = 0
   let vfTimeout = 0
   let vfSelectorCompile = 0
+  let e9Eligible = 0
 
   let totalTokens = 0
-  let totalUsd = 0
-  let usdKnownTrials = 0
+  let totalCredits = 0
+  let creditsKnownTrials = 0
+  let totalListUsd = 0
   let totalMs = 0
 
-  for (const r of items) {
-    if (r.refactorRobustness) {
-      fgNum += r.refactorRobustness.falseGreenCount ?? 0
-      fgDen += r.refactorRobustness.total ?? 0
-      loudBuggy += r.refactorRobustness.loudBreakCount ?? 0
-    }
-    if (r.validFixRobustness) {
-      vfTotal += r.validFixRobustness.total ?? 0
-      vfPass += r.validFixRobustness.trueGreenCount ?? 0
-      vfAssertFail += r.validFixRobustness.falseRedAssertionCount ?? 0
-      vfTimeout += r.validFixRobustness.timeoutCount ?? 0
-      vfSelectorCompile +=
-        r.validFixRobustness.selectorOrCompileBreakCount ?? r.validFixRobustness.loudBreakCount ?? 0
+  for (const r of active) {
+    if (r.adequateReproduction) {
+      e9Eligible++
+      if (r.refactorRobustness) {
+        fgNum += r.refactorRobustness.falseGreenCount ?? 0
+        fgDen += r.refactorRobustness.total ?? 0
+        loudBuggy += r.refactorRobustness.loudBreakCount ?? 0
+      }
+      if (r.validFixRobustness) {
+        vfTotal += r.validFixRobustness.total ?? 0
+        vfPass += r.validFixRobustness.trueGreenCount ?? 0
+        vfAssertFail += r.validFixRobustness.falseRedAssertionCount ?? 0
+        vfTimeout += r.validFixRobustness.timeoutCount ?? 0
+        vfSelectorCompile += r.validFixRobustness.selectorOrCompileBreakCount ?? 0
+      }
     }
     if (!r.usage?.usageMissing) {
       totalTokens += r.usage?.totalTokens ?? 0
+      if (typeof r.usage?.aiCredits === 'number') {
+        totalCredits += r.usage.aiCredits
+        creditsKnownTrials++
+      }
       if (typeof r.usage?.estimatedUsd === 'number') {
-        totalUsd += r.usage.estimatedUsd
-        usdKnownTrials++
+        totalListUsd += r.usage.estimatedUsd
       }
     }
     totalMs += r.durationMs ?? 0
   }
 
-  const vfFalseRed = vfAssertFail + vfTimeout
-
   return {
     n,
+    notStarted,
     solved,
     solvedCI: wilsonCI(solved, n),
     oracleCI: wilsonCI(oracle, n),
@@ -137,82 +162,91 @@ function summarizeGroup(items) {
     adequateRedCI: wilsonCI(adequateRed, n),
     monkeyPatch,
     adoptedEp,
-    harnessErrors,
+    infraFailures,
+    ungradable,
     aborted,
     usageMissing,
+    e9Eligible,
     falseGreenCI: wilsonCI(fgNum, fgDen),
     loudBuggy,
     validFixPassCI: wilsonCI(vfPass, vfTotal),
-    validFixFalseRedCI: wilsonCI(vfFalseRed, vfTotal),
+    validFixFalseRedCI: wilsonCI(vfAssertFail + vfTimeout, vfTotal),
     vfPass,
     vfTotal,
     vfAssertFail,
     vfTimeout,
     vfSelectorCompile,
     totalTokens,
-    avgTokens: usdKnownTrials ? Math.round(totalTokens / usdKnownTrials) : null,
-    tokensPerSolved: solved > 0 && usdKnownTrials > 0 ? Math.round(totalTokens / solved) : null,
-    totalUsd: usdKnownTrials > 0 ? totalUsd : null,
-    avgUsd: usdKnownTrials > 0 ? totalUsd / usdKnownTrials : null,
-    usdPerSolved: solved > 0 && usdKnownTrials > 0 ? totalUsd / solved : null,
+    totalCredits: creditsKnownTrials > 0 ? totalCredits : null,
+    avgCredits: creditsKnownTrials > 0 ? totalCredits / creditsKnownTrials : null,
+    creditsPerSolved: solved > 0 && creditsKnownTrials > 0 ? totalCredits / solved : null,
+    totalListUsd: creditsKnownTrials > 0 ? totalListUsd : null,
     avgSec: n ? totalMs / n / 1000 : 0,
   }
 }
 
-console.log(`Loaded ${rows.length} intention-to-treat trials from ${files.length} file(s).\n`)
+const startedRows = rows.filter((r) => !r.notStarted)
+const notStartedCount = rows.length - startedRows.length
+const equalSeamRows = startedRows.filter((r) => r.stratum !== 'closed-module')
+const closedModRows = startedRows.filter((r) => r.stratum === 'closed-module')
 
-console.log('=== Overall Per-Arm Summary (approximate 95% Wilson CIs — descriptive) ===')
-for (const arm of ['control', 'treatment']) {
-  const subset = rows.filter((r) => r.arm === arm)
-  if (subset.length === 0) continue
-  const s = summarizeGroup(subset)
-  console.log(
-    `\n${arm.toUpperCase()} (n=${s.n}, ungradable/err=${s.harnessErrors}, aborted=${s.aborted}, usageMissing=${s.usageMissing}):`,
-  )
-  console.log(`  Primary solved:        ${s.solved}/${s.n} — ${formatCI(s.solvedCI)}`)
-  console.log(`  Oracle pass:           ${formatCI(s.oracleCI)}`)
-  console.log(`  Baseline RED:          ${formatCI(s.redCI)} | Adequate RED: ${formatCI(s.adequateRedCI)}`)
-  console.log(`  Global monkeypatch:    ${s.monkeyPatch}/${s.n} | EP adoption: ${s.adoptedEp}/${s.n}`)
-  console.log(`  E9 Buggy false-green:  ${formatCI(s.falseGreenCI)} (loud breaks: ${s.loudBuggy})`)
-  console.log(
-    `  E9 Valid-fix pass:     ${s.vfPass}/${s.vfTotal} (${formatCI(s.validFixPassCI)}) | false-red (assert+timeout)=${formatCI(s.validFixFalseRedCI)} [assert=${s.vfAssertFail}, timeout=${s.vfTimeout}, selector/compile=${s.vfSelectorCompile}]`,
-  )
-  console.log(
-    `  Tokens & Cost:         ${s.totalTokens.toLocaleString()} total (${s.avgTokens?.toLocaleString() ?? 'n/a'}/trial, ${s.tokensPerSolved?.toLocaleString() ?? 'n/a'}/solved) | ${formatUsd(s.totalUsd)} total (${formatUsd(s.avgUsd)}/trial, ${formatUsd(s.usdPerSolved)}/solved) | ${s.avgSec.toFixed(1)}s/trial`,
-  )
-}
-
-console.log('\n=== Primary Stratified Analysis (ITT) ===')
-const cmhSolved = stratifiedCMH(rows, (r) => Boolean(r.solved))
-const rdSolved = matchedRiskDifferenceCI(rows, (r) => Boolean(r.solved))
 console.log(
-  `CMH (strata=${cmhSolved.strataCount}): z=${cmhSolved.z}, p=${cmhSolved.pValue}, exactMcNemarP=${cmhSolved.exactMcNemarP ?? 'n/a'}, commonOR=${cmhSolved.commonOddsRatio ?? 'n/a'}`,
+  `Loaded ${startedRows.length} started ITT trials (+ ${notStartedCount} not_started) from ${files.length} file(s).\n`,
 )
-if (rdSolved.diff !== null) {
+
+// N-08: Primary Stratified Analysis is strictly over equal-capability Strata B + C!
+console.log('=== PRIMARY Stratified Analysis — Equal-Capability Strata B + C ONLY (ITT) ===')
+const cmhPrimary = stratifiedCMH(equalSeamRows, (r) => Boolean(r.solved))
+const rdPrimary = matchedRiskDifferenceCI(equalSeamRows, (r) => Boolean(r.solved))
+console.log(
+  `Primary CMH (B+C, strata=${cmhPrimary.strataCount}): z=${cmhPrimary.z}, p=${cmhPrimary.pValue}, exactMcNemarP=${cmhPrimary.exactMcNemarP ?? 'n/a'}, commonOR=${cmhPrimary.commonOddsRatio ?? 'n/a'}`,
+)
+if (rdPrimary.diff !== null) {
   console.log(
-    `Newcombe paired RD (blocks=${rdSolved.blocks}): ${(rdSolved.diff * 100).toFixed(1)}pp [${(rdSolved.low * 100).toFixed(1)}pp, ${(rdSolved.high * 100).toFixed(1)}pp]`,
+    `Newcombe paired RD (B+C, blocks=${rdPrimary.blocks}): ${(rdPrimary.diff * 100).toFixed(1)}pp [${(rdPrimary.low * 100).toFixed(1)}pp, ${(rdPrimary.high * 100).toFixed(1)}pp]`,
   )
 }
 
-const nonErrRows = rows.filter((r) => !r.harnessError && !r.ungradable)
-if (nonErrRows.length !== rows.length) {
-  const cmhSens = stratifiedCMH(nonErrRows, (r) => Boolean(r.solved))
+const nonInfraPrimary = equalSeamRows.filter((r) => !r.infraFailure && !r.harnessError && !r.ungradable)
+if (nonInfraPrimary.length !== equalSeamRows.length) {
+  const cmhSens = stratifiedCMH(nonInfraPrimary, (r) => Boolean(r.solved))
   console.log(
-    `Sensitivity (excluding ${rows.length - nonErrRows.length} harness-error/ungradable rows): strata=${cmhSens.strataCount}, p=${cmhSens.pValue}, exactMcNemarP=${cmhSens.exactMcNemarP ?? 'n/a'}`,
+    `Sensitivity (B+C excluding ${equalSeamRows.length - nonInfraPrimary.length} infra/ungradable rows): strata=${cmhSens.strataCount}, p=${cmhSens.pValue}, exactMcNemarP=${cmhSens.exactMcNemarP ?? 'n/a'}`,
   )
 }
 
-console.log('\n=== Per-Stratum Breakdown (Stratum A closed-module reported separately from equal-seam B+C) ===')
-for (const stratum of [...new Set(rows.map((r) => r.stratum ?? 'unknown'))]) {
-  const label = stratum === 'closed-module' ? `${stratum} [capability: tool vs no seam]` : stratum
+if (closedModRows.length > 0) {
+  console.log('\n=== SEPARATE Capability Result — Stratum A (closed-module: tool vs no module seam) ===')
+  const cmhA = stratifiedCMH(closedModRows, (r) => Boolean(r.solved))
+  const rdA = matchedRiskDifferenceCI(closedModRows, (r) => Boolean(r.solved))
+  console.log(
+    `Stratum A CMH (strata=${cmhA.strataCount}): z=${cmhA.z}, p=${cmhA.pValue}, exactMcNemarP=${cmhA.exactMcNemarP ?? 'n/a'}, commonOR=${cmhA.commonOddsRatio ?? 'n/a'}`,
+  )
+  if (rdA.diff !== null) {
+    console.log(
+      `Stratum A Newcombe RD (blocks=${rdA.blocks}): ${(rdA.diff * 100).toFixed(1)}pp [${(rdA.low * 100).toFixed(1)}pp, ${(rdA.high * 100).toFixed(1)}pp]`,
+    )
+  }
+}
+
+console.log('\n=== Per-Stratum Breakdown (approximate 95% Wilson CIs — E9 over adequate reproductions only) ===')
+for (const stratum of [...new Set(startedRows.map((r) => r.stratum ?? 'unknown'))]) {
+  const label = stratum === 'closed-module' ? `${stratum} [capability stratum — separate from primary]` : stratum
   console.log(`\nStratum: ${label}`)
-  const sRows = rows.filter((r) => (r.stratum ?? 'unknown') === stratum)
+  const sRows = startedRows.filter((r) => (r.stratum ?? 'unknown') === stratum)
   for (const arm of ['control', 'treatment']) {
     const sub = sRows.filter((r) => r.arm === arm)
     if (sub.length === 0) continue
     const s = summarizeGroup(sub)
+    const credStr =
+      s.totalCredits === null
+        ? 'n/a'
+        : `${s.totalCredits.toFixed(1)} cr (${s.avgCredits?.toFixed(1)}/trial, ${s.creditsPerSolved?.toFixed(1) ?? 'n/a'}/solved; list-price est ${formatUsd(s.totalListUsd)})`
     console.log(
-      `  ${arm.padEnd(9)} n=${String(s.n).padEnd(3)} solved=${formatCI(s.solvedCI)} | validFixPass=${s.vfPass}/${s.vfTotal} | fg=${formatCI(s.falseGreenCI)} | cost=${formatUsd(s.avgUsd)}/trial`,
+      `  ${arm.padEnd(9)} n=${String(s.n).padEnd(3)} solved=${s.solved}/${s.n} ${formatCI(s.solvedCI)} | infra=${s.infraFailures} ungrad=${s.ungradable} abort=${s.aborted} | adqRED=${formatCI(s.adequateRedCI)} | ep=${s.adoptedEp}/${s.n}`,
+    )
+    console.log(
+      `            E9 (eligible=${s.e9Eligible}): FG=${formatCI(s.falseGreenCI)} | VFPass=${s.vfPass}/${s.vfTotal} (${formatCI(s.validFixPassCI)}) [assert=${s.vfAssertFail}, to=${s.vfTimeout}, sel=${s.vfSelectorCompile}] | ${credStr}`,
     )
   }
   const cmh = stratifiedCMH(sRows, (r) => Boolean(r.solved))
@@ -221,10 +255,9 @@ for (const stratum of [...new Set(rows.map((r) => r.stratum ?? 'unknown'))]) {
   )
 }
 
-const promptStyles = [...new Set(rows.map((r) => r.promptStyle ?? 'unknown'))]
 console.log('\n=== Per-Prompt-Style Breakdown ===')
-for (const ps of promptStyles) {
-  const pRows = rows.filter((r) => (r.promptStyle ?? 'unknown') === ps)
+for (const ps of [...new Set(startedRows.map((r) => r.promptStyle ?? 'unknown'))]) {
+  const pRows = startedRows.filter((r) => (r.promptStyle ?? 'unknown') === ps)
   const cmh = stratifiedCMH(pRows, (r) => Boolean(r.solved))
   const cSolved = pRows.filter((r) => r.arm === 'control' && r.solved).length
   const cN = pRows.filter((r) => r.arm === 'control').length

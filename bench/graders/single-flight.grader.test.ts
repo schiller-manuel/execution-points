@@ -7,12 +7,17 @@ import { getToken, invalidateToken, resetTokenCache } from './src/token-cache'
 describe('hidden oracle grader: single-flight (yield-engine)', () => {
   test('preserves cold yields, warm-cache hits, and basic invalidation', async () => {
     resetTokenCache()
-    const { result: t1, yields: coldYields } = await countYields(() => getToken('acme'))
+    const ioSite = /src\/auth-client\.ts#/
+    const { result: t1, yields: coldYields } = await countYields(() => getToken('acme'), {
+      matchSite: ioSite,
+    })
     expect(t1).toMatch(/^tok-acme-/)
     expect(coldYields).toBeGreaterThanOrEqual(1)
     expect(getRefreshCallCount('acme')).toBe(1)
 
-    const { result: t2, yields } = await countYields(() => getToken('acme'))
+    const { result: t2, yields } = await countYields(() => getToken('acme'), {
+      matchSite: ioSite,
+    })
     expect(t2).toBe(t1)
     expect(yields).toBe(0)
     expect(getRefreshCallCount('acme')).toBe(1)

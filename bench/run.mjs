@@ -15,7 +15,7 @@
  *   node bench/run.mjs --tasks stale-cache-seam --models gpt-6.2-astra:medium        # dry-run plan
  *   node bench/run.mjs --run --tasks stale-cache-seam --models gpt-6.2-astra:medium --trials 1
  */
-import { execFile, execFileSync, spawn } from 'node:child_process'
+import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   appendFileSync,
@@ -25,11 +25,12 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -346,9 +347,28 @@ export function computeProvenance() {
     // non-git checkout
   }
 
+  let vitestVersion = 'unknown'
+  let typescriptVersion = 'unknown'
+  try {
+    vitestVersion = JSON.parse(
+      readFileSync(path.join(REPO_ROOT, 'node_modules/vitest/package.json'), 'utf8'),
+    ).version
+  } catch {
+    // ignore
+  }
+  try {
+    typescriptVersion = JSON.parse(
+      readFileSync(path.join(REPO_ROOT, 'node_modules/typescript/package.json'), 'utf8'),
+    ).version
+  } catch {
+    // ignore
+  }
+
   return {
     gitCommit,
     gitDirty,
+    vitestVersion,
+    typescriptVersion,
     harnessSha256: hashDirFiles([
       path.join(__dirname, 'run.mjs'),
       path.join(__dirname, 'toolchain.mjs'),
@@ -356,8 +376,11 @@ export function computeProvenance() {
       path.join(__dirname, 'runtime-guard.setup.mjs'),
       path.join(__dirname, 'pricing.mjs'),
       path.join(__dirname, 'stats.mjs'),
+      path.join(__dirname, 'analyze.mjs'),
       path.join(__dirname, 'graders'),
     ]),
+    calibrationSha256: hashDirFiles([path.join(__dirname, 'calibration')]),
+    lockfileSha256: hashDirFiles([path.join(REPO_ROOT, 'pnpm-lock.yaml')]),
     toolSha256: hashDirFiles([path.join(REPO_ROOT, 'src'), path.join(REPO_ROOT, 'package.json')]),
     tasksSha256: hashDirFiles([path.join(__dirname, 'tasks'), path.join(__dirname, 'guides')]),
   }
@@ -387,8 +410,11 @@ function parseArgs(argv) {
     trials: 1,
     concurrency: 2,
     timeoutSec: 360,
-    maxCredits: 150,
+    cliCreditCap: 0, // N-32: 0 omits --max-ai-credits so CLI doesn't inject live cost meter into tool results
     maxTotalCredits: 300,
+    maxConsecutiveInfra: 3, // N-05: abort run after k consecutive infra failures
+    skipPreflight: false,
+    sweepStale: false, // N-01: opt-in sweep so concurrent runs are never clobbered
     seed: 42,
     phaseSplit: true,
     keepWorkspaces: false,
@@ -405,8 +431,11 @@ function parseArgs(argv) {
     else if (a === '--trials') opts.trials = Number(argv[++i])
     else if (a === '--concurrency') opts.concurrency = Number(argv[++i])
     else if (a === '--timeout') opts.timeoutSec = Number(argv[++i])
-    else if (a === '--max-credits') opts.maxCredits = Number(argv[++i])
+    else if (a === '--max-credits' || a === '--cli-credit-cap') opts.cliCreditCap = Number(argv[++i])
     else if (a === '--max-total-credits') opts.maxTotalCredits = Number(argv[++i])
+    else if (a === '--max-consecutive-infra') opts.maxConsecutiveInfra = Number(argv[++i])
+    else if (a === '--skip-preflight') opts.skipPreflight = true
+    else if (a === '--sweep-stale') opts.sweepStale = true
     else if (a === '--seed') opts.seed = Number(argv[++i])
     else if (a === '--no-phase-split') opts.phaseSplit = false
     else if (a === '--phase-split') opts.phaseSplit = true
@@ -500,6 +529,10 @@ function writePristineWorkspaceConfigs(dir, task, arm, { includeRuntimeGuard = f
   const setupLine = includeRuntimeGuard
     ? `setupFiles: [${JSON.stringify(RUNTIME_GUARD_PATH)}],\n    `
     : ''
+  // N-23: Pin exact include to task.testRel (blocks sibling .tsx/.test files from running!)
+  // N-31: Pin reporters: ['default'] so COPILOT_CLI=1 doesn't switch to minimal agent reporter!
+  const testBlock = `{ ${setupLine}include: [${JSON.stringify(task.testRel)}], reporters: ['default'], environment: 'node' }`
+  const tsInclude = ['src/**/*.ts', 'src/**/*.tsx', 'src/**/*.mts', 'src/**/*.cts']
 
   if (arm === 'treatment') {
     writeFileSync(
@@ -513,6 +546,8 @@ function writePristineWorkspaceConfigs(dir, task, arm, { includeRuntimeGuard = f
             strict: true,
             noEmit: true,
             skipLibCheck: true,
+            allowJs: true,
+            checkJs: true,
             types: ['node'],
           },
           contentMappers: [
@@ -521,7 +556,7 @@ function writePristineWorkspaceConfigs(dir, task, arm, { includeRuntimeGuard = f
               extensions: ['.ep'],
             },
           ],
-          include: ['src/**/*.ts', 'points.ep'],
+          include: [...tsInclude, 'points.ep'],
         },
         null,
         2,
@@ -545,7 +580,7 @@ import { executionPoints } from 'execution-points-prototype/vite'
 
 export default defineConfig({
   plugins: [executionPoints({ targets: ${JSON.stringify(task.epTargets)} })],
-  test: { ${setupLine}environment: 'node' },
+  test: ${testBlock},
 })
 `,
     )
@@ -561,9 +596,11 @@ export default defineConfig({
             strict: true,
             noEmit: true,
             skipLibCheck: true,
+            allowJs: true,
+            checkJs: true,
             types: ['node'],
           },
-          include: ['src/**/*.ts'],
+          include: tsInclude,
         },
         null,
         2,
@@ -574,7 +611,7 @@ export default defineConfig({
       `import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
-  test: { ${setupLine}environment: 'node' },
+  test: ${testBlock},
 })
 `,
     )
@@ -583,11 +620,12 @@ export default defineConfig({
   return path.join(dir, 'vitest.config.mjs')
 }
 
-export function createWorkspace({ taskId, arm, promptStyle, toolchains }) {
+export function createWorkspace({ taskId, arm, promptStyle, toolchains, parentDir = realpathSync(tmpdir()) }) {
   const task = TASKS[taskId]
   const taskDir = path.join(__dirname, 'tasks', taskId)
-  // Blinded workspace prefix (no arm or task name in path — closes R-06)
-  const dir = mkdtempSync(path.join(tmpdir(), 'ep-ws-'))
+  // N-00: Always realpath workspaceDir so /var -> /private/var matches Copilot CLI write rules!
+  // R-06: Blinded workspace prefix (no arm or task name in path)
+  const dir = realpathSync(mkdtempSync(path.join(parentDir, 'ep-ws-')))
 
   cpSync(path.join(taskDir, 'src'), path.join(dir, 'src'), { recursive: true })
 
@@ -652,11 +690,13 @@ async function runCmd(bin, args, cwd, { timeoutMs = 90_000, extraEnv = {} } = {}
 async function runVitestClassified(
   dir,
   testRel,
-  { configPath, testTimeoutMs = 1500, allowedTimerProdRels = [] } = {},
+  { configPath, testTimeoutMs = 1500, allowedTimerProdRels = [], requireGuardReport = false } = {},
 ) {
   const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`
   const jsonPath = path.join(dir, `.vitest-report-${token}.json`)
-  const guardReportPath = path.join(dir, `.guard-report-${token}.json`)
+  // N-23: Per-worker report directory so sibling test files can NEVER erase another worker's sleep record!
+  const guardReportDir = path.join(dir, `.guard-reports-${token}`)
+  mkdirSync(guardReportDir, { recursive: true })
   const vitestBin = path.join(dir, 'node_modules/.bin/vitest')
   const cfg = configPath ?? path.join(dir, 'vitest.config.mjs')
 
@@ -676,7 +716,7 @@ async function runVitestClassified(
     {
       timeoutMs: 90_000,
       extraEnv: {
-        BENCH_GUARD_REPORT: guardReportPath,
+        BENCH_GUARD_REPORT_DIR: guardReportDir,
         BENCH_GUARD_SRC_ROOT: path.join(dir, 'src'),
         BENCH_GUARD_ALLOWED_TIMER_FILES: allowedFiles,
       },
@@ -684,7 +724,9 @@ async function runVitestClassified(
   )
 
   let report = null
-  let guardViolations = { globalPatches: [], realSleeps: [] }
+  const mergedGlobalPatches = new Set()
+  const mergedRealSleeps = new Set()
+  let guardFilesRead = 0
   try {
     if (existsSync(jsonPath)) report = JSON.parse(readFileSync(jsonPath, 'utf8'))
   } catch {
@@ -693,15 +735,42 @@ async function runVitestClassified(
     rmSync(jsonPath, { force: true })
   }
   try {
-    if (existsSync(guardReportPath)) guardViolations = JSON.parse(readFileSync(guardReportPath, 'utf8'))
+    if (existsSync(guardReportDir)) {
+      for (const f of readdirSync(guardReportDir)) {
+        if (!f.endsWith('.json')) continue
+        const parsed = JSON.parse(readFileSync(path.join(guardReportDir, f), 'utf8'))
+        guardFilesRead++
+        for (const g of parsed.globalPatches ?? []) mergedGlobalPatches.add(g)
+        for (const s of parsed.realSleeps ?? []) mergedRealSleeps.add(s)
+      }
+    }
   } catch {
-    // ignore
+    guardFilesRead = 0
   } finally {
-    rmSync(guardReportPath, { force: true })
+    rmSync(guardReportDir, { recursive: true, force: true })
+  }
+
+  const guardMissing = requireGuardReport && guardFilesRead === 0
+  const guardViolations = {
+    globalPatches: [...mergedGlobalPatches],
+    realSleeps: [...mergedRealSleeps],
+    guardMissing,
   }
 
   const hasGuardViolation =
     guardViolations.globalPatches.length > 0 || guardViolations.realSleeps.length > 0
+
+  if (guardMissing && res.ok) {
+    // N-23: Fail closed — if guard setup produced zero report files while tests "passed", reject!
+    return {
+      ok: false,
+      outcome: 'runtime_violation',
+      numPassed: 0,
+      numFailed: 0,
+      guardViolations,
+      summary: 'Fail-closed: runtime guard produced zero report files',
+    }
+  }
 
   if (!report || !Array.isArray(report.testResults) || report.testResults.length === 0) {
     const raw = (res.stderr || res.stdout).slice(0, 400)
@@ -794,10 +863,11 @@ export async function runHiddenOracleGrader({
   srcFilesOrDir,
   toolchains,
   runVisibleToo = true,
+  parentDir = realpathSync(tmpdir()),
 }) {
   toolchains.verifyGraderChecksum()
   const task = TASKS[taskId]
-  const graderDir = mkdtempSync(path.join(tmpdir(), `ep-grader-${taskId}-`))
+  const graderDir = realpathSync(mkdtempSync(path.join(parentDir, `ep-grader-${taskId}-`)))
   try {
     if (typeof srcFilesOrDir === 'string') {
       const srcFiles = collectRelativeFiles(srcFilesOrDir, '')
@@ -838,7 +908,7 @@ import { benchYieldPlugin } from './yield-plugin.mjs'
 
 export default defineConfig({
   plugins: [benchYieldPlugin({ root: ${JSON.stringify(graderDir)} })],
-  test: { environment: 'node', testTimeout: 30000 },
+  test: { environment: 'node', testTimeout: 30000, reporters: ['default'] },
 })
 `,
     )
@@ -846,11 +916,34 @@ export default defineConfig({
     toolchains.installForGrader(graderDir)
     const vitestBin = path.join(graderDir, 'node_modules/.bin/vitest')
 
+    // N-20: Use Vitest JSON reporter for oracle verdict and full per-test diagnostics
+    const oracleJsonPath = path.join(graderDir, '.oracle-report.json')
     const oracleRes = await runCmd(
       vitestBin,
-      ['run', '__grader__.test.ts', '--config', graderCfg],
+      ['run', '__grader__.test.ts', '--config', graderCfg, '--reporter=json', `--outputFile=${oracleJsonPath}`],
       graderDir,
     )
+    let oracleReport = null
+    try {
+      if (existsSync(oracleJsonPath)) oracleReport = JSON.parse(readFileSync(oracleJsonPath, 'utf8'))
+    } catch {
+      oracleReport = null
+    }
+    const oracleTests = (oracleReport?.testResults ?? []).flatMap((tr) =>
+      (tr.assertionResults ?? []).map((a) => ({
+        title: a.fullName ?? a.title,
+        status: a.status,
+        failure: a.failureMessages?.[0]?.slice(0, 600),
+      })),
+    )
+    const unhandledErrors = oracleReport?.numUnhandledErrors ?? 0
+    const oraclePass =
+      Boolean(oracleRes.ok) &&
+      Boolean(oracleReport?.success) &&
+      oracleTests.length > 0 &&
+      oracleTests.every((t) => t.status === 'passed') &&
+      unhandledErrors === 0
+
     let visibleRes = { ok: true, stdout: '', stderr: '' }
     if (runVisibleToo) {
       visibleRes = await runCmd(
@@ -862,9 +955,11 @@ export default defineConfig({
     }
 
     return {
-      oraclePass: oracleRes.ok,
+      oraclePass,
       visibleTestsPass: visibleRes.ok,
-      output: (oracleRes.stdout + '\n' + oracleRes.stderr).trim().slice(-1500),
+      unhandledErrors,
+      oracleTests,
+      output: (oracleRes.stdout + '\n' + oracleRes.stderr).trim().slice(-2500),
       visibleOutput: (visibleRes.stdout + '\n' + visibleRes.stderr).trim().slice(-800),
     }
   } finally {
@@ -872,19 +967,16 @@ export default defineConfig({
   }
 }
 
-/**
- * Evaluates the agent's test suite in a fresh pristine sandbox (with runtime guards
- * and explicit `--config`) across:
- * 1. Pristine buggy baseline (`redReproducesBug` — must be `true_red`)
- * 2. Every single-bug mutant (`P1.2` `singleBugMutants`)
- * 3. Reference fix (`E-06` / `L-11` two-sided adequacy: `refFixPass` must be `true_green`!)
- * 4. Buggy refactors (`E9` false-green rate)
- * 5. Design-diverse valid alternatives (`E9-01` / `E9-02` pass rate + failure breakdown)
- */
-export async function evaluateAgentTests({ taskId, arm, agentSrcFiles, toolchains }) {
+export async function evaluateAgentTests({
+  taskId,
+  arm,
+  agentSrcFiles,
+  toolchains,
+  parentDir = realpathSync(tmpdir()),
+}) {
   const task = TASKS[taskId]
   const baselineFiles = readTaskBaselineFiles(taskId)
-  const evalDir = mkdtempSync(path.join(tmpdir(), `ep-test-eval-${taskId}-`))
+  const evalDir = realpathSync(mkdtempSync(path.join(parentDir, `ep-test-eval-${taskId}-`)))
 
   try {
     const cfgPath = writePristineWorkspaceConfigs(evalDir, task, arm, {
@@ -927,6 +1019,7 @@ export async function evaluateAgentTests({ taskId, arm, agentSrcFiles, toolchain
       configPath: cfgPath,
       testTimeoutMs: 1500,
       allowedTimerProdRels: task.allowedTimerProdRels,
+      requireGuardReport: true,
     }
 
     // 1. Baseline RED check
@@ -1065,16 +1158,51 @@ function killProcessGroup(pid) {
   }, 2_000).unref()
 }
 
-function runCopilotTrial({ workspaceDir, model, reasoning, prompt, timeoutSec, maxCredits }) {
-  const sidecarDir = mkdtempSync(path.join(tmpdir(), 'ep-copilot-home-'))
-  const trialTmpDir = mkdtempSync(path.join(tmpdir(), 'ep-trial-tmp-'))
+/**
+ * Configures Copilot CLI's OS-level `--sandbox` policy inside the per-trial
+ * `COPILOT_HOME` sidecar (closes N-30 — verified live on macOS L3c–L3e!).
+ */
+function configureHardenedSandbox(sidecarDir, env) {
+  const nodeInstallRoot = path.dirname(path.dirname(realpathSync(process.execPath)))
+  const settings = [
+    ['sandbox.userPolicy.filesystem.readonlyPaths', nodeInstallRoot],
+    ['sandbox.auth.gh', 'false'],
+    ['sandbox.auth.git', 'false'],
+    ['sandbox.userPolicy.network.allowOutbound', 'false'],
+    ['sandbox.userPolicy.network.blockedHosts', '*'],
+    ['sandbox.allowBypass', 'false'],
+  ]
+  for (const [k, v] of settings) {
+    const res = spawnSync('copilot', ['config', k, v], { env, encoding: 'utf8' })
+    if (res.status !== 0) {
+      throw new Error(`Failed to configure sandbox (${k}=${v}): ${res.stderr || res.stdout}`)
+    }
+  }
+}
+
+function runCopilotTrial({
+  workspaceDir,
+  model,
+  reasoning,
+  prompt,
+  timeoutSec,
+  cliCreditCap,
+  parentDir = realpathSync(tmpdir()),
+}) {
+  const realWs = realpathSync(workspaceDir)
+  const sidecarDir = realpathSync(mkdtempSync(path.join(parentDir, 'ep-copilot-home-')))
+  const trialTmpDir = realpathSync(mkdtempSync(path.join(parentDir, 'ep-trial-tmp-')))
   activeTempDirs.add(sidecarDir)
   activeTempDirs.add(trialTmpDir)
   const usageFile = path.join(sidecarDir, 'usage.json')
+  const env = buildAgentEnv(sidecarDir, trialTmpDir)
+
+  // N-30: Write hardened OS sandbox policy before launching agent
+  configureHardenedSandbox(sidecarDir, env)
 
   return new Promise((resolve) => {
     const start = Date.now()
-    // Narrowed permissions (closes I-02): no --allow-all-paths, no --allow-all-tools, no web tools
+    // N-00 (realWs), N-30 (--sandbox), I-02 (narrowed tools/paths), N-32 (omit --max-ai-credits unless explicitly set)
     const args = [
       '-p',
       prompt,
@@ -1082,11 +1210,12 @@ function runCopilotTrial({ workspaceDir, model, reasoning, prompt, timeoutSec, m
       model,
       '--reasoning-effort',
       reasoning,
+      '--sandbox',
       '--disallow-temp-dir',
       '--add-dir',
-      workspaceDir,
+      realWs,
       '--allow-tool',
-      `write(${workspaceDir}/src/**)`,
+      `write(${realWs}/src/**)`,
       '--allow-tool',
       'shell(npm test)',
       '--allow-tool',
@@ -1111,18 +1240,19 @@ function runCopilotTrial({ workspaceDir, model, reasoning, prompt, timeoutSec, m
       '--usage-output-file',
       usageFile,
     ]
-    if (maxCredits >= 30) {
-      args.push('--max-ai-credits', String(maxCredits))
+    // N-03 & N-32: Pass cap unconditionally when explicitly requested (> 0), omit by default to avoid live cost meter
+    if (cliCreditCap > 0) {
+      args.push('--max-ai-credits', String(cliCreditCap))
     }
 
     const child = spawn('copilot', args, {
-      cwd: workspaceDir,
+      cwd: realWs,
       detached: true,
-      env: buildAgentEnv(sidecarDir, trialTmpDir),
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 
-    const handle = { pid: child.pid }
+    const handle = { pid: child.pid, usageFile }
     activeChildren.add(handle)
 
     let stdout = ''
@@ -1180,8 +1310,57 @@ function runCopilotTrial({ workspaceDir, model, reasoning, prompt, timeoutSec, m
 }
 
 /**
- * Parses Copilot CLI JSONL events, inspecting EVERY file path in `apply_patch`
- * (closes L-05) and scanning shell commands for file reads / out-of-workspace paths (closes R-17).
+ * Mandatory live preflight (closes N-00 & N-30):
+ * Runs one quick sandboxed CLI check before Trial 1 verifying:
+ * 1) Writing `src/.preflight` succeeds (macOS realpath write rule works!)
+ * 2) Writing `root-preflight.txt` outside `src/` is DENIED
+ * 3) Running `npm test` works under `--sandbox` while reading outside workspace fails.
+ */
+async function runLivePreflight({ model, toolchains, parentDir }) {
+  const { dir: ws } = createWorkspace({
+    taskId: 'stale-cache',
+    arm: 'control',
+    promptStyle: 'symptom',
+    toolchains,
+    parentDir,
+  })
+  activeTempDirs.add(ws)
+  try {
+    const prompt = [
+      'Preflight check. Perform exactly these 3 steps and then stop:',
+      '1. Create the file `src/.preflight` with contents `ok`.',
+      '2. Try to create `root-preflight.txt` at the workspace root with contents `blocked` (this should be denied).',
+      '3. Run `npm test` once.',
+    ].join('\n')
+    const cli = await runCopilotTrial({
+      workspaceDir: ws,
+      model,
+      reasoning: 'low',
+      prompt,
+      timeoutSec: 90,
+      cliCreditCap: 0,
+      parentDir,
+    })
+    const srcWritten = existsSync(path.join(ws, 'src/.preflight'))
+    const rootBlocked = !existsSync(path.join(ws, 'root-preflight.txt'))
+    if (!srcWritten || !rootBlocked) {
+      throw new Error(
+        `Live preflight FAILED (srcWritten=${srcWritten}, rootBlocked=${rootBlocked}, exitCode=${cli.exitCode}). Aborting run before spending credits on trials.`,
+      )
+    }
+    return { ok: true, srcWritten, rootBlocked, usage: extractUsageMetrics(cli.usageRaw, model) }
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+    activeTempDirs.delete(ws)
+  }
+}
+
+/**
+ * Parses Copilot CLI JSONL events:
+ * - Keys denials (`deniedToolCalls`, `writeDenials`) on `tool.execution_complete`
+ *   checking BOTH `error.code === 'denied'` and message text (closes N-04!).
+ * - Keys `firstSourceEditAt` ONLY on `tool.execution_complete` with `success === true`
+ *   (denied/failed edits NEVER count as source edits — closes N-04 & L-05!).
  */
 export function parseCopilotEvents(stdout, targetRel) {
   const toolCalls = {}
@@ -1191,12 +1370,14 @@ export function parseCopilotEvents(stdout, targetRel) {
   let totalToolCalls = 0
   let compactions = 0
   let deniedToolCalls = 0
+  let writeDenials = 0
   let firstSourceEditIndex = -1
   let firstFailingTestIndex = -1
   let firstSourceEditAt = null
   let firstFailingTestAt = null
   let eventIndex = 0
   const testCallIds = new Set()
+  const pendingSourceEdits = new Map() // callId -> { isWriteTool, touchesTarget }
   const targetBase = path.basename(targetRel)
 
   for (const line of stdout.split('\n')) {
@@ -1211,6 +1392,7 @@ export function parseCopilotEvents(stdout, targetRel) {
 
       if (type === 'tool.execution_start') {
         const name = ev.data?.toolName ?? ev.toolName ?? 'unknown'
+        const callId = ev.data?.toolCallId ?? ev.toolCallId
         toolCalls[name] = (toolCalls[name] ?? 0) + 1
         totalToolCalls++
         const argsObj = ev.data?.arguments ?? ev.arguments ?? {}
@@ -1223,47 +1405,58 @@ export function parseCopilotEvents(stdout, targetRel) {
           }
         }
 
-        // L-05: Parse every touched file path inside apply_patch / edit / create
         if (name === 'edit' || name === 'create') {
           const p = String(argsObj?.path ?? '')
-          if (p.endsWith(targetBase) && !p.endsWith('.test.ts') && firstSourceEditIndex === -1) {
-            firstSourceEditIndex = eventIndex
-            firstSourceEditAt = ts
-          }
+          const touchesTarget = p.endsWith(targetBase) && !p.endsWith('.test.ts')
+          if (callId) pendingSourceEdits.set(callId, { isWriteTool: true, touchesTarget })
         } else if (name === 'apply_patch') {
           const patchText = String(argsObj?.patch ?? argsObj?.input ?? rawArgs)
           const patchedFiles = [
             ...patchText.matchAll(/\*\*\*\s+(?:Update|Add|Delete)\s+File:\s+([^\n\\"]+)/g),
           ].map((m) => m[1].trim())
-          if (
-            patchedFiles.some((f) => f.endsWith(targetBase) && !f.endsWith('.test.ts')) &&
-            firstSourceEditIndex === -1
-          ) {
-            firstSourceEditIndex = eventIndex
-            firstSourceEditAt = ts
-          }
+          const touchesTarget = patchedFiles.some((f) => f.endsWith(targetBase) && !f.endsWith('.test.ts'))
+          if (callId) pendingSourceEdits.set(callId, { isWriteTool: true, touchesTarget })
         }
 
-        // R-17: Track shell commands, shell reads, and out-of-workspace paths
         if (name === 'bash' || name === 'shell' || name === 'run_shell_command') {
           const cmd = String(argsObj?.command ?? rawArgs)
           shellCommands.push(cmd.slice(0, 200))
-          for (const m of cmd.matchAll(/(?:cat|head|tail|sed|awk|less)\s+[^\n|;&]*?([\w./-]+\.(?:ts|mjs|js|md|json))/g)) {
+          for (const m of cmd.matchAll(
+            /(?:cat|head|tail|sed|awk|less)\s+[^\n|;&]*?([\w./-]+\.(?:ts|mjs|js|md|json))/g,
+          )) {
             filesRead.add(path.basename(m[1]))
           }
           if (/(?:^|\s)\.\.\/|\/tmp\/|ep-grader|ep-bench|execution-points/.test(cmd)) {
             suspiciousPaths.push(cmd.slice(0, 120))
           }
-          if (/npm test|vitest/.test(cmd)) {
-            const callId = ev.data?.toolCallId ?? ev.toolCallId
-            if (callId) testCallIds.add(callId)
+          if (/npm test|vitest/.test(cmd) && callId) {
+            testCallIds.add(callId)
           }
         }
       } else if (type === 'tool.execution_complete') {
         const callId = ev.data?.toolCallId ?? ev.toolCallId
         const success = ev.data?.success ?? ev.success
+        const errCode = ev.data?.error?.code ?? ''
+        const errMsg = String(ev.data?.error?.message ?? '')
         const content = String(ev.data?.result?.content ?? ev.data?.content ?? '')
-        if (/denied|permission denied/i.test(content)) deniedToolCalls++
+        const editMeta = callId ? pendingSourceEdits.get(callId) : undefined
+
+        const isDenied =
+          errCode === 'denied' ||
+          /denied|permission denied/i.test(errMsg) ||
+          /denied|permission denied/i.test(content)
+
+        if (isDenied) {
+          deniedToolCalls++
+          if (editMeta?.isWriteTool) writeDenials++
+        }
+
+        // N-04: Only count source edits that actually SUCCEEDED!
+        if (editMeta?.touchesTarget && success === true && firstSourceEditIndex === -1) {
+          firstSourceEditIndex = eventIndex
+          firstSourceEditAt = ts
+        }
+
         if (callId && testCallIds.has(callId)) {
           if (success === false || /FAIL\s+src\/|AssertionError|expected .+ to/i.test(content)) {
             if (firstFailingTestIndex === -1) {
@@ -1283,6 +1476,7 @@ export function parseCopilotEvents(stdout, targetRel) {
     totalToolCalls,
     compactions,
     deniedToolCalls,
+    writeDenials,
     filesRead: [...filesRead],
     shellCommandCount: shellCommands.length,
     suspiciousPaths: [...new Set(suspiciousPaths)],
@@ -1304,10 +1498,11 @@ async function runAgentPhase({
   trialIndex,
   promptStyle,
   timeoutSec,
-  maxCredits,
+  cliCreditCap,
   outDir,
   toolchains,
   keepWorkspaces,
+  parentDir = realpathSync(tmpdir()),
 }) {
   const task = TASKS[taskId]
   const { dir: workspaceDir, initialSnapshot } = createWorkspace({
@@ -1315,6 +1510,7 @@ async function runAgentPhase({
     arm,
     promptStyle,
     toolchains,
+    parentDir,
   })
   activeTempDirs.add(workspaceDir)
   const trialId = `${taskId}__${arm}__${model}__${reasoning}__t${trialIndex}`
@@ -1329,7 +1525,8 @@ async function runAgentPhase({
       reasoning,
       prompt,
       timeoutSec,
-      maxCredits,
+      cliCreditCap,
+      parentDir,
     })
 
     writeFileSync(path.join(trialLogDir, 'events.jsonl'), cli.stdout)
@@ -1493,7 +1690,7 @@ export async function gradeTrialPhase({
         }
 
     // 2. Run own-fix tests & type checks in a BRAND-NEW pristine sandbox with `--config` + runtime guard (closes R-19!)
-    ownFixDir = mkdtempSync(path.join(tmpdir(), `ep-ownfix-${taskId}-`))
+    ownFixDir = realpathSync(mkdtempSync(path.join(realpathSync(tmpdir()), `ep-ownfix-${taskId}-`)))
     const ownCfg = writePristineWorkspaceConfigs(ownFixDir, task, arm, {
       includeRuntimeGuard: true,
     })
@@ -1512,17 +1709,18 @@ export async function gradeTrialPhase({
           configPath: ownCfg,
           testTimeoutMs: 5000,
           allowedTimerProdRels: task.allowedTimerProdRels,
+          requireGuardReport: true,
         })
       : {
           ok: false,
           outcome: 'loud_break',
           numPassed: 0,
           numFailed: 0,
-          guardViolations: { globalPatches: [], realSleeps: [] },
+          guardViolations: { globalPatches: [], realSleeps: [], guardMissing: false },
           summary: 'missing test file',
         }
 
-    // Equal production-only type check across both arms
+    // Equal production-only type check across both arms (covers .ts, .tsx, .mts, .cts — N-23!)
     const prodTsconfig = path.join(ownFixDir, '.tsconfig.prod.json')
     writeFileSync(
       prodTsconfig,
@@ -1534,9 +1732,11 @@ export async function gradeTrialPhase({
           strict: true,
           noEmit: true,
           skipLibCheck: true,
+          allowJs: true,
+          checkJs: true,
           types: ['node'],
         },
-        include: ['src/**/*.ts'],
+        include: ['src/**/*.ts', 'src/**/*.tsx', 'src/**/*.mts', 'src/**/*.cts'],
         exclude: [task.testRel],
       }),
     )
@@ -1582,7 +1782,7 @@ export async function gradeTrialPhase({
           },
         }
 
-    // Combine AST + runtime guard violations (closes E-01, E-05, A-01!)
+    // Combine AST + runtime guard violations (closes E-01, E-05, A-01, N-22, N-23!)
     const allGlobalPatches = [
       ...new Set([
         ...testAudit.globalPatches,
@@ -1619,7 +1819,20 @@ export async function gradeTrialPhase({
       runVisibleToo: true,
     })
 
+    // N-05: Detect infrastructure failures (non-zero CLI exit without timeout, missing usage on live run, or write denials blocking all edits)
+    const anySrcChanged = Object.entries(allWorkspaceFiles).some(
+      ([rel, content]) => rel.startsWith('src/') && initialSnapshot[rel] !== content,
+    )
+    const isLiveRun = model !== 'self-test'
+    const infraFailure =
+      isLiveRun &&
+      ((cli.exitCode !== 0 && !cli.timedOut) ||
+        Boolean(cli.spawnError) ||
+        Boolean(usage.usageMissing) ||
+        (eventStats.writeDenials > 0 && !anySrcChanged))
+
     const solved =
+      !infraFailure &&
       grader.oraclePass &&
       grader.visibleTestsPass &&
       agentTestRun.ok &&
@@ -1630,8 +1843,7 @@ export async function gradeTrialPhase({
       noGlobalMonkeyPatch &&
       noRealSleeps
 
-    const technique =
-      allGlobalPatches.length > 0 ? 'global-patch' : testAudit.technique
+    const technique = allGlobalPatches.length > 0 ? 'global-patch' : testAudit.technique
 
     const record = {
       runId,
@@ -1647,14 +1859,22 @@ export async function gradeTrialPhase({
       copilotVersion,
       gitCommit: provenance.gitCommit,
       gitDirty: provenance.gitDirty,
+      vitestVersion: provenance.vitestVersion,
+      typescriptVersion: provenance.typescriptVersion,
       harnessSha256: provenance.harnessSha256,
+      calibrationSha256: provenance.calibrationSha256,
+      lockfileSha256: provenance.lockfileSha256,
       toolSha256: provenance.toolSha256,
       tasksSha256: provenance.tasksSha256,
       graderChecksum: toolchains.graderChecksum,
-      ungradable: false,
+      infraFailure,
+      ungradable: infraFailure || Boolean(agentTestRun.guardViolations?.guardMissing),
       aborted: false,
+      notStarted: false,
       solved,
       oraclePass: grader.oraclePass,
+      oracleUnhandledErrors: grader.unhandledErrors,
+      oracleTests: grader.oracleTests,
       visibleTestsPass: grader.visibleTestsPass,
       agentTestsPass: agentTestRun.ok,
       redReproducesBug: testEval.redReproducesBug,
@@ -1664,6 +1884,7 @@ export async function gradeTrialPhase({
       adequateReproduction,
       singleBugMutants: testEval.singleBugMutants,
       typecheckPass,
+      writeDenials: eventStats.writeDenials,
       contractTypecheckPass,
       cleanProduction,
       productionViolations: [...prodViolations, ...auxViolations],
@@ -1759,7 +1980,7 @@ export async function gradeTrialPhase({
 }
 
 async function runSelfTest() {
-  console.log('Running v2.1 hardened benchmark self-test...\n')
+  console.log('Running v2.2 hardened benchmark self-test...\n')
   const provenance = computeProvenance()
   const toolchains = prepareToolchains(REPO_ROOT)
   let failures = 0
@@ -1800,7 +2021,15 @@ async function runSelfTest() {
       { name: 'A-01 vi.waitUntil', code: `import { vi } from 'vitest'; await vi.waitUntil(() => true)`, check: (r) => r.usesRealSleep },
       { name: 'A-01 timers/promises namespace', code: `import * as tp from 'node:timers/promises'; await tp.setTimeout(10)`, check: (r) => r.usesRealSleep },
       { name: 'A-01 dead-code useFakeTimers', code: `import { vi } from 'vitest'; if (false) vi.useFakeTimers(); setTimeout(() => {}, 10)`, check: (r) => r.usesRealSleep },
+      { name: 'A-01 S10 non-literal conditional useFakeTimers', code: `import { vi } from 'vitest'; if (Math.random() > 2) vi.useFakeTimers(); setTimeout(() => {}, 10)`, check: (r) => r.usesRealSleep },
       { name: 'A-01 useFakeTimers then useRealTimers', code: `import { vi } from 'vitest'; vi.useFakeTimers(); vi.useRealTimers(); setTimeout(() => {}, 10)`, check: (r) => r.usesRealSleep },
+      { name: 'N-25 legal beforeEach(useFakeTimers) + afterEach(useRealTimers)', code: `import { afterEach, beforeEach, test, vi } from 'vitest'; beforeEach(() => { vi.useFakeTimers() }); afterEach(() => { vi.useRealTimers() }); test('ok', () => { setTimeout(() => {}, 10) })`, check: (r) => !r.usesRealSleep && r.usesFakeTimers },
+      { name: 'N-22 Object.getPrototypeOf(MessagePort.prototype) spy', code: `import { vi } from 'vitest'; const b = Object.getPrototypeOf(MessagePort.prototype); vi.spyOn(b, 'addEventListener')`, check: (r) => r.usesGlobalPatch },
+      { name: 'N-22 Object.setPrototypeOf(MessagePort.prototype)', code: `Object.setPrototypeOf(MessagePort.prototype, {})`, check: (r) => r.usesGlobalPatch },
+      { name: 'N-24 setTimeout.call', code: `await new Promise((r) => setTimeout.call(undefined, r, 40))`, check: (r) => r.usesRealSleep },
+      { name: 'N-24 comma (0, setTimeout)', code: `await new Promise((r) => (0, setTimeout)(r, 40))`, check: (r) => r.usesRealSleep },
+      { name: 'N-24 expect.poll', code: `import { expect } from 'vitest'; await expect.poll(() => true).toBe(true)`, check: (r) => r.usesRealSleep },
+      { name: 'N-12 vi.spyOn(namespaceImport) -> module-mock', code: `import { vi } from 'vitest'; import * as storage from './storage'; vi.spyOn(storage, 'readFromDb')`, check: (r) => r.usesModuleMock && r.technique === 'module-mock' && !r.usesGlobalPatch },
       { name: 'A-01 import type EP not execution-points', code: `import type { ExecutionPoint } from 'execution-points-prototype'; export type X = ExecutionPoint<any, any>`, check: (r) => !r.usesExecutionPoints && r.technique === 'none' },
       { name: 'allows setTimeout with active useFakeTimers', code: `import { vi } from 'vitest'; vi.useFakeTimers(); setTimeout(() => {}, 10); vi.advanceTimersByTimeAsync(10)`, check: (r) => !r.usesRealSleep && r.usesFakeTimers },
       { name: 'ignores setTimeout in comment', code: `// no setTimeout\nimport { expect, test } from 'vitest'\ntest('ok', () => expect(1).toBe(1))`, check: (r) => !r.usesRealSleep && !r.usesGlobalPatch },
@@ -2047,8 +2276,30 @@ test('hangs forever waiting for uncalled seam', async () => {
     }
     console.log()
 
-    // 9. Production AST audit on all 10 reference fixes
-    console.log(`9) Production AST audit on all ${Object.keys(REFERENCE_FIXES).length} reference fixes...`)
+    // 9. N-18: Hidden oracle MUST reject EVERY SINGLE_BUG_MUTANT across all 10 tasks (including CC-M1!)
+    console.log('9) Hidden oracle rejection check across ALL single-bug mutants (N-18)...')
+    for (const [taskId, mutants] of Object.entries(SINGLE_BUG_MUTANTS)) {
+      for (const m of mutants) {
+        const res = await runHiddenOracleGrader({
+          taskId,
+          srcFilesOrDir: m.files,
+          toolchains,
+          runVisibleToo: true,
+        })
+        const rejected = !(res.oraclePass && res.visibleTestsPass)
+        console.log(
+          `   ${rejected ? 'PASS' : 'FAIL'} ${m.id.padEnd(28)} (${taskId.padEnd(21)}) oracleRejected=${rejected}`,
+        )
+        if (!rejected) {
+          failures++
+          console.error('     BUG: hidden oracle accepted single-bug mutant!', m.id)
+        }
+      }
+    }
+    console.log()
+
+    // 10. Production AST audit on all 10 reference fixes
+    console.log(`10) Production AST audit on all ${Object.keys(REFERENCE_FIXES).length} reference fixes...`)
     for (const [taskId, files] of Object.entries(REFERENCE_FIXES)) {
       const task = TASKS[taskId]
       const audit = auditProductionAst(files[task.targetRel], {
@@ -2075,7 +2326,7 @@ test('hangs forever waiting for uncalled seam', async () => {
     process.exit(1)
   }
   console.log(
-    `Self-test PASSED (isolation, AST+runtime guards, 6 cheats rejected, ${GOOD_WITNESSES.length} legal witnesses passed, 10 tasks, and ${CALIBRATION_VARIANTS.length} calibration variants matched).`,
+    `Self-test PASSED (isolation, AST+runtime guards, ${cheats.length} cheats rejected, ${GOOD_WITNESSES.length} legal witnesses passed, 10 tasks, ${CALIBRATION_VARIANTS.length} calibration variants, and all single-bug mutants rejected by oracle).`,
   )
 }
 
@@ -2115,11 +2366,11 @@ function summarizeByArm(results) {
     if (r.aborted) g.aborted++
     if (!r.noGlobalMonkeyPatch) g.monkeyPatched++
     if (r.usesExecutionPoints) g.usedExecutionPoints++
-    if (r.refactorRobustness) {
+    if (r.adequateReproduction && r.refactorRobustness) {
       g.refactorTotal += r.refactorRobustness.total ?? 0
       g.refactorFalseGreens += r.refactorRobustness.falseGreenCount ?? 0
     }
-    if (r.validFixRobustness) {
+    if (r.adequateReproduction && r.validFixRobustness) {
       g.validAltTotal += r.validFixRobustness.total ?? 0
       g.validAltPass += r.validFixRobustness.trueGreenCount ?? 0
       g.validAltFalseRedAssert += r.validFixRobustness.falseRedAssertionCount ?? 0
@@ -2211,19 +2462,28 @@ function printSummary(results, byArm, outDir) {
         `adqRED=${formatCI(g.adequateRedCI)}`,
         `VFPass=${g.validAltPass}/${g.validAltTotal} (assert=${g.validAltFalseRedAssert},to=${g.validAltTimeout},sel=${g.validAltSelectorCompile})`,
         `FG=${formatCI(g.falseGreenCI)}`,
-        `cost=${formatUsd(g.totalUsd)} (${formatUsd(g.usdPerSolved)}/solved)`,
+        `credits=${g.totalAiCredits.toFixed(1)} (${g.solved > 0 ? (g.totalAiCredits / g.solved).toFixed(1) : 'n/a'}/solved) | listUsd=${formatUsd(g.totalUsd)}`,
         `tech=${JSON.stringify(g.techniques)}`,
       ].join(' | '),
     )
   }
-  const cmh = stratifiedCMH(results, (r) => Boolean(r.solved))
-  const rd = matchedRiskDifferenceCI(results, (r) => Boolean(r.solved))
+  // N-08: Primary analysis is over equal-capability Strata B + C ONLY; Stratum A reported separately!
+  const equalSeamRows = results.filter((r) => r.stratum !== 'closed-module' && !r.notStarted)
+  const closedModRows = results.filter((r) => r.stratum === 'closed-module' && !r.notStarted)
+  const cmh = stratifiedCMH(equalSeamRows, (r) => Boolean(r.solved))
+  const rd = matchedRiskDifferenceCI(equalSeamRows, (r) => Boolean(r.solved))
   console.log(
-    `\nStratified CMH (solved): strata=${cmh.strataCount}, z=${cmh.z}, p=${cmh.pValue}, exactMcNemarP=${cmh.exactMcNemarP ?? 'n/a'}, commonOR=${cmh.commonOddsRatio ?? 'n/a'}`,
+    `\nPrimary Stratified CMH (Strata B+C equal-capability): strata=${cmh.strataCount}, z=${cmh.z}, p=${cmh.pValue}, exactMcNemarP=${cmh.exactMcNemarP ?? 'n/a'}, commonOR=${cmh.commonOddsRatio ?? 'n/a'}`,
   )
   if (rd.diff !== null) {
     console.log(
-      `Newcombe paired RD (blocks=${rd.blocks}): ${(rd.diff * 100).toFixed(1)}pp [${(rd.low * 100).toFixed(1)}pp, ${(rd.high * 100).toFixed(1)}pp]`,
+      `Newcombe paired RD (Strata B+C, blocks=${rd.blocks}): ${(rd.diff * 100).toFixed(1)}pp [${(rd.low * 100).toFixed(1)}pp, ${(rd.high * 100).toFixed(1)}pp]`,
+    )
+  }
+  if (closedModRows.length > 0) {
+    const cmhA = stratifiedCMH(closedModRows, (r) => Boolean(r.solved))
+    console.log(
+      `Stratum A (closed-module capability stratum, separate): strata=${cmhA.strataCount}, p=${cmhA.pValue}, exactMcNemarP=${cmhA.exactMcNemarP ?? 'n/a'}`,
     )
   }
   console.log(`Artifacts & JSONL saved to: ${outDir}`)
@@ -2244,20 +2504,20 @@ async function main() {
     if (!TASKS[t]) throw new Error(`Unknown task: ${t} (valid: ${Object.keys(TASKS).join(', ')})`)
   }
 
+  // Group jobs into matched blocks (N-26: budget checked at block boundaries so arms stay paired!)
   const rand = mulberry32(opts.seed)
-  const jobs = []
+  const blocks = []
   for (let t = 1; t <= opts.trials; t++) {
     for (const taskId of tasks) {
       for (const spec of models) {
         const [model, reasoning = 'medium'] = spec.split(':')
         const blockArms = [...opts.arms]
         if (blockArms.length === 2 && rand() < 0.5) blockArms.reverse()
-        for (const arm of blockArms) {
-          jobs.push({ taskId, arm, model, reasoning, trialIndex: t })
-        }
+        blocks.push(blockArms.map((arm) => ({ taskId, arm, model, reasoning, trialIndex: t })))
       }
     }
   }
+  const jobs = blocks.flat()
 
   // OPS-01: Dry-run plan by default; require explicit `--run` plus `--tasks` and `--models`
   if (!opts.run || !opts.tasks || !opts.models) {
@@ -2265,52 +2525,69 @@ async function main() {
     console.log(`Tasks (${tasks.length}):      ${tasks.join(', ')}`)
     console.log(`Arms (${opts.arms.length}):       ${opts.arms.join(', ')}`)
     console.log(`Models (${models.length}):     ${models.join(', ')}`)
-    console.log(`Trials/cell:    ${opts.trials} -> Total trials: ${jobs.length}`)
+    console.log(`Trials/cell:    ${opts.trials} -> Total trials: ${jobs.length} (${blocks.length} matched blocks)`)
     console.log(`Prompt style:   ${opts.promptStyle} | phaseSplit=${opts.phaseSplit} | concurrency=${opts.concurrency}`)
     console.log(
-      `Credit ceiling: ${opts.maxCredits}/trial × ${jobs.length} = ${opts.maxCredits * jobs.length} max (capped by --max-total-credits=${opts.maxTotalCredits})`,
+      `Budget control: --max-total-credits=${opts.maxTotalCredits} (checked per block) | --cli-credit-cap=${opts.cliCreditCap || 'off (no live cost meter)'}`,
     )
     return
   }
 
-  const swept = sweepStaleTempDirs()
-  if (swept > 0) console.log(`Startup sweep removed ${swept} stale ep-* temp dir(s).`)
+  // N-01: Only sweep stale temp dirs when explicitly requested (--sweep-stale)
+  if (opts.sweepStale) {
+    const swept = sweepStaleTempDirs()
+    if (swept > 0) console.log(`Startup sweep removed ${swept} stale ep-* temp dir(s).`)
+  }
 
   const runId = randomUUID()
   const provenance = computeProvenance()
   const copilotVersion = getCopilotVersion()
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-  const outDir = opts.outDir ?? path.join(__dirname, 'results', `v2-${stamp}`)
+  // N-30: Write results OUTSIDE REPO_ROOT by default so sandboxed tests can never read prior solutions
+  const outDir = opts.outDir ?? path.join(homedir(), '.ep-bench-results', `v2-${stamp}`)
   mkdirSync(outDir, { recursive: true })
   const jsonlPath = path.join(outDir, 'results.jsonl')
 
-  // ST-02: Refuse to append to an existing non-empty results.jsonl
   if (existsSync(jsonlPath) && statSync(jsonlPath).size > 0) {
     throw new Error(`Refusing to append to existing non-empty ${jsonlPath}. Use a fresh --out directory.`)
   }
 
+  // N-01: Run-scoped temp root so cleanup/signals never clobber concurrent runs
+  const runTmpRoot = realpathSync(mkdtempSync(path.join(realpathSync(tmpdir()), 'ep-run-')))
+  activeTempDirs.add(runTmpRoot)
+
   console.log(
-    `Starting v2.1 benchmark runId=${runId}: ${jobs.length} trials (prompt=${opts.promptStyle}, phaseSplit=${opts.phaseSplit}, concurrency=${opts.concurrency}, maxTotalCredits=${opts.maxTotalCredits}, seed=${opts.seed})`,
+    `Starting v2.2 benchmark runId=${runId}: ${jobs.length} trials (${blocks.length} blocks, prompt=${opts.promptStyle}, phaseSplit=${opts.phaseSplit}, concurrency=${opts.concurrency}, maxTotalCredits=${opts.maxTotalCredits}, seed=${opts.seed})`,
   )
   console.log(
-    `Provenance: git=${provenance.gitCommit}${provenance.gitDirty ? '-dirty' : ''} harness=${provenance.harnessSha256} tool=${provenance.toolSha256} cli="${copilotVersion}"`,
+    `Provenance: git=${provenance.gitCommit}${provenance.gitDirty ? '-dirty' : ''} harness=${provenance.harnessSha256} cal=${provenance.calibrationSha256} tool=${provenance.toolSha256} cli="${copilotVersion}"`,
   )
   console.log(`Output directory: ${outDir}`)
 
-  const toolchains = prepareToolchains(REPO_ROOT)
+  const toolchains = prepareToolchains(REPO_ROOT, runTmpRoot)
   const results = []
-  const startedTrials = new Map() // trialId -> job
+  const startedTrials = new Map()
   const writtenTrialIds = new Set()
   let cumulativeCredits = 0
-  let budgetExhausted = false
+  let consecutiveInfra = 0
   let shuttingDown = false
 
-  // OPS-02 & R-04: Signal handler kills all live child process groups, cleans temp dirs, and writes `aborted` ITT rows!
+  // OPS-02 & N-09: Kill active agents, capture any usage.json before cleanup, write `aborted` rows with null noGlobalMonkeyPatch!
   const handleSignal = (sig) => {
     if (shuttingDown) return
     shuttingDown = true
     console.error(`\nReceived ${sig}: terminating ${activeChildren.size} active agent(s) and recording aborted ITT rows...`)
-    for (const ch of activeChildren) killProcessGroup(ch.pid)
+    const usageByPid = new Map()
+    for (const ch of activeChildren) {
+      killProcessGroup(ch.pid)
+      if (ch.usageFile && existsSync(ch.usageFile)) {
+        try {
+          usageByPid.set(ch.pid, JSON.parse(readFileSync(ch.usageFile, 'utf8')))
+        } catch {
+          // ignore
+        }
+      }
+    }
     for (const [tid, job] of startedTrials.entries()) {
       if (writtenTrialIds.has(tid)) continue
       writtenTrialIds.add(tid)
@@ -2329,20 +2606,22 @@ async function main() {
           trialIndex: job.trialIndex,
           copilotVersion,
           ...provenance,
+          infraFailure: false,
           ungradable: false,
           aborted: true,
+          notStarted: false,
           abortSignal: sig,
           solved: false,
           oraclePass: false,
           adequateReproduction: false,
-          noGlobalMonkeyPatch: false,
+          noGlobalMonkeyPatch: null,
           technique: 'aborted',
           durationMs: 0,
           usage: extractUsageMetrics(null, job.model),
         }) + '\n',
       )
     }
-    for (const td of activeTempDirs) rmSync(td, { recursive: true, force: true })
+    rmSync(runTmpRoot, { recursive: true, force: true })
     toolchains.cleanup()
     closeAuditApi()
     process.exit(130)
@@ -2351,46 +2630,127 @@ async function main() {
   process.on('SIGTERM', () => handleSignal('SIGTERM'))
 
   try {
-    if (opts.phaseSplit) {
-      console.log(`\n--- Phase 1: Running up to ${jobs.length} agent trials (concurrency=${opts.concurrency}) ---`)
-      const phase1Outputs = []
-      let nextIdx = 0
-      async function agentWorker() {
-        while (!shuttingDown) {
-          if (opts.maxTotalCredits > 0 && cumulativeCredits >= opts.maxTotalCredits) {
-            budgetExhausted = true
-            return
-          }
-          const idx = nextIdx++
-          if (idx >= jobs.length) return
-          const job = jobs[idx]
-          const tid = `${job.taskId}__${job.arm}__${job.model}__${job.reasoning}__t${job.trialIndex}`
-          startedTrials.set(tid, job)
-          console.log(
-            `[P1 ${idx + 1}/${jobs.length}] START ${job.taskId} (${TASKS[job.taskId].stratum}) | ${job.arm} | ${job.model}:${job.reasoning}`,
-          )
-          const p1 = await runAgentPhase({
-            ...job,
-            promptStyle: opts.promptStyle,
-            timeoutSec: opts.timeoutSec,
-            maxCredits: opts.maxCredits,
-            outDir,
-            toolchains,
-            keepWorkspaces: opts.keepWorkspaces,
-          })
-          phase1Outputs.push(p1)
-          const u = extractUsageMetrics(p1.cli.usageRaw, job.model)
-          if (typeof u.aiCredits === 'number') cumulativeCredits += u.aiCredits
-          console.log(
-            `[P1 ${idx + 1}/${jobs.length}] DONE  ${job.taskId} | ${job.arm} | exit=${p1.cli.exitCode} credits=${u.aiCredits ?? 'n/a'} (cum=${cumulativeCredits.toFixed(1)}/${opts.maxTotalCredits}) cost=${formatUsd(u.estimatedUsd)} (${(p1.cli.durationMs / 1000).toFixed(1)}s)`,
-          )
+    // N-00 + N-30: Mandatory live sandbox + write preflight before Trial 1
+    if (!opts.skipPreflight) {
+      const preflightModel = models[0].split(':')[0]
+      console.log(`Running mandatory live sandbox + write preflight (${preflightModel}:low)...`)
+      const pf = await runLivePreflight({ model: preflightModel, toolchains, parentDir: runTmpRoot })
+      if (typeof pf.usage?.aiCredits === 'number') cumulativeCredits += pf.usage.aiCredits
+      console.log(`Preflight PASSED (srcWritten=${pf.srcWritten}, rootBlocked=${pf.rootBlocked}, credits=${pf.usage?.aiCredits ?? 'n/a'}).`)
+    }
+
+    const writeNotStartedBlock = (block, reason) => {
+      for (const job of block) {
+        const tid = `${job.taskId}__${job.arm}__${job.model}__${job.reasoning}__t${job.trialIndex}`
+        if (writtenTrialIds.has(tid)) continue
+        writtenTrialIds.add(tid)
+        const rec = {
+          runId,
+          trialId: tid,
+          taskId: job.taskId,
+          stratum: TASKS[job.taskId].stratum,
+          arm: job.arm,
+          promptStyle: opts.promptStyle,
+          model: job.model,
+          actualModel: null,
+          reasoning: job.reasoning,
+          trialIndex: job.trialIndex,
+          copilotVersion,
+          ...provenance,
+          infraFailure: false,
+          ungradable: false,
+          aborted: false,
+          notStarted: true,
+          skipReason: reason,
+          solved: false,
+          noGlobalMonkeyPatch: null,
+          technique: 'not_started',
+          durationMs: 0,
+          usage: extractUsageMetrics(null, job.model),
         }
+        results.push(rec)
+        appendFileSync(jsonlPath, JSON.stringify(rec) + '\n')
       }
-      await Promise.all(Array.from({ length: Math.min(opts.concurrency, jobs.length) }, agentWorker))
-      if (budgetExhausted) {
-        console.warn(`Stopped launching new trials after reaching --max-total-credits=${opts.maxTotalCredits}.`)
+    }
+
+    // N-26: Schedule block-by-block so Control+Treatment pairs stay matched under budget caps!
+    const phase1Outputs = []
+    let stoppedReason = null
+
+    for (let bIdx = 0; bIdx < blocks.length; bIdx++) {
+      const block = blocks[bIdx]
+      if (shuttingDown) break
+      if (stoppedReason) {
+        writeNotStartedBlock(block, stoppedReason)
+        continue
+      }
+      if (opts.maxTotalCredits > 0 && cumulativeCredits >= opts.maxTotalCredits) {
+        stoppedReason = `max-total-credits=${opts.maxTotalCredits}`
+        console.warn(`Budget cap reached (${cumulativeCredits.toFixed(1)}/${opts.maxTotalCredits}); marking remaining blocks not_started.`)
+        writeNotStartedBlock(block, stoppedReason)
+        continue
       }
 
+      const runBlockJob = async (job) => {
+        const tid = `${job.taskId}__${job.arm}__${job.model}__${job.reasoning}__t${job.trialIndex}`
+        startedTrials.set(tid, job)
+        console.log(
+          `[B${bIdx + 1}/${blocks.length}] START ${job.taskId} (${TASKS[job.taskId].stratum}) | ${job.arm} | ${job.model}:${job.reasoning}`,
+        )
+        const p1 = await runAgentPhase({
+          ...job,
+          promptStyle: opts.promptStyle,
+          timeoutSec: opts.timeoutSec,
+          cliCreditCap: opts.cliCreditCap,
+          outDir,
+          toolchains,
+          keepWorkspaces: opts.keepWorkspaces,
+          parentDir: runTmpRoot,
+        })
+        const u = extractUsageMetrics(p1.cli.usageRaw, job.model)
+        if (typeof u.aiCredits === 'number') cumulativeCredits += u.aiCredits
+        console.log(
+          `[B${bIdx + 1}/${blocks.length}] DONE  ${job.taskId} | ${job.arm} | exit=${p1.cli.exitCode} credits=${u.aiCredits ?? 'n/a'} (cum=${cumulativeCredits.toFixed(1)}/${opts.maxTotalCredits}) (${(p1.cli.durationMs / 1000).toFixed(1)}s)`,
+        )
+        return p1
+      }
+
+      const blockP1s =
+        opts.concurrency >= block.length
+          ? await Promise.all(block.map(runBlockJob))
+          : await (async () => {
+              const arr = []
+              for (const job of block) arr.push(await runBlockJob(job))
+              return arr
+            })()
+
+      if (opts.phaseSplit) {
+        phase1Outputs.push(...blockP1s)
+        // Quick N-05 check on CLI exit/usage before next block
+        for (const p1 of blockP1s) {
+          const u = extractUsageMetrics(p1.cli.usageRaw, p1.model)
+          const isInfra = (p1.cli.exitCode !== 0 && !p1.cli.timedOut) || Boolean(u.usageMissing)
+          consecutiveInfra = isInfra ? consecutiveInfra + 1 : 0
+          if (consecutiveInfra >= opts.maxConsecutiveInfra) {
+            stoppedReason = `consecutive-infra-failures=${consecutiveInfra}`
+            console.error(`Aborting remaining blocks after ${consecutiveInfra} consecutive infra failures!`)
+          }
+        }
+      } else {
+        for (const p1 of blockP1s) {
+          const r = await gradeTrialPhase({ phase1: p1, runId, provenance, copilotVersion, toolchains })
+          results.push(r)
+          writtenTrialIds.add(r.trialId)
+          appendFileSync(jsonlPath, JSON.stringify(r) + '\n')
+          consecutiveInfra = r.infraFailure ? consecutiveInfra + 1 : 0
+          if (consecutiveInfra >= opts.maxConsecutiveInfra) {
+            stoppedReason = `consecutive-infra-failures=${consecutiveInfra}`
+          }
+        }
+      }
+    }
+
+    if (opts.phaseSplit && phase1Outputs.length > 0) {
       console.log(`\n--- Phase 2: Grading ${phase1Outputs.length} trials serially in fresh sandboxes ---`)
       for (let i = 0; i < phase1Outputs.length; i++) {
         const p1 = phase1Outputs[i]
@@ -2405,56 +2765,22 @@ async function main() {
         writtenTrialIds.add(r.trialId)
         appendFileSync(jsonlPath, JSON.stringify(r) + '\n')
         console.log(
-          `[P2 ${i + 1}/${phase1Outputs.length}] GRADED ${r.taskId} | ${r.arm} -> solved=${r.solved} oracle=${r.oraclePass} adqRed=${r.adequateReproduction} ref=${r.refFixPass} noMP=${r.noGlobalMonkeyPatch} tech=${r.technique}`,
+          `[P2 ${i + 1}/${phase1Outputs.length}] GRADED ${r.taskId} | ${r.arm} -> solved=${r.solved} oracle=${r.oraclePass} adqRed=${r.adequateReproduction} ref=${r.refFixPass} infra=${r.infraFailure} tech=${r.technique}`,
         )
       }
-    } else {
-      let nextIdx = 0
-      async function inlineWorker() {
-        while (!shuttingDown) {
-          if (opts.maxTotalCredits > 0 && cumulativeCredits >= opts.maxTotalCredits) {
-            budgetExhausted = true
-            return
-          }
-          const idx = nextIdx++
-          if (idx >= jobs.length) return
-          const job = jobs[idx]
-          const tid = `${job.taskId}__${job.arm}__${job.model}__${job.reasoning}__t${job.trialIndex}`
-          startedTrials.set(tid, job)
-          const p1 = await runAgentPhase({
-            ...job,
-            promptStyle: opts.promptStyle,
-            timeoutSec: opts.timeoutSec,
-            maxCredits: opts.maxCredits,
-            outDir,
-            toolchains,
-            keepWorkspaces: opts.keepWorkspaces,
-          })
-          const r = await gradeTrialPhase({
-            phase1: p1,
-            runId,
-            provenance,
-            copilotVersion,
-            toolchains,
-          })
-          if (typeof r.usage?.aiCredits === 'number') cumulativeCredits += r.usage.aiCredits
-          results.push(r)
-          writtenTrialIds.add(r.trialId)
-          appendFileSync(jsonlPath, JSON.stringify(r) + '\n')
-        }
-      }
-      await Promise.all(Array.from({ length: Math.min(opts.concurrency, jobs.length) }, inlineWorker))
     }
   } finally {
     closeAuditApi()
     toolchains.cleanup()
+    rmSync(runTmpRoot, { recursive: true, force: true })
   }
 
-  const byArm = summarizeByArm(results)
-  const cmh = stratifiedCMH(results, (r) => Boolean(r.solved))
-  const rd = matchedRiskDifferenceCI(results, (r) => Boolean(r.solved))
+  const byArm = summarizeByArm(results.filter((r) => !r.notStarted))
+  const equalSeamRows = results.filter((r) => r.stratum !== 'closed-module' && !r.notStarted)
+  const cmh = stratifiedCMH(equalSeamRows, (r) => Boolean(r.solved))
+  const rd = matchedRiskDifferenceCI(equalSeamRows, (r) => Boolean(r.solved))
   const summary = {
-    version: 'v2.1',
+    version: 'v2.2',
     runId,
     generatedAt: new Date().toISOString(),
     copilotVersion,
@@ -2470,14 +2796,15 @@ async function main() {
       concurrency: opts.concurrency,
       phaseSplit: opts.phaseSplit,
       timeoutSec: opts.timeoutSec,
-      maxCredits: opts.maxCredits,
+      cliCreditCap: opts.cliCreditCap,
       maxTotalCredits: opts.maxTotalCredits,
+      maxConsecutiveInfra: opts.maxConsecutiveInfra,
       seed: opts.seed,
     },
     pricingTablePerMillionUsd: MODEL_PRICING_PER_M,
     byArm,
-    stratifiedCMH: cmh,
-    newcombePairedRD: rd,
+    primaryStratifiedCMH: cmh,
+    primaryNewcombePairedRD: rd,
     results,
   }
   writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify(summary, null, 2))

@@ -221,15 +221,17 @@ function stripNonTrialEntries(nmDir) {
  * temp dirs left behind by killed prior runs (closes I-01).
  */
 export function sweepStaleTempDirs() {
-  const root = tmpdir()
+  const root = realpathSync(tmpdir())
   const prefixes = [
     'ep-grader-',
     'ep-bench-toolchains-',
     'ep-bench-',
     'ep-ws-',
+    'ep-ownfix-',
     'ep-test-eval-',
     'ep-copilot-home-',
     'ep-trial-tmp-',
+    'ep-run-',
   ]
   let removed = 0
   try {
@@ -245,13 +247,45 @@ export function sweepStaleTempDirs() {
   return removed
 }
 
-export function prepareToolchains(repoRoot) {
+function collectWholeGraderHashPaths(graderNm, repoRoot) {
+  const files = []
+  const pushIfExists = (p) => {
+    if (existsSync(p)) files.push(p)
+  }
+  const gradersDir = path.join(repoRoot, 'bench/graders')
+  if (existsSync(gradersDir)) {
+    for (const f of readdirSync(gradersDir)) pushIfExists(path.join(gradersDir, f))
+  }
+  pushIfExists(path.join(repoRoot, 'bench/runtime-guard.setup.mjs'))
+
+  // Hash ALL `.bin` shims + top-level package.json + vitest/fast-check/typescript entrypoints in graderNm (N-30!)
+  const binDir = path.join(graderNm, '.bin')
+  if (existsSync(binDir)) {
+    for (const f of readdirSync(binDir)) pushIfExists(path.join(binDir, f))
+  }
+  for (const pkg of ['vitest', 'vite', 'fast-check', 'typescript', 'magic-string']) {
+    pushIfExists(path.join(graderNm, pkg, 'package.json'))
+  }
+  const pnpmDir = path.join(graderNm, '.pnpm')
+  if (existsSync(pnpmDir)) {
+    for (const entry of readdirSync(pnpmDir)) {
+      const subBin = path.join(pnpmDir, entry, 'node_modules/.bin')
+      if (existsSync(subBin)) {
+        for (const f of readdirSync(subBin)) pushIfExists(path.join(subBin, f))
+      }
+    }
+  }
+  return files
+}
+
+export function prepareToolchains(repoRoot, parentDir = realpathSync(tmpdir())) {
   const srcNm = path.join(repoRoot, 'node_modules')
   if (!existsSync(srcNm)) {
     throw new Error(`Missing root node_modules at ${srcNm}. Run pnpm install first.`)
   }
 
-  const baseDir = mkdtempSync(path.join(tmpdir(), 'ep-bench-toolchains-'))
+  // N-00: Always realpath so macOS /var -> /private/var matches CLI paths
+  const baseDir = realpathSync(mkdtempSync(path.join(parentDir, 'ep-bench-toolchains-')))
   const controlRoot = path.join(baseDir, 'trial-control')
   const treatmentRoot = path.join(baseDir, 'trial-treatment')
   const graderRoot = path.join(baseDir, 'grader')
@@ -263,10 +297,16 @@ export function prepareToolchains(repoRoot) {
   const treatmentNm = path.join(treatmentRoot, 'node_modules')
   const graderNm = path.join(graderRoot, 'node_modules')
 
-  // 1. Grader toolchain
+  // 1. Grader toolchain — strip repo-referencing pnpm metadata too (N-30!)
   cloneDirCoW(srcNm, graderNm)
-  for (const cacheDir of ['.vite', '.vite-temp', '.vitest-cache']) {
-    rmSync(path.join(graderNm, cacheDir), { recursive: true, force: true })
+  for (const rel of [
+    '.vite',
+    '.vite-temp',
+    '.vitest-cache',
+    '.pnpm-workspace-state-v1.json',
+    '.modules.yaml',
+  ]) {
+    rmSync(path.join(graderNm, rel), { recursive: true, force: true })
   }
   rewriteBinShims(graderNm, repoRoot)
 
@@ -288,19 +328,8 @@ export function prepareToolchains(repoRoot) {
   assertNoRepoLeak(treatmentNm, repoRoot)
   assertNoRepoLeak(graderNm, repoRoot)
 
-  // Full grader checksum: binaries + ALL grader source files + runtime guard (R-02)
-  const gradersDir = path.join(repoRoot, 'bench/graders')
-  const graderSourceFiles = existsSync(gradersDir)
-    ? readdirSync(gradersDir).map((f) => path.join(gradersDir, f))
-    : []
-  const graderFilesToCheck = [
-    path.join(graderNm, '.bin/vitest'),
-    path.join(graderNm, 'vitest/package.json'),
-    path.join(graderNm, 'fast-check/package.json'),
-    path.join(graderNm, 'typescript/package.json'),
-    path.join(repoRoot, 'bench/runtime-guard.setup.mjs'),
-    ...graderSourceFiles,
-  ]
+  // Full grader toolchain + source checksum (R-02 & N-30)
+  const graderFilesToCheck = collectWholeGraderHashPaths(graderNm, repoRoot)
   const initialGraderChecksum = hashFiles(graderFilesToCheck)
 
   return {

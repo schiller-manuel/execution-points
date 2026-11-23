@@ -85,10 +85,12 @@ describe('hidden oracle grader: debounce-search (yield-engine + timers)', () => 
         },
         { atStep: 0 },
       )
+      let atDispose: ReturnType<typeof ctrl.getSnapshot> | undefined
       sched.spawn(
         1,
         async () => {
           ctrl.dispose()
+          atDispose = structuredClone(ctrl.getSnapshot())
         },
         { atStep: disposeStep },
       )
@@ -97,8 +99,8 @@ describe('hidden oracle grader: debounce-search (yield-engine + timers)', () => 
       vi.useRealTimers()
       const snap = ctrl.getSnapshot()
       expect(snap.disposed).toBe(true)
-      expect(snap.query).toBe('')
-      expect(snap.results).toEqual([])
+      // N-16: nothing that completes after dispose() may change the snapshot
+      expect(snap).toEqual(atDispose)
     }
   })
 })

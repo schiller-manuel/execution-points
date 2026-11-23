@@ -424,6 +424,7 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
     let usesDeferredPromise = false
 
     const aliasMap = new Map() // local identifier -> canonical global/tool name
+    const namespaceImports = new Set() // local namespace imports (`import * as storage from './storage'`) — N-12!
     const viAliases = new Set(['vi'])
     const spyOnAliases = new Set()
     const stubGlobalAliases = new Set()
@@ -431,14 +432,37 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
     const sleepFnAliases = new Set()
     const timerModNamespaces = new Set()
 
-    // Track whether fake timers are actively enabled (and not in dead code or followed by useRealTimers)
-    let fakeTimersActive = false
+    // N-25 & S10: Track unconditional hook-level fake timers separately from inline calls
+    let hookFakeTimersActive = false
+    let inlineFakeTimersActive = false
     let everUsedFakeTimers = false
     const sleepCallSites = [] // { label, fakeTimersActiveAtCall }
+
+    const resolveProtectedChain = (expr) => {
+      const e = unwrapExpr(expr)
+      if (!e) return undefined
+      if (
+        e.kind === SyntaxKind.CallExpression &&
+        (e.expression?.kind === SyntaxKind.PropertyAccessExpression ||
+          e.expression?.kind === SyntaxKind.ElementAccessExpression)
+      ) {
+        const obj = rootIdentifierName(e.expression.expression, aliasMap)
+        const prop = getPropertyKeyText(e.expression)
+        if ((obj === 'Object' || obj === 'Reflect') && prop === 'getPrototypeOf' && e.arguments?.[0]) {
+          return resolveProtectedChain(e.arguments[0]) ?? rootIdentifierName(e.arguments[0], aliasMap)
+        }
+      }
+      return rootIdentifierName(e, aliasMap)
+    }
 
     const recordAlias = (localName, rhsExpr) => {
       const rhs = unwrapExpr(rhsExpr)
       if (!rhs) return
+      // N-22: resolve `const base = Object.getPrototypeOf(MessagePort.prototype)`
+      const protoRoot = resolveProtectedChain(rhs)
+      if (protoRoot && GLOBAL_TARGETS.has(protoRoot)) {
+        aliasMap.set(localName, protoRoot)
+      }
       if (rhs.kind === SyntaxKind.Identifier) {
         const canonical = aliasMap.get(rhs.text) ?? rhs.text
         if (GLOBAL_TARGETS.has(canonical)) aliasMap.set(localName, canonical)
@@ -485,12 +509,28 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
       }
     }
 
-    const visit = (node, inDeadBranch = false) => {
-      // Skip dead branches for fakeTimersActive tracking (A-01: if (false) vi.useFakeTimers())
-      if (node.kind === SyntaxKind.IfStatement && isFalsyConstant(node.expression)) {
-        visit(node.thenStatement, true)
-        if (node.elseStatement) visit(node.elseStatement, inDeadBranch)
+    const visit = (node, inConditional = false, inHook = null) => {
+      // Any `if` statement is conditional for fakeTimersActive (catches S10 `if (Math.random() > 2) vi.useFakeTimers()`!)
+      if (node.kind === SyntaxKind.IfStatement) {
+        visit(node.expression, inConditional, inHook)
+        visit(node.thenStatement, true, inHook)
+        if (node.elseStatement) visit(node.elseStatement, true, inHook)
         return
+      }
+
+      // N-25: Model Vitest lifecycle hooks (`beforeEach`/`beforeAll`/`afterEach`/`afterAll`)
+      if (node.kind === SyntaxKind.CallExpression) {
+        const callee = unwrapExpr(node.expression)
+        if (callee?.kind === SyntaxKind.Identifier) {
+          if (callee.text === 'beforeEach' || callee.text === 'beforeAll') {
+            for (const arg of node.arguments ?? []) visit(arg, inConditional, 'before')
+            return
+          }
+          if (callee.text === 'afterEach' || callee.text === 'afterAll') {
+            for (const arg of node.arguments ?? []) visit(arg, inConditional, 'after')
+            return
+          }
+        }
       }
 
       // Imports
@@ -498,6 +538,11 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
         const mod = node.moduleSpecifier.text
         const clause = node.importClause
         const isTypeOnly = Boolean(clause?.isTypeOnly)
+
+        // N-12: Track local relative namespace imports (`import * as storage from './storage'`)
+        if (mod.startsWith('.') && !isTypeOnly && clause?.namedBindings?.kind === SyntaxKind.NamespaceImport) {
+          namespaceImports.add(clause.namedBindings.name.text)
+        }
 
         if (mod === 'execution-points-prototype' && !isTypeOnly && clause?.namedBindings) {
           if (clause.namedBindings.kind === SyntaxKind.NamedImports) {
@@ -519,7 +564,14 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
           }
         }
 
-        if ((mod === 'node:timers/promises' || mod === 'timers/promises') && !isTypeOnly && clause) {
+        if (
+          (mod === 'node:timers/promises' ||
+            mod === 'timers/promises' ||
+            mod === 'node:timers' ||
+            mod === 'timers') &&
+          !isTypeOnly &&
+          clause
+        ) {
           if (clause.name) {
             timerModNamespaces.add(clause.name.text)
           }
@@ -580,10 +632,30 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
       if (node.kind === SyntaxKind.CallExpression) {
         const expr = unwrapExpr(node.expression)
         const args = node.arguments ?? []
+        const isFakeNow = hookFakeTimersActive || inlineFakeTimersActive
 
-        // Dynamic import('node:timers/promises')
+        // N-24: Comma-operator indirect call `(0, setTimeout)(...)`
+        if (
+          expr?.kind === SyntaxKind.BinaryExpression &&
+          expr.operatorToken.kind === SyntaxKind.CommaToken
+        ) {
+          const rhs = unwrapExpr(expr.right)
+          if (
+            rhs?.kind === SyntaxKind.Identifier &&
+            (rhs.text === 'setTimeout' || rhs.text === 'setInterval' || sleepFnAliases.has(rhs.text))
+          ) {
+            sleepCallSites.push({ label: `(0,${rhs.text})`, fakeTimersActiveAtCall: isFakeNow })
+          }
+        }
+
+        // Dynamic import('node:timers/promises' | 'node:timers')
         if (expr?.kind === SyntaxKind.ImportKeyword && args[0]?.kind === SyntaxKind.StringLiteral) {
-          if (args[0].text === 'node:timers/promises' || args[0].text === 'timers/promises') {
+          if (
+            args[0].text === 'node:timers/promises' ||
+            args[0].text === 'timers/promises' ||
+            args[0].text === 'node:timers' ||
+            args[0].text === 'timers'
+          ) {
             sleepCallSites.push({ label: `import(${args[0].text})`, fakeTimersActiveAtCall: false })
           }
         }
@@ -595,19 +667,21 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
           if (name === 'select' && epSelectImported) epSelectCalled = true
           if (stubGlobalAliases.has(name)) globalPatches.push(`stubGlobal(${args[0]?.text ?? '?'})`)
           if (spyOnAliases.has(name) && args.length >= 1) {
-            const targetRoot = rootIdentifierName(args[0], aliasMap)
+            const targetRoot = resolveProtectedChain(args[0])
             if (targetRoot && GLOBAL_TARGETS.has(targetRoot)) {
               globalPatches.push(`spyOn(${targetRoot})`)
+            } else if (targetRoot && namespaceImports.has(targetRoot)) {
+              usesModuleMock = true
             }
           }
           if (definePropAliases.has(name) && args.length >= 1) {
-            const targetRoot = rootIdentifierName(args[0], aliasMap)
+            const targetRoot = resolveProtectedChain(args[0])
             if (targetRoot && GLOBAL_TARGETS.has(targetRoot)) {
               globalPatches.push(`defineProperty(${targetRoot})`)
             }
           }
           if (name === 'setTimeout' || name === 'setInterval') {
-            sleepCallSites.push({ label: name, fakeTimersActiveAtCall: fakeTimersActive })
+            sleepCallSites.push({ label: name, fakeTimersActiveAtCall: isFakeNow })
           } else if (sleepFnAliases.has(name)) {
             sleepCallSites.push({ label: name, fakeTimersActiveAtCall: false })
           }
@@ -625,22 +699,41 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
           if (propName === 'withReplacement' && epSelectImported) epWithReplacementCalled = true
           if (propName === 'select' && epSelectImported) epSelectCalled = true
 
+          // N-24: setTimeout.call / .apply / .bind and expect.poll
+          if (
+            (objName === 'setTimeout' || objName === 'setInterval' || sleepFnAliases.has(objName ?? '')) &&
+            (propName === 'call' || propName === 'apply' || propName === 'bind')
+          ) {
+            sleepCallSites.push({ label: `${objName}.${propName}`, fakeTimersActiveAtCall: isFakeNow })
+          }
+          if (objName === 'expect' && propName === 'poll') {
+            sleepCallSites.push({ label: 'expect.poll', fakeTimersActiveAtCall: false })
+          }
+
           if (viAliases.has(objName ?? '')) {
-            if (propName === 'mock') usesModuleMock = true
-            if (propName === 'useFakeTimers' && !inDeadBranch) {
-              fakeTimersActive = true
+            if (propName === 'mock' || propName === 'mocked') usesModuleMock = true
+            if (propName === 'useFakeTimers' && !inConditional) {
               everUsedFakeTimers = true
+              if (inHook === 'before') hookFakeTimersActive = true
+              else if (inHook !== 'after') inlineFakeTimersActive = true
             }
-            if (propName === 'useRealTimers' && !inDeadBranch) {
-              fakeTimersActive = false
+            if (propName === 'useRealTimers' && !inConditional) {
+              // N-25: `afterEach(() => vi.useRealTimers())` cleans up AFTER each test, not before later tests!
+              if (inHook !== 'after') {
+                inlineFakeTimersActive = false
+                hookFakeTimersActive = false
+              }
             }
             if (propName === 'stubGlobal') {
               globalPatches.push(`vi.stubGlobal(${args[0]?.text ?? '?'})`)
             }
             if (propName === 'spyOn' && args.length >= 1) {
-              const targetRoot = rootIdentifierName(args[0], aliasMap)
+              const targetRoot = resolveProtectedChain(args[0])
               if (targetRoot && GLOBAL_TARGETS.has(targetRoot)) {
                 globalPatches.push(`vi.spyOn(${targetRoot})`)
+              } else if (targetRoot && namespaceImports.has(targetRoot)) {
+                // N-12: `vi.spyOn(storageNamespace, 'readFromDb')` is a module seam!
+                usesModuleMock = true
               }
             }
             if (propName === 'waitFor' || propName === 'waitUntil') {
@@ -650,10 +743,13 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
 
           if (
             objName === 'Object' &&
-            (propName === 'defineProperty' || propName === 'defineProperties' || propName === 'assign') &&
+            (propName === 'defineProperty' ||
+              propName === 'defineProperties' ||
+              propName === 'assign' ||
+              propName === 'setPrototypeOf') &&
             args.length >= 1
           ) {
-            const targetRoot = rootIdentifierName(args[0], aliasMap)
+            const targetRoot = resolveProtectedChain(args[0])
             if (targetRoot && GLOBAL_TARGETS.has(targetRoot)) {
               globalPatches.push(`Object.${propName}(${targetRoot})`)
             }
@@ -661,12 +757,19 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
 
           if (
             objName === 'Reflect' &&
-            (propName === 'set' || propName === 'defineProperty') &&
+            (propName === 'set' || propName === 'defineProperty' || propName === 'setPrototypeOf') &&
             args.length >= 1
           ) {
-            const targetRoot = rootIdentifierName(args[0], aliasMap)
+            const targetRoot = resolveProtectedChain(args[0])
             if (targetRoot && GLOBAL_TARGETS.has(targetRoot)) {
               globalPatches.push(`Reflect.${propName}(${targetRoot})`)
+            }
+          }
+
+          if (objName === 'Reflect' && propName === 'apply' && args.length >= 1) {
+            const fnName = rootIdentifierName(args[0], aliasMap)
+            if (fnName === 'setTimeout' || fnName === 'setInterval' || sleepFnAliases.has(fnName ?? '')) {
+              sleepCallSites.push({ label: `Reflect.apply(${fnName})`, fakeTimersActiveAtCall: isFakeNow })
             }
           }
 
@@ -675,14 +778,13 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
           }
 
           if ((objName === 'globalThis' || objName === 'global') && (propName === 'setTimeout' || propName === 'setInterval')) {
-            sleepCallSites.push({ label: `${objName}.${propName}`, fakeTimersActiveAtCall: fakeTimersActive })
+            sleepCallSites.push({ label: `${objName}.${propName}`, fakeTimersActiveAtCall: isFakeNow })
           }
 
           if (
             (timerModNamespaces.has(objName ?? '') || propName === 'wait') &&
             (propName === 'setTimeout' || propName === 'setInterval' || propName === 'wait')
           ) {
-            // Check scheduler.wait or timersPromises.setTimeout
             if (
               timerModNamespaces.has(objName ?? '') ||
               (expr.expression?.kind === SyntaxKind.PropertyAccessExpression &&
@@ -702,10 +804,10 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
         inspectAssignmentTarget(node.left)
       }
 
-      node.forEachChild((child) => visit(child, inDeadBranch))
+      node.forEachChild((child) => visit(child, inConditional, inHook))
     }
 
-    visit(sf, false)
+    visit(sf, false, null)
 
     for (const s of sleepCallSites) {
       if (!s.fakeTimersActiveAtCall) sleepCalls.push(s.label)

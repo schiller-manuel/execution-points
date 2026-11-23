@@ -12,11 +12,16 @@ import {
 describe('hidden oracle grader: double-submit (yield-engine)', () => {
   test('caches completed receipt (0 async yields on warm hit), preserves cold yields, and rejects invalid amounts', async () => {
     resetPayments()
-    const { result: r1, yields: coldYields } = await countYields(() => submitPayment('k1', 500))
+    const ioSite = /#(validatePayment|reserveFunds|chargeGateway|yieldIo):/
+    const { result: r1, yields: coldYields } = await countYields(() => submitPayment('k1', 500), {
+      matchSite: ioSite,
+    })
     expect(coldYields).toBeGreaterThanOrEqual(3)
     expect(getGatewayChargeCount('k1')).toBe(1)
 
-    const { result: r2, yields } = await countYields(() => submitPayment('k1', 500))
+    const { result: r2, yields } = await countYields(() => submitPayment('k1', 500), {
+      matchSite: ioSite,
+    })
     expect(r2).toEqual(r1)
     expect(yields).toBe(0)
     expect(getGatewayChargeCount('k1')).toBe(1)

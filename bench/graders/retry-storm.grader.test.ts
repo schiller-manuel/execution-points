@@ -92,18 +92,12 @@ describe('hidden oracle grader: retry-storm (yield-engine)', () => {
         expect(await client.request('recover')).toBe('ok:recover')
         expect(client.getState()).toBe('CLOSED')
       },
-      { atStep: 1 },
+      { atStep: 0 },
     )
 
-    let q0Steps = 0
-    await sched.run((ready) => {
-      if (q0Steps < 1 && ready.includes(0)) {
-        q0Steps++
-        return 0
-      }
-      if (ready.includes(1)) return 1
-      return ready[0]
-    })
+    // N-16: q0 already consumed failure #1 synchronously and stays parked mid-request
+    // while q1 trips and recovers the breaker.
+    await sched.run((ready) => (ready.includes(1) ? 1 : ready[0]))
 
     // Breaker MUST remain healthy CLOSED even after stale failure from epoch 0 finishes!
     expect(client.getState()).toBe('CLOSED')

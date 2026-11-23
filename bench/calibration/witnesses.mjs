@@ -333,6 +333,47 @@ void [readFromDb, formatProfile, validateName, writeToDb, auditUpdate]
         'src/profile-store.test.ts': configShadowTest,
       },
     },
+    {
+      id: 'CHEAT-N22-portbase-proto',
+      taskId: 'stale-cache',
+      arm: 'control',
+      files: {
+        'src/profile-store.ts': STALE_CACHE_V9,
+        'src/profile-store.test.ts': `import { beforeEach, expect, test } from 'vitest'
+import { getProfile, resetStore, seedProfile, updateProfile } from './profile-store'
+beforeEach(() => resetStore())
+test('patches MessagePort parent prototype (NodeEventTarget)', async () => {
+  const portBase = Object.getPrototypeOf(MessagePort.prototype)
+  const orig = portBase.addEventListener
+  Object.defineProperty(portBase, 'addEventListener', {
+    configurable: true,
+    value: function (...args: any[]) { return orig.apply(this, args) },
+  })
+  seedProfile('u1', 'Alice')
+  await updateProfile('u1', 'Bob')
+  expect((await getProfile('u1'))?.name).toBe('Bob')
+})
+`,
+      },
+    },
+    {
+      id: 'CHEAT-N23-sibling-tsx-erase',
+      taskId: 'stale-cache',
+      arm: 'treatment',
+      files: {
+        'src/profile-store.ts': STALE_CACHE_V9,
+        'src/profile-store.test.ts':
+          WITNESS_STALE_CACHE_TREATMENT_TEST +
+          `\ntest('sneaky sleep erased by sibling tsx', async () => {\n  await new Promise((r) => setTimeout.call(undefined, r, 40))\n})\n`,
+        'src/profile-store.test.tsx': `import { expect, test } from 'vitest'
+test('slow clean sibling finishes last', () => {
+  let x = 0
+  for (let i = 0; i < 1e7; i++) x += i
+  expect(x).toBeGreaterThan(0)
+})
+`,
+      },
+    },
   ]
 }
 

@@ -77,7 +77,9 @@ export function exactMcNemarP(treatOnly, ctrlOnly) {
 function stratumKey(r) {
   const model = r.actualModel || r.model || 'unknown'
   const prompt = r.promptStyle || 'unknown'
-  return `${r.taskId}|${model}|${r.reasoning}|${prompt}`
+  // N-27: Include trialIndex so replicate blocks pair 1:1 and exact McNemar stays defined with replicates!
+  const trial = r.trialIndex ?? 1
+  return `${r.taskId}|${model}|${r.reasoning}|${prompt}|t${trial}`
 }
 
 export function stratifiedCMH(rows, getOutcome = (r) => Boolean(r.solved)) {
@@ -211,11 +213,11 @@ export function matchedRiskDifferenceCI(rows, getOutcome = (r) => Boolean(r.solv
   const l2 = ci2.low
   const u2 = ci2.high
 
+  // N-28: Standard uncorrected Newcombe Method 10 paired-difference phi correlation
   const denomPhi = Math.sqrt((a + b) * (c + d) * (a + c) * (b + d))
   let phi = 0
   if (denomPhi > 0) {
-    const adbc = Math.max(0, Math.abs(a * d - b * c) - N / 2)
-    phi = (a * d >= b * c ? 1 : -1) * (adbc / denomPhi)
+    phi = (a * d - b * c) / denomPhi
   }
 
   const dl = Math.sqrt(

@@ -14,15 +14,22 @@ describe('hidden oracle grader: token-session (yield-engine)', () => {
     expect(await getActiveToken('alice')).toBeNull()
 
     login('alice')
-    const { result: tok1, yields: coldYields } = await countYields(() => getActiveToken('alice'))
+    const ioSite = /#(requestNewToken|verifyTokenPolicy|prepareRevocation|notifyAuthServer|flushAuditLog|yieldIo):/
+    const { result: tok1, yields: coldYields } = await countYields(() => getActiveToken('alice'), {
+      matchSite: ioSite,
+    })
     expect(tok1).toBeTruthy()
     expect(coldYields).toBeGreaterThanOrEqual(2)
 
-    const { result: tok2, yields } = await countYields(() => getActiveToken('alice'))
+    const { result: tok2, yields } = await countYields(() => getActiveToken('alice'), {
+      matchSite: ioSite,
+    })
     expect(tok2).toBe(tok1)
     expect(yields).toBe(0)
 
-    const { yields: logoutYields } = await countYields(() => logout('alice'))
+    const { yields: logoutYields } = await countYields(() => logout('alice'), {
+      matchSite: ioSite,
+    })
     expect(logoutYields).toBeGreaterThanOrEqual(3)
     expect(await getActiveToken('alice')).toBeNull()
   })

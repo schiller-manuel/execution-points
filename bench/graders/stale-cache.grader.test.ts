@@ -29,17 +29,25 @@ describe('hidden oracle grader: stale-cache (yield-engine)', () => {
 
     seedProfile('u1', 'Alice')
     // Cold read must perform real async I/O (catches E-04 sync bypass)
-    const { result: first, yields: coldYields } = await countYields(() => getProfile('u1'))
+    const ioSite = /#(readFromDb|formatProfile|validateName|writeToDb|auditUpdate|yieldIo):|src\/storage\.ts#/
+    const { result: first, yields: coldYields } = await countYields(() => getProfile('u1'), {
+      matchSite: ioSite,
+    })
     expect(first).toEqual({ id: 'u1', name: 'Alice', displayName: 'ALICE' })
     expect(coldYields).toBeGreaterThanOrEqual(2)
 
-    // Warm-cache read must NOT bypass the cache (0 async yields)
-    const { result: warm, yields } = await countYields(() => getProfile('u1'))
+    // Warm-cache read must NOT hit storage I/O (0 I/O helper yields; allows per-key queue await — N-11!)
+    const { result: warm, yields } = await countYields(() => getProfile('u1'), {
+      matchSite: ioSite,
+    })
     expect(warm).toEqual({ id: 'u1', name: 'Alice', displayName: 'ALICE' })
     expect(yields).toBe(0)
 
     // Update must perform real async I/O (catches E-04 sync bypass)
-    const { result: updated, yields: updateYields } = await countYields(() => updateProfile('u1', 'Alice2'))
+    const { result: updated, yields: updateYields } = await countYields(
+      () => updateProfile('u1', 'Alice2'),
+      { matchSite: ioSite },
+    )
     expect(updated).toEqual({ id: 'u1', name: 'Alice2', displayName: 'ALICE2' })
     expect(updateYields).toBeGreaterThanOrEqual(3)
 

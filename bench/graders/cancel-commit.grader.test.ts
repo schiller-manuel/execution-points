@@ -135,6 +135,65 @@ describe('hidden oracle grader: cancel-commit (yield-engine + real fs)', () => {
     }
   })
 
+  test('overlapping startJob calls do not corrupt shared staging files or overwrite newer run (catches CC-M1, N-18)', async () => {
+    // 3-phase switch: advance run 1 to staging, start run 2 and advance run 2 to its staging write,
+    // then switch back to run 1 (which deletes a shared stage.tmp in CC-M1!) before resuming run 2!
+    for (const startSecondAt of [0, 1, 2, 3, 4]) {
+      for (const leadSecond of [1, 2, 3, 4, 5]) {
+        await withTempDir(async (dir) => {
+          const runner = createJobRunner(dir)
+          const sched = createYieldScheduler()
+          let secondErr: unknown = null
+
+          sched.spawn(
+            0,
+            async () => {
+              try {
+                await runner.startJob('j1', 'first-run')
+              } catch {
+                // superseded first run may reject
+              }
+            },
+            { atStep: 0 },
+          )
+          sched.spawn(
+            1,
+            async () => {
+              try {
+                await runner.startJob('j1', 'second-run')
+              } catch (err) {
+                secondErr = err
+              }
+            },
+            { atStep: startSecondAt },
+          )
+
+          let q1Steps = 0
+          await sched.run((ready) => {
+            // Once queue 1 has spawned, give it `leadSecond` steps so it writes the staging file,
+            // then switch back to queue 0 (exposing shared-stage deletion!) before finishing queue 1!
+            if (ready.includes(1) && q1Steps < leadSecond) {
+              q1Steps++
+              return 1
+            }
+            if (ready.includes(0)) return 0
+            return ready[0]
+          })
+
+          expect(secondErr).toBeNull()
+          const expected: JobRecord = {
+            jobId: 'j1',
+            status: 'completed',
+            payload: 'second-run',
+            result: 'processed:SECOND-RUN',
+          }
+          expect(await runner.getJobState('j1')).toEqual(expected)
+          expect(await readDiskState(dir, 'j1')).toEqual(expected)
+        })
+      }
+    }
+  })
+
   test('randomized schedules with multi-job isolation', async () => {
     await fc.assert(
       fc.asyncProperty(
