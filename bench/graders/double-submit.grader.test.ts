@@ -58,12 +58,13 @@ describe('hidden oracle grader: double-submit (yield-engine)', () => {
     resetPayments()
     failNextCharge('k1', 'Gateway 502')
     const errs: string[] = []
+    const successes: PaymentReceipt[] = []
     const sched = createYieldScheduler()
     sched.spawn(
       0,
       async () => {
         try {
-          await submitPayment('k1', 500)
+          successes.push(await submitPayment('k1', 500))
         } catch (err) {
           errs.push((err as Error).message)
         }
@@ -74,7 +75,7 @@ describe('hidden oracle grader: double-submit (yield-engine)', () => {
       1,
       async () => {
         try {
-          await submitPayment('k1', 500)
+          successes.push(await submitPayment('k1', 500))
         } catch (err) {
           errs.push((err as Error).message)
         }
@@ -83,11 +84,18 @@ describe('hidden oracle grader: double-submit (yield-engine)', () => {
     )
     await sched.run((ready) => ready[0])
 
-    expect(errs.length).toBe(2)
-    expect(getGatewayChargeCount('k1')).toBe(0)
+    // D-05: Both valid designs satisfy the prompt:
+    // (A) Shared in-flight promise: both concurrent callers receive the failure (errs=2, successes=0, charges=0)
+    // (B) Per-key queue/mutex: caller 1 fails, caller 2 retries and succeeds once (errs=1, successes=1, charges=1)
+    const countAfterWave = getGatewayChargeCount('k1')
+    const sharedFailure = errs.length === 2 && successes.length === 0 && countAfterWave === 0
+    const queuedRetry = errs.length === 1 && successes.length === 1 && countAfterWave === 1
+    expect(sharedFailure || queuedRetry).toBe(true)
 
+    // Subsequent call must never remain poisoned and total charges must stay 1
     const retry = await submitPayment('k1', 500)
     expect(retry.amountCents).toBe(500)
+    if (queuedRetry) expect(retry).toEqual(successes[0])
     expect(getGatewayChargeCount('k1')).toBe(1)
   })
 

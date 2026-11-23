@@ -2564,6 +2564,27 @@ async function main() {
   )
   console.log(`Output directory: ${outDir}`)
 
+  // Built-in macOS sleep assertion so long runs & Phase-2 grading don't pause on idle/disk sleep
+  let caffeinateProc = null
+  if (process.platform === 'darwin') {
+    try {
+      caffeinateProc = spawn('caffeinate', ['-i', '-m', '-w', String(process.pid)], {
+        stdio: 'ignore',
+      })
+      caffeinateProc.on('error', () => {})
+      caffeinateProc.unref()
+    } catch {
+      caffeinateProc = null
+    }
+  }
+  const stopCaffeinate = () => {
+    try {
+      caffeinateProc?.kill('SIGTERM')
+    } catch {
+      // already exited
+    }
+  }
+
   const toolchains = prepareToolchains(REPO_ROOT, runTmpRoot)
   const results = []
   const startedTrials = new Map()
@@ -2622,6 +2643,7 @@ async function main() {
       )
     }
     rmSync(runTmpRoot, { recursive: true, force: true })
+    stopCaffeinate()
     toolchains.cleanup()
     closeAuditApi()
     process.exit(130)
@@ -2770,6 +2792,7 @@ async function main() {
       }
     }
   } finally {
+    stopCaffeinate()
     closeAuditApi()
     toolchains.cleanup()
     rmSync(runTmpRoot, { recursive: true, force: true })

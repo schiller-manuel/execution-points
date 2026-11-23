@@ -12,6 +12,7 @@ import {
   DEBOUNCE_SEARCH_M2_NO_SEQ,
   DEBOUNCE_SEARCH_REF,
   DOUBLE_SUBMIT_POISON,
+  DOUBLE_SUBMIT_QUEUE_REF,
   DOUBLE_SUBMIT_REF,
   EVENT_ORDER_M1_NO_MONOTONIC,
   EVENT_ORDER_REF,
@@ -1237,6 +1238,7 @@ export const VALID_FIX_VARIANTS = {
   ],
   'double-submit': [
     { id: 'DS-ref', files: { 'src/payment-processor.ts': DOUBLE_SUBMIT_REF } },
+    { id: 'DS-queue-design', files: { 'src/payment-processor.ts': DOUBLE_SUBMIT_QUEUE_REF } },
   ],
   'debounce-search': [
     { id: 'DB-ref', files: { 'src/search-controller.ts': DEBOUNCE_SEARCH_REF } },

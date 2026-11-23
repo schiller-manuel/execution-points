@@ -105,6 +105,35 @@ export function submitPayment(
 }
 `
 
+// D-05 design-diverse valid fix: per-key serialized queue (matches claude-opus-5.5 pilot design)
+export const DOUBLE_SUBMIT_QUEUE_REF = `${DOUBLE_SUBMIT_BASE_HELPERS}
+
+const queues = new Map<string, Promise<unknown>>()
+
+export function submitPayment(
+  idempotencyKey: string,
+  amountCents: number,
+): Promise<PaymentReceipt> {
+  const existing = receipts.get(idempotencyKey)
+  if (existing) return Promise.resolve({ ...existing })
+  const prev = queues.get(idempotencyKey) ?? Promise.resolve()
+  const task = prev
+    .catch(() => {})
+    .then(async () => {
+      const cached = receipts.get(idempotencyKey)
+      if (cached) return { ...cached }
+      await validatePayment(amountCents)
+      await reserveFunds(idempotencyKey, amountCents)
+      const chargeId = await chargeGateway(idempotencyKey, amountCents)
+      const receipt: PaymentReceipt = { idempotencyKey, amountCents, chargeId }
+      receipts.set(idempotencyKey, receipt)
+      return { ...receipt }
+    })
+  queues.set(idempotencyKey, task)
+  return task
+}
+`
+
 export const DOUBLE_SUBMIT_POISON = `${DOUBLE_SUBMIT_BASE_HELPERS}
 
 // Mutant DS1: deduplicates but forgets to clean up inflight on rejection -> poisons retries
@@ -705,7 +734,8 @@ export const P2_CALIBRATION_VARIANTS = [
   // double-submit
   { id: 'DS0', task: 'double-submit', expectPass: false, label: 'buggy double-submit', useBaseline: true },
   { id: 'DS1', task: 'double-submit', expectPass: false, label: 'rejection poisons inflight map', files: { 'src/payment-processor.ts': DOUBLE_SUBMIT_POISON } },
-  { id: 'DS2', task: 'double-submit', expectPass: true, label: 'reference double-submit fix', files: { 'src/payment-processor.ts': DOUBLE_SUBMIT_REF } },
+  { id: 'DS2', task: 'double-submit', expectPass: true, label: 'reference double-submit fix (shared inflight)', files: { 'src/payment-processor.ts': DOUBLE_SUBMIT_REF } },
+  { id: 'DS3', task: 'double-submit', expectPass: true, label: 'D-05 design-diverse per-key queue fix', files: { 'src/payment-processor.ts': DOUBLE_SUBMIT_QUEUE_REF } },
 
   // debounce-search
   { id: 'DB0', task: 'debounce-search', expectPass: false, label: 'buggy debounce-search', useBaseline: true },
