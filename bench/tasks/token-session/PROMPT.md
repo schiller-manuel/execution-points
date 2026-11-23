@@ -11,6 +11,8 @@ In production, users who log out while a token fetch is in flight sometimes rema
 3. Verify all tests and type checks pass.
 
 ## Constraints
-- **Do not** change the exported function names, signatures, or return types in `src/session-manager.ts`.
+- **Do not** change the exported function names, parameter counts, or return types in `src/session-manager.ts`.
 - **Do not** export private helpers or add test-only hooks/parameters/callbacks to `src/session-manager.ts`.
-- **Keep** the existing private simulated async I/O helper functions (`requestNewToken`, `verifyTokenPolicy`, `prepareRevocation`, `notifyAuthServer`, `flushAuditLog`) intact and still awaited in `getActiveToken` / `logout` (do not delete the async steps).
+- **Do not** monkey-patch JS/Node globals (`Promise`, `Map`, `MessageChannel`, `globalThis`, etc.) in tests.
+- **Keep** the existing simulated async I/O helpers (`requestNewToken`, `verifyTokenPolicy`, `prepareRevocation`, `notifyAuthServer`, `flushAuditLog`) asynchronous.
+- **Keep** session state isolated per user (actions on one user must never disrupt another logged-in user).

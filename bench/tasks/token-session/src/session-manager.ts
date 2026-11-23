@@ -6,27 +6,39 @@ interface SessionRecord {
 const sessions = new Map<string, SessionRecord>()
 let tokenSeq = 0
 
+function yieldIo(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const { port1, port2 } = new MessageChannel()
+    port1.onmessage = () => {
+      port1.close()
+      port2.close()
+      resolve()
+    }
+    port2.postMessage(0)
+  })
+}
+
 async function requestNewToken(userId: string): Promise<string> {
-  await Promise.resolve()
+  await yieldIo()
   tokenSeq += 1
   return `tok-${userId}-${tokenSeq}`
 }
 
 async function verifyTokenPolicy(_userId: string, token: string): Promise<string> {
-  await Promise.resolve()
+  await yieldIo()
   return token
 }
 
 async function prepareRevocation(_userId: string): Promise<void> {
-  await Promise.resolve()
+  await yieldIo()
 }
 
 async function notifyAuthServer(_userId: string): Promise<void> {
-  await Promise.resolve()
+  await yieldIo()
 }
 
 async function flushAuditLog(_userId: string): Promise<void> {
-  await Promise.resolve()
+  await yieldIo()
 }
 
 export function resetSessions(): void {

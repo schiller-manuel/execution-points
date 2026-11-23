@@ -1,5 +1,5 @@
 import { beforeEach, expect, test } from 'vitest'
-import { getProfile, resetStore, seedProfile, updateProfile } from './profile-store'
+import { clearCache, getProfile, resetStore, seedProfile, updateProfile } from './profile-store'
 
 beforeEach(() => {
   resetStore()
@@ -17,11 +17,13 @@ test('returns null for missing profile', async () => {
   expect(await getProfile('missing')).toBeNull()
 })
 
-test('updates profile and returns updated value on subsequent reads', async () => {
+test('updates profile and persists across cache clears', async () => {
   seedProfile('u1', 'Alice')
   await getProfile('u1')
   const updated = await updateProfile('u1', 'Bob')
   expect(updated).toEqual({ id: 'u1', name: 'Bob', displayName: 'BOB' })
+  expect(await getProfile('u1')).toEqual({ id: 'u1', name: 'Bob', displayName: 'BOB' })
+  clearCache()
   expect(await getProfile('u1')).toEqual({ id: 'u1', name: 'Bob', displayName: 'BOB' })
 })
 

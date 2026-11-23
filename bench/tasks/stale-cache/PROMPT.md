@@ -11,6 +11,8 @@ In production, users occasionally continue seeing their **old** profile name on 
 3. Verify all tests and type checks pass.
 
 ## Constraints
-- **Do not** change the exported function names, signatures, or return types in `src/profile-store.ts`.
+- **Do not** change the exported function names, parameter counts, or return types in `src/profile-store.ts`.
 - **Do not** export private helpers or add test-only hooks/parameters/callbacks to `src/profile-store.ts`.
-- **Keep** the existing private simulated async I/O helper functions (`readFromDb`, `formatProfile`, `validateName`, `writeToDb`, `auditUpdate`) intact and still awaited in `getProfile` / `updateProfile` (do not delete the async steps).
+- **Do not** monkey-patch JS/Node globals (`Promise`, `Map`, `MessageChannel`, `globalThis`, etc.) in tests.
+- **Keep** the existing simulated async I/O helpers (`readFromDb`, `formatProfile`, `validateName`, `writeToDb`, `auditUpdate`) asynchronous.
+- **Keep** warm-cache reads fast (do not remove caching).

@@ -1,151 +1,154 @@
-/**
- * Hidden concurrency grader for the `stale-cache` benchmark task.
- *
- * Uses `execution-points-prototype` + `@tanstack/oracles` (`scheduleFrom`) to
- * intercept every internal async I/O helper in `src/profile-store.ts` and
- * systematically explore promise interleavings without deadlocking valid
- * lock-based or epoch-based fixes.
- */
 import fc from 'fast-check'
-import { differs, oracleProperty, pass, scheduleFrom } from '@tanstack/oracles'
-import { select } from 'execution-points-prototype'
-import { getProfile, resetStore, seedProfile, updateProfile } from './src/profile-store'
+import { describe, expect, test } from 'vitest'
+import { countYields, createYieldScheduler } from './yield-engine.mjs'
+import {
+  clearCache,
+  getProfile,
+  resetStore,
+  seedProfile,
+  updateProfile,
+} from './src/profile-store'
 
-const readPoint = select('src/profile-store.ts', (n) =>
-  n.kind === 'CallExpression' && n.callee === 'readFromDb' ? n : undefined,
-)
-const formatPoint = select('src/profile-store.ts', (n) =>
-  n.kind === 'CallExpression' && n.callee === 'formatProfile' ? n : undefined,
-)
-const validatePoint = select('src/profile-store.ts', (n) =>
-  n.kind === 'CallExpression' && n.callee === 'validateName' ? n : undefined,
-)
-const writePoint = select('src/profile-store.ts', (n) =>
-  n.kind === 'CallExpression' && n.callee === 'writeToDb' ? n : undefined,
-)
-const auditPoint = select('src/profile-store.ts', (n) =>
-  n.kind === 'CallExpression' && n.callee === 'auditUpdate' ? n : undefined,
-)
-
-function withScheduledIo<T>(
-  scheduler: ReturnType<typeof scheduleFrom>,
-  queueName: string,
-  called: Set<string>,
-  action: () => Promise<T>,
-): Promise<T> {
-  const wrap = (name: string) => ({ original }: { original: () => Promise<unknown> }) => {
-    called.add(name)
-    return scheduler.schedule(original(), `${queueName} ${name}`, queueName)
+async function assertConsistentProfile(id: string, expectedName: string) {
+  const expected = {
+    id,
+    name: expectedName,
+    displayName: expectedName.toUpperCase(),
   }
-  return readPoint.withReplacement(wrap('readFromDb') as never, () =>
-    formatPoint.withReplacement(wrap('formatProfile') as never, () =>
-      validatePoint.withReplacement(wrap('validateName') as never, () =>
-        writePoint.withReplacement(wrap('writeToDb') as never, () =>
-          auditPoint.withReplacement(wrap('auditUpdate') as never, action),
-        ),
-      ),
-    ),
-  )
+  const warm = await getProfile(id)
+  expect(warm).toEqual(expected)
+  clearCache()
+  const fromDb = await getProfile(id)
+  expect(fromDb).toEqual(expected)
 }
 
-interface StaleCacheHistory {
-  scenario: 'read-vs-update' | 'concurrent-two-updates' | 'read-vs-two-updates'
-  choices: Array<number>
-}
+describe('hidden oracle grader: stale-cache (yield-engine)', () => {
+  test('preserves baseline behavior, validation, and warm-cache hits', async () => {
+    resetStore()
+    expect(await getProfile('missing')).toBeNull()
 
-const staleCacheArbitrary: fc.Arbitrary<StaleCacheHistory> = fc.record({
-  scenario: fc.constantFrom('read-vs-update', 'concurrent-two-updates', 'read-vs-two-updates'),
-  choices: fc.array(fc.integer({ min: 0, max: 5 }), { minLength: 4, maxLength: 16 }),
-})
+    seedProfile('u1', 'Alice')
+    const first = await getProfile('u1')
+    expect(first).toEqual({ id: 'u1', name: 'Alice', displayName: 'ALICE' })
 
-oracleProperty({
-  id: 'grader-stale-cache-concurrency',
-  law: {
-    statement:
-      'For every interleaving of cold-cache getProfile(id) and overlapping updateProfile(id, name) calls, all simulated async I/O helpers run and subsequent getProfile(id) returns the latest update.',
-    authority: 'bench/tasks/stale-cache/PROMPT.md',
-    limits: 'Single-key concurrency schedules over readFromDb, formatProfile, validateName, writeToDb, and auditUpdate.',
-  },
-  histories: {
-    arbitrary: staleCacheArbitrary,
-    runs: 40,
-    fixedSeeds: [42],
-    states: ['read-vs-update', 'concurrent-two-updates', 'read-vs-two-updates'],
-    constructed: [
-      {
-        name: 'poison-cache-after-update',
-        enters: ['read-vs-update'],
-        // Choice 0 releases readFromDb on q-read; then choices 1,1,1 release all 3 steps of q-update before q-read's formatProfile!
-        build: () => ({ scenario: 'read-vs-update', choices: [0, 1, 1, 1, 0, 0] }),
-      },
-      {
-        name: 'out-of-order-updates',
-        enters: ['concurrent-two-updates'],
-        // Let u2 (queue 1) complete writeToDb + auditUpdate before u1 (queue 0) finishes auditUpdate
-        build: () => ({ scenario: 'concurrent-two-updates', choices: [0, 0, 1, 1, 1, 0, 0] }),
-      },
-      {
-        name: 'read-and-two-updates',
-        enters: ['read-vs-two-updates'],
-        build: () => ({ scenario: 'read-vs-two-updates', choices: [0, 2, 2, 2, 1, 1, 1, 0, 0] }),
-      },
-    ],
-  },
-  model: (history) => ({
-    finalName: history.scenario === 'read-vs-update' ? 'Bob' : 'Carol',
-    finalDisplayName: history.scenario === 'read-vs-update' ? 'BOB' : 'CAROL',
-    usedAllRequiredHelpers: true,
-    noErrors: true,
-  }),
-  driver: async (history, observe) => {
+    // Warm-cache read must NOT bypass the cache (0 async yields)
+    const { result: warm, yields } = await countYields(() => getProfile('u1'))
+    expect(warm).toEqual({ id: 'u1', name: 'Alice', displayName: 'ALICE' })
+    expect(yields).toBe(0)
+
+    // Empty/whitespace names must reject without corrupting cache or DB
+    await expect(updateProfile('u1', '   ')).rejects.toThrow()
+    await assertConsistentProfile('u1', 'Alice')
+  })
+
+  test('exhaustive staggered cold-read vs update interleavings (catches V0 and V1 residual race)', async () => {
+    const priorities: Array<'first' | 'last' | 'alt'> = ['first', 'last', 'alt']
+
+    // Pattern A: getProfile starts first, updateProfile starts at staggered step
+    for (const atStep of [0, 1, 2]) {
+      for (const mode of priorities) {
+        resetStore()
+        seedProfile('u1', 'Alice')
+        const sched = createYieldScheduler()
+        sched.spawn(0, () => getProfile('u1'), { atStep: 0 })
+        sched.spawn(1, () => updateProfile('u1', 'Bob'), { atStep })
+        let toggle = 0
+        await sched.run((ready) => {
+          if (mode === 'first') return ready[0]
+          if (mode === 'last') return ready[ready.length - 1]
+          return ready[toggle++ % ready.length]
+        })
+        await assertConsistentProfile('u1', 'Bob')
+      }
+    }
+
+    // Pattern B: updateProfile starts first, cold getProfile starts mid-update and parks
+    // while updateProfile finishes (exposes V1's residual single-bump stale-cache race!)
+    for (const startReadAt of [1, 2, 3, 4, 5, 6]) {
+      for (const readSteps of [1, 2, 3, 4, 5]) {
+        resetStore()
+        seedProfile('u1', 'Alice')
+        const sched = createYieldScheduler()
+        sched.spawn(0, () => updateProfile('u1', 'Bob'), { atStep: 0 })
+        sched.spawn(1, () => getProfile('u1'), { atStep: startReadAt })
+        let readTaken = 0
+        await sched.run((ready) => {
+          // Once getProfile has spawned, give it `readSteps` steps so it reads old DB
+          // and parks before cache.set; then let updateProfile finish completely before
+          // releasing getProfile's final cache.set!
+          if (ready.includes(1) && readTaken < readSteps) {
+            readTaken++
+            return 1
+          }
+          if (ready.includes(0)) return 0
+          return ready[0]
+        })
+        await assertConsistentProfile('u1', 'Bob')
+      }
+    }
+  })
+
+  test('exhaustive concurrent updates ordering (last-initiated wins in BOTH cache and DB)', async () => {
+    const strategies: Array<(ready: number[], step: number) => number> = [
+      (r) => r[0],
+      (r) => r[r.length - 1],
+      (r, s) => r[s % r.length],
+      // Advance op1 partway, let op2 finish completely, then resume op1
+      (r, s) => (s < 2 && r.includes(0) ? 0 : r.includes(1) ? 1 : r[0]),
+      (r, s) => (s < 3 && r.includes(0) ? 0 : r.includes(1) ? 1 : r[0]),
+      (r, s) => (s < 4 && r.includes(0) ? 0 : r.includes(1) ? 1 : r[0]),
+      (r, s) => (s < 5 && r.includes(0) ? 0 : r.includes(1) ? 1 : r[0]),
+    ]
+
+    for (const pick of strategies) {
+      resetStore()
+      seedProfile('u1', 'Alice')
+      const sched = createYieldScheduler()
+      sched.spawn(0, () => updateProfile('u1', 'Bob'), { atStep: 0 })
+      sched.spawn(1, () => updateProfile('u1', 'Carol'), { atStep: 0 })
+      let step = 0
+      await sched.run((ready) => pick(ready, step++))
+      await assertConsistentProfile('u1', 'Carol')
+    }
+
+    // 3 concurrent updates + overlapping cold read
     resetStore()
     seedProfile('u1', 'Alice')
-    const scheduler = scheduleFrom(history.choices)
-    const called = new Set<string>()
-    observe('reach', history.scenario)
+    const sched = createYieldScheduler()
+    sched.spawn(0, () => updateProfile('u1', 'Bob'), { atStep: 0 })
+    sched.spawn(1, () => updateProfile('u1', 'Carol'), { atStep: 0 })
+    sched.spawn(2, () => updateProfile('u1', 'Dave'), { atStep: 0 })
+    sched.spawn(3, () => getProfile('u1'), { atStep: 1 })
+    await sched.run((ready) => ready[ready.length - 1])
+    await assertConsistentProfile('u1', 'Dave')
+  })
 
-    try {
-      const pending: Array<Promise<unknown>> = []
-      if (history.scenario === 'read-vs-update') {
-        pending.push(withScheduledIo(scheduler, 'q-read', called, () => getProfile('u1')))
-        pending.push(withScheduledIo(scheduler, 'q-u1', called, () => updateProfile('u1', 'Bob')))
-      } else if (history.scenario === 'concurrent-two-updates') {
-        pending.push(withScheduledIo(scheduler, 'q-u1', called, () => updateProfile('u1', 'Bob')))
-        pending.push(withScheduledIo(scheduler, 'q-u2', called, () => updateProfile('u1', 'Carol')))
-      } else {
-        pending.push(withScheduledIo(scheduler, 'q-read', called, () => getProfile('u1')))
-        pending.push(withScheduledIo(scheduler, 'q-u1', called, () => updateProfile('u1', 'Bob')))
-        pending.push(withScheduledIo(scheduler, 'q-u2', called, () => updateProfile('u1', 'Carol')))
-      }
+  test('randomized schedules across multi-key mixed reads and updates', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.integer({ min: 0, max: 1000 }), { minLength: 40, maxLength: 80 }),
+        fc.integer({ min: 0, max: 3 }),
+        fc.integer({ min: 0, max: 3 }),
+        async (picks, readDelay, u2Delay) => {
+          resetStore()
+          seedProfile('u1', 'Alice')
+          seedProfile('u2', 'Zoe')
 
-      await scheduler.waitIdle()
-      await Promise.all(pending)
+          const sched = createYieldScheduler()
+          sched.spawn(0, () => updateProfile('u1', 'Bob'), { atStep: 0 })
+          sched.spawn(1, () => updateProfile('u1', 'Carol'), { atStep: 0 })
+          sched.spawn(2, () => getProfile('u1'), { atStep: readDelay })
+          sched.spawn(3, () => updateProfile('u2', 'Yara'), { atStep: u2Delay })
+          sched.spawn(4, () => getProfile('u2'), { atStep: 0 })
 
-      const after = await getProfile('u1')
-      const required =
-        history.scenario === 'concurrent-two-updates'
-          ? ['validateName', 'writeToDb', 'auditUpdate']
-          : ['readFromDb', 'formatProfile', 'validateName', 'writeToDb', 'auditUpdate']
+          let idx = 0
+          await sched.run((ready) => ready[picks[idx++ % picks.length] % ready.length])
 
-      observe('outcome', {
-        finalName: after?.name ?? null,
-        finalDisplayName: after?.displayName ?? null,
-        usedAllRequiredHelpers: required.every((h) => called.has(h)),
-        noErrors: true,
-      })
-    } catch (err) {
-      observe('outcome', {
-        finalName: null,
-        finalDisplayName: null,
-        usedAllRequiredHelpers: false,
-        noErrors: false,
-        error: err instanceof Error ? err.message : String(err),
-      })
-    }
-  },
-  check: (_history, observations, expected) => {
-    const entry = observations.find((o) => o.checkpoint === 'outcome')
-    if (!entry) return differs('outcome', 'stale-cache-concurrency', undefined, expected) ?? pass
-    return differs('outcome', 'stale-cache-concurrency', entry.value, expected) ?? pass
-  },
+          await assertConsistentProfile('u1', 'Carol')
+          await assertConsistentProfile('u2', 'Yara')
+        },
+      ),
+      { numRuns: 30, seed: 4242 },
+    )
+  })
 })
