@@ -261,7 +261,7 @@ const TASKS = {
     stratum: 'real-async',
     targetRel: 'src/search-controller.ts',
     testRel: 'src/search-controller.test.ts',
-    epTargets: ['src/search-api.ts'],
+    epTargets: ['src/search-controller.ts', 'src/search-api.ts'],
     expectedExports: {
       createSearchController: 1,
     },

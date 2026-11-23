@@ -93,6 +93,19 @@ function isAmbientOrGlobal(checker, sym, program, sfCache) {
   return !resolved?.declarations.length || resolved.declarations.every((h) => !getSourceFileCached(program, h.path, sfCache)?.externalModuleIndicator)
 }
 
+function qualifyAmbientName(sym) {
+  const parts = [sym.name]
+  for (const h of sym.declarations) {
+    for (let p = h.resolve().parent; p; p = p.parent) {
+      if (p.kind === SyntaxKind.ModuleDeclaration && p.name.kind === SyntaxKind.Identifier && p.name.text !== 'global') {
+        parts.unshift(p.name.text)
+      }
+    }
+    break
+  }
+  return parts.join('.')
+}
+
 function isDeclaredInFile(checker, sym, filePath) {
   const resolved = resolveAlias(checker, sym)
   return Boolean(resolved?.declarations.some((h) => h.path.toLowerCase() === filePath.toLowerCase()))
@@ -212,7 +225,7 @@ function createTypeEmitter(api, checker, program, fromFile, shared) {
   const resolveExternal = (sym) => {
     const resolved = resolveAlias(checker, sym)
     if (!resolved) return undefined
-    if (isAmbientOrGlobal(checker, resolved, program, sfCache)) return resolved.name
+    if (isAmbientOrGlobal(checker, resolved, program, sfCache)) return qualifyAmbientName(resolved)
     const id = symbolIdentity(checker, resolved)
     for (const h of resolved.declarations) {
       const found = getExportIndex(h.path).get(id)

@@ -42,10 +42,13 @@
  * For every exported or export-reachable private type (via `NonNullable`,
  * `Awaited`, `ReturnType`, `Parameters`, array elements, or object properties),
  * `generateFileRegistryModule` emits an `import("./...")`-anchored type path;
- * for unreachable module-scope types it emits structural `__EP_*` interfaces
- * (or `unique symbol`-branded interfaces for nominal enums and classes with
- * private/protected members), while omitting types declared inside a local
- * function or block (`README.md:172`).
+ * for ambient and global types it emits their global or outer-to-inner
+ * namespace-qualified name (such as `Map`, `NodeJS.Timeout`, or
+ * `Outer.Inner.Handle`, ignoring `declare global` and `declare module "..."`
+ * wrappers); for unreachable module-scope types it emits structural `__EP_*`
+ * interfaces (or `unique symbol`-branded interfaces for nominal enums and
+ * classes with private/protected members), while omitting types declared inside
+ * a local function or block (`README.md:172`).
  *
  * For every `plan` and `cache`, `generateFileRegistryModule` skips non-module
  * global scripts, returns an empty `ExecutionPointFileRegistry` when no target
@@ -74,9 +77,19 @@ afterAll(() => {
   sharedApi.close()
 })
 
-function emitSingleFile(relPath: string, source: string, cache?: Record<string, unknown>) {
+function emitSingleFile(
+  relPath: string,
+  source: string,
+  cache?: Record<string, unknown>,
+  extraFiles?: ReadonlyArray<readonly [string, string]>,
+) {
   const absFile = join(root, relPath)
-  const overrides = new Map([[absFile, source]])
+  const overrides = new Map<string, string>([[absFile, source]])
+  if (extraFiles) {
+    for (const [extraRel, extraSrc] of extraFiles) {
+      overrides.set(join(root, extraRel), extraSrc)
+    }
+  }
   const plan = buildTargetPlan({
     root,
     targets: [relPath],
@@ -506,6 +519,8 @@ const EXPORT_CASES = [
   'reachable-via-array-and-prop',
   'exported-generic-alias',
   'unique-symbols-exported-and-private',
+  'ambient-nodejs-timeout-and-global',
+  'ambient-nested-and-dotted-namespaces',
   'unreachable-structural-interface',
   'deep-beyond-bfs-limit-falls-back-to-helper',
   'unreachable-nominal-class-and-enum',
@@ -568,6 +583,20 @@ function exportModel(history: ExportHistory) {
         hasHelperInterface: true,
         leakedPrivateMember: false,
       }
+    case 'ambient-nodejs-timeout-and-global':
+      return {
+        result: '[NodeJS.Timeout, Map<string, number>]',
+        hasBrand: false,
+        hasHelperInterface: false,
+        leakedPrivateMember: false,
+      }
+    case 'ambient-nested-and-dotted-namespaces':
+      return {
+        result: '[Outer.Inner.Handle, DotA.DotB.DotType]',
+        hasBrand: false,
+        hasHelperInterface: false,
+        leakedPrivateMember: false,
+      }
     case 'unreachable-structural-interface':
       return {
         result: '__EP_InternalBox_1',
@@ -620,11 +649,12 @@ oracleProperty({
     'src/contracts.mjs#isNominalUnexported',
     'src/contracts.mjs#typeImportSpecifier',
     'src/contracts.mjs#hasLocalDeclaration',
+    'src/contracts.mjs#qualifyAmbientName',
     'src/contracts.mjs#generateFileRegistryModule',
   ],
   law: {
     statement:
-      'For every exported or export-reachable private type, generateFileRegistryModule emits an import()-anchored type path; for unreachable module-scope types it emits structural __EP_* interfaces or unique-symbol-branded nominal interfaces, while omitting types declared inside a local function or block.',
+      'For every exported or export-reachable private type, generateFileRegistryModule emits an import()-anchored type path; for ambient and global types it emits their global or outer-to-inner namespace-qualified name (ignoring declare global and string-literal module wrappers); for unreachable module-scope types it emits structural __EP_* interfaces or unique-symbol-branded nominal interfaces, while omitting types declared inside a local function or block.',
     authority:
       'README.md:172 ("Export-reachable private types (Quote, User, Order) preserve exact identity via export-anchored paths; unreachable private types emit structural or unique-symbol-branded helpers.").',
     limits:
@@ -634,6 +664,7 @@ oracleProperty({
     enumerated: enumeratedExportHistories,
     states: [
       'direct-and-reachable-exports',
+      'ambient-and-global-namespaces',
       'structural-and-nominal-helpers',
       'local-type-omitted',
     ],
@@ -643,6 +674,7 @@ oracleProperty({
   driver: (history, observe) => {
     try {
       let relFile = 'examples/c3-target.ts'
+      let extraFiles: ReadonlyArray<readonly [string, string]> | undefined
       let src: string
       switch (history.exportCase) {
         case 'direct-exported-interface':
@@ -693,6 +725,39 @@ function target(): typeof pubSym { return pubSym }
 export function work() {
   const s: typeof privSym = privSym
   return target()
+}`
+          break
+        case 'ambient-nodejs-timeout-and-global':
+          observe('reach', 'ambient-and-global-namespaces')
+          src = `
+function target(t: ReturnType<typeof setTimeout>, m: Map<string, number>): [ReturnType<typeof setTimeout>, Map<string, number>] { return [t, m] }
+export function work(m: Map<string, number>) {
+  const t = setTimeout(() => {}, 10)
+  return target(t, m)
+}`
+          break
+        case 'ambient-nested-and-dotted-namespaces':
+          observe('reach', 'ambient-and-global-namespaces')
+          extraFiles = [
+            [
+              'examples/c3-ambient.d.ts',
+              `
+declare namespace Outer {
+  namespace Inner {
+    interface Handle { id: number }
+    interface Handle { tag?: string }
+  }
+}
+declare namespace DotA.DotB {
+  interface DotType { x: string }
+}
+`,
+            ],
+          ]
+          src = `
+function target(h: Outer.Inner.Handle, d: DotA.DotB.DotType): [Outer.Inner.Handle, DotA.DotB.DotType] { return [h, d] }
+export function work(h: Outer.Inner.Handle, d: DotA.DotB.DotType) {
+  return target(h, d)
 }`
           break
         case 'unreachable-structural-interface':
@@ -750,7 +815,7 @@ export function work() { return target() }`
           break
       }
 
-      const { text } = emitSingleFile(relFile, src)
+      const { text } = emitSingleFile(relFile, src, undefined, extraFiles)
       const parsed = parseFirstNodeFromRegistry(text, 'target')
       observe('export-path', {
         result: parsed?.result ?? 'missing',

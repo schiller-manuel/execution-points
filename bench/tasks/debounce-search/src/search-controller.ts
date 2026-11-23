@@ -17,7 +17,7 @@ export function createSearchController(debounceMs = 20): SearchController {
   let latestQuery = ''
   let latestResults: string[] = []
   let disposed = false
-  let timer: unknown = null
+  let timer: ReturnType<typeof setTimeout> | null = null
   const pending = new Set<Promise<void>>()
 
   function runSearch(query: string): Promise<void> {
@@ -33,7 +33,7 @@ export function createSearchController(debounceMs = 20): SearchController {
 
   function onInput(query: string): void {
     if (disposed) return
-    if (timer !== null) clearTimeout(timer as Parameters<typeof clearTimeout>[0])
+    if (timer !== null) clearTimeout(timer)
     timer = setTimeout(() => {
       timer = null
       void runSearch(query)
