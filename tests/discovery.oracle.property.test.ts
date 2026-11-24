@@ -1,71 +1,90 @@
 /**
- * This oracle owns `execution-points-prototype`'s AST expression discovery,
- * structural node addressing, TDZ-safe local binding capture, and manifest
- * target resolution, checked on the output of `indexTargetFile`,
- * `resolveTargetFiles`, `loadManifest`, and `buildTargetPlan`. It owns
- * `src/discovery.mjs`.
+ * This oracle owns what `execution-points-prototype` lets a test select and capture in a
+ * target module: which expressions are indexed, how each one is addressed, and which local
+ * names can be captured at it. It is checked on the output of `indexTargetFile`,
+ * `resolveTargetFiles`, `loadManifest`, and `buildTargetPlan`, and it owns `src/discovery.mjs`.
  *
  * ```ts
- * indexTargetFile('/app/a.ts', 'export function checkout(x = init()) { return items.map(y => send(x + y)) }', '/app', api)
- * // → init() has inFunction: 'checkout', id: 'a.ts#checkout:CallExpression:init:0', captures: []
- * // → send(x + y) has inFunction: 'checkout', id: 'a.ts#checkout:CallExpression:send:0', captures: ['x', 'y']
- * // → x + y has inFunction: 'checkout', id: 'a.ts#checkout:BinaryExpression:+:0', captures: ['x', 'y']
+ * indexTargetFile(file, 'export async function f(o) { return retry(async () => { await load(o?.id) }) }', root, api)
+ * // → retry(...) is indexed: the `await` belongs to the callback, not to `f`
+ * // → load(o?.id) is not: it awaits nothing, but `await load(o?.id)` cannot move into a function of its own
+ * indexTargetFile(file, 'export function f(o) { return o?.find(1).name(2) }', root, api)
+ * // → o?.find(1).name(2) is indexed, o?.find(1) is not: the chain goes on behind it
+ * indexTargetFile(file, 'export function f(k) { const a = 1; switch (k) { case 0: return send(k); default: let a = 2 } }', root, api)
+ * // → send(k) has captures ['k']: the switch declares an `a` of its own, uninitialized in case 0
+ * indexTargetFile(file, 'function f() { return send(1) }', root, api)
+ * // → nodes: [] for a file with no import or export
  * ```
  *
- * Why must `send()` inside `{ const res = send(); const x = 'inner' }` omit an
- * outer `const x = 'outer'` from `captures`, and why must `getSource()` in
- * `for (const item of getSource())` omit `'item'`?
+ * Why can `limit` be captured at `compute(1)` in `late`, and not in `early`?
  *
- * Three parts govern discovery: the **selectable filter** (`isSelectableExpression`
- * accepting `CallExpression`, non-assignment `BinaryExpression`, and
- * `ConditionalExpression` nodes except in reference-only or unsupported AST
- * positions), the **structural address** (resolving the nearest named enclosing
- * function, callee or operator, 0-based `nth` counter, and composite
- * `relativeFile#inFunction:kind:name:nth` id), and the **lexical readiness map**
- * (walking scope frames from innermost to outermost so bindings in their
- * Temporal Dead Zone are neither captured directly nor leaked from shadowed
- * outer frames).
+ * ```ts
+ * function late() { const limit = 5; return peek(); function peek() { return compute(1) } }
+ * function early() { const r = peek(); const limit = 5; return r; function peek() { return compute(1) } }
+ * ```
  *
- * For every TypeScript source module, `indexTargetFile` indexes every
- * `CallExpression`, non-assignment `BinaryExpression`, and `ConditionalExpression`
- * that is not in a reference-only target position (direct callee of a call or
- * `new`, tagged-template tag, left-hand side of assignment, or operand of
- * `delete`/`++`/`--`, including through parenthesized or type-assertion
- * wrappers) and does not contain `await`, `yield`, `super`, optional chaining
- * (`?.`), dynamic `import()`, or direct `eval` (`README.md:171-173`,
- * `src/discovery.mjs:30-81`).
+ * Three parts decide the answer. The **wrap** is what the plugin does to a selected
+ * expression: it moves it into an arrow function, so an expression is selectable exactly when
+ * that move changes nothing. The **address** names an indexed expression by its file, its
+ * nearest named function, its kind, its callee or operator, and a count. The **reach of a
+ * name** is the set of moments at which code can run while the name is declared but not yet
+ * initialized: a function declaration exists from the start of its block, so it runs as early
+ * as the first use of its name, and a `case` can be entered without passing the declarations
+ * of the cases before it.
  *
- * For every indexed expression in a target module, `indexTargetFile` assigns
- * `inFunction` to the nearest named enclosing function (or `'(anonymous)'` when
- * only unnamed functions enclose the expression, and `null` at module top
- * level), extracts `callee` or `operator`, assigns the 0-based `nth` index
- * within `(inFunction, kind, callee | operator)`, and formats `id` as
+ * Law D1. For every TypeScript module, `indexTargetFile` indexes every call, every binary
+ * operation that does not assign, and every ternary, except where the wrap would change what
+ * the code does: where JavaScript needs a place and not a value (the target of an assignment,
+ * the operand of `delete`, `++`, or `--`, also through parentheses and type assertions); a
+ * binary operation or ternary that is called, constructed, or used as a template tag; an
+ * expression that itself, outside the functions it contains, awaits, yields, calls
+ * `super(...)`, evaluates code with a direct `eval`, or imports; and an expression behind
+ * which an optional chain goes on without a `?.` of its own. A file with no import or export
+ * is a global script and indexes nothing (`README.md`, "Supported subset and limits"; Decision
+ * by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: an expression is skipped only when
+ * wrapping it in an arrow function would change what it does, and a call in callee position is
+ * selectable because a call result carries no receiver). A wrong answer in one direction hides
+ * code from tests; in the other, a module that is merely listed as a target stops compiling or
+ * throws where it returned `undefined`.
+ *
+ * Law D2. For every indexed expression, `inFunction` is the nearest named enclosing function
+ * (`'(anonymous)'` when only unnamed functions enclose it, `null` at the top level), `nth`
+ * counts from 0 within `(inFunction, kind, callee | operator)`, and `id` is
  * `${relativeFile}#${inFunction ?? '<top>'}:${kind}:${callee ?? operator ?? '?'}:${nth}`
- * (`README.md:48`; Decision by Manuel Schiller (GitHub schiller-manuel),
- * 2026-11-22: nearest named enclosing function and structural node IDs).
+ * (`README.md`, "Select an execution point in a test"; Decision by Manuel Schiller (GitHub
+ * schiller-manuel), 2026-11-22: nearest named enclosing function and structural node IDs).
  *
- * For every indexed expression at offset `start`, `node.captures` is the
- * sorted list of identifier bindings in enclosing non-module scopes whose
- * declaration is initialized at or before `start` (`p.end <= start` for
- * parameters, `node.expression.end <= start` for `for-of`/`for-in` bindings,
- * `decl.end <= start` for `let`/`const`/`class`, and hoisted within their
- * block for local `function` declarations) and is not shadowed by an
- * uninitialized binding of the same name in an inner enclosing scope
- * (`README.md:171`).
+ * Law D3. For every indexed expression, `captures` lists, sorted, exactly the local names
+ * that are initialized every time the code reaches the expression, in every order in which
+ * the code can be called; reading each of them where the instrumented code reaches the
+ * expression succeeds (Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: for
+ * every capture offered at a point, reading it when the instrumented code reaches that point
+ * succeeds; `README.md`: "`.capture(...)` autocompletes every in-scope local at that
+ * expression"). When it breaks, a test that captures an offered name gets a `ReferenceError`
+ * thrown inside the application call.
  *
- * For every target manifest and target list, `loadManifest`,
- * `resolveTargetFiles`, and `buildTargetPlan` resolve explicit paths and globs
- * relative to `root` in sorted order, use in-memory `overrides` when provided,
- * skip missing unoverridden files, and index each resolved file (`README.md:122`).
+ * Law D4. For every manifest and target list, `loadManifest`, `resolveTargetFiles`, and
+ * `buildTargetPlan` resolve explicit paths and globs relative to `root` in sorted order, use
+ * in-memory `overrides` when given, skip missing files, and index each resolved file
+ * (`README.md`, "Configuration").
  *
- * The model computes expected node lists, structural IDs, and TDZ-safe capture
- * sets directly from the generated AST specification. The driver invokes
- * `indexTargetFile`, `resolveTargetFiles`, `loadManifest`, and `buildTargetPlan`
- * using a shared TypeScript 7.1 `API` instance and records the resulting
- * descriptors.
+ * How the oracle knows. For D1 the model is the rule itself, written over a grammar of
+ * expression shapes (`tests/expression-shapes-oracle.ts`): what an expression holds, which
+ * expression holds it, what it is wrapped in, and what the surrounding code does with it. The
+ * plugin oracle runs the same shapes to show that every selectable one behaves as written.
+ * For D3 the model is JavaScript: each generated function (`tests/scope-shapes-oracle.ts`)
+ * is also written with a way to read every name at every point, and is run once for each
+ * combination of `switch` clauses, with every use of a function's name being a call. The
+ * driver indexes the function, instruments it with the plugin, and runs it with every offered
+ * capture read at every indexed expression. D2 and D4 compare descriptors and plans of small
+ * generated modules with a model of the address and of path resolution.
  *
- * Scope analysis covers syntactic lexical bindings within the target file;
- * module-scope globals and imported bindings are excluded from `captures`.
+ * Limits. Module-level bindings are never captures. A `var` is offered like a `let` written
+ * in its place, the names of one destructuring pattern become available together, and the
+ * name of a class is not offered inside that class: each offers less than JavaScript could
+ * read, never more. Code that calls a function through a direct `eval` or a `with` block is
+ * outside D3. D1 judges one expression inside one function per history; it does not vary
+ * `moduleDetection`, which the syntactic rule for global scripts does not consult.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -80,6 +99,28 @@ import {
   loadManifest,
   resolveTargetFiles,
 } from '../src/discovery.mjs'
+import { executionPoints } from '../src/plugin.mjs'
+import {
+  CONTENTS,
+  POSITIONS,
+  SUBJECTS,
+  WRAPPERS,
+  judge,
+  moduleOf,
+  planShape,
+  selectableIn,
+  subjectVerdict,
+  type Shape,
+} from './expression-shapes-oracle'
+import {
+  askJavaScript,
+  planScopeShape,
+  runScopeProgram,
+  scopeShapeArbitrary,
+  type ScopeOp,
+  type ScopeOpKind,
+  type ScopeShape,
+} from './scope-shapes-oracle'
 
 const sharedApi = new API({ cwd: process.cwd() })
 afterAll(() => {
@@ -90,252 +131,270 @@ afterAll(() => {
 // Law D1: Selectable expression filtering
 // ---------------------------------------------------------------------------
 
-const SELECTABLE_CASES = [
-  'simple-call',
-  'binary-add',
-  'binary-logical-and',
-  'conditional-ternary',
-  'chained-method-call',
-  'rhs-of-assignment',
-  'prefix-not-call',
-  'assign-equals',
-  'assign-plus-equals',
-  'assign-logical-or',
-  'assign-bitwise-xor',
-  'direct-callee-call',
-  'wrapped-direct-callee',
-  'new-callee-target',
-  'tagged-template-tag',
-  'lhs-of-assignment',
-  'delete-operand',
-  'postfix-increment-operand',
-  'prefix-decrement-operand',
-  'contains-await',
-  'contains-yield',
-  'contains-super',
-  'contains-optional-chain',
-  'contains-optional-call',
-  'contains-dynamic-import',
-  'contains-direct-eval',
-] as const
-
-type SelectableCase = (typeof SELECTABLE_CASES)[number]
-
-interface SelectableHistory {
-  exprCase: SelectableCase
-  wrapParens: boolean
-  wrapAsAssertion: boolean
+// A shape, and what makes the file that holds it a module.
+interface SelectableHistory extends Shape {
+  moduleBy: 'export' | 'import' | 'nothing'
 }
 
 const selectableArbitrary: fc.Arbitrary<SelectableHistory> = fc.record({
-  exprCase: fc.constantFrom(...SELECTABLE_CASES),
-  wrapParens: fc.boolean(),
-  wrapAsAssertion: fc.boolean(),
+  position: fc.constantFrom(...POSITIONS),
+  wrapper: fc.constantFrom(...WRAPPERS),
+  subject: fc.constantFrom(...SUBJECTS),
+  content: fc.constantFrom(...CONTENTS),
+  moduleBy: fc.constantFrom('export', 'import', 'nothing'),
 })
 
-function buildExpressionSnippet(history: SelectableHistory): string {
-  const wrapTarget = (inner: string) => {
-    let cur = inner
-    if (history.wrapAsAssertion) cur = `(${cur} as any)`
-    if (history.wrapParens) cur = `(${cur})`
-    return cur
-  }
-
-  switch (history.exprCase) {
-    case 'simple-call':
-      return 'send(a)'
-    case 'binary-add':
-      return 'a + b'
-    case 'binary-logical-and':
-      return 'a && b'
-    case 'conditional-ternary':
-      return 'cond ? a : b'
-    case 'chained-method-call':
-      return `${wrapTarget('getClient()')}.send(a)`
-    case 'rhs-of-assignment':
-      return `a = ${wrapTarget('send(b)')}`
-    case 'prefix-not-call':
-      return `!${wrapTarget('send(a)')}`
-    case 'assign-equals':
-      return 'a = b'
-    case 'assign-plus-equals':
-      return 'a += b'
-    case 'assign-logical-or':
-      return 'a ||= b'
-    case 'assign-bitwise-xor':
-      return 'a ^= b'
-    case 'direct-callee-call':
-      return 'getFn()(a)'
-    case 'wrapped-direct-callee':
-      return `${wrapTarget('getFn()')}(a)`
-    case 'new-callee-target':
-      return `new ${wrapTarget('(getCtor())')}()`
-    case 'tagged-template-tag':
-      return `${wrapTarget('getTag()')}\`hello\``
-    case 'lhs-of-assignment':
-      return `${wrapTarget('(cond ? obj.a : obj.b)')} = 1`
-    case 'delete-operand':
-      return `delete ${wrapTarget('(cond ? obj.a : obj.b)')}`
-    case 'postfix-increment-operand':
-      return `${wrapTarget('(cond ? obj.a : obj.b)')}++`
-    case 'prefix-decrement-operand':
-      return `--${wrapTarget('(cond ? obj.a : obj.b)')}`
-    case 'contains-await':
-      return 'send(await a)'
-    case 'contains-yield':
-      return 'send(yield a)'
-    case 'contains-super':
-      return 'super.send(a)'
-    case 'contains-optional-chain':
-      return 'client?.send(a)'
-    case 'contains-optional-call':
-      return 'send?.(a)'
-    case 'contains-dynamic-import':
-      return 'import("./other")'
-    case 'contains-direct-eval':
-      return 'eval("1 + 1")'
-  }
+/** The module that holds the shape, and where the shape's expression starts in it. */
+function shapeModule(history: SelectableHistory) {
+  const plan = planShape(history)
+  const { source, at } = moduleOf(plan, true)
+  if (history.moduleBy === 'export') return { plan, source, at }
+  const head = history.moduleBy === 'import' ? `import './dep'\n` : ''
+  return { plan, source: head + source.replace('export class', 'class'), at: at - 'export '.length + head.length }
 }
 
+/** The rule applies to modules; a global script indexes nothing. */
 function selectableModel(history: SelectableHistory) {
-  let nodes: Array<{ kind: string; callee?: string; operator?: string }>
-  switch (history.exprCase) {
-    case 'simple-call':
-    case 'rhs-of-assignment':
-    case 'prefix-not-call':
-      nodes = [{ kind: 'CallExpression', callee: 'send' }]
-      break
-    case 'binary-add':
-      nodes = [{ kind: 'BinaryExpression', operator: '+' }]
-      break
-    case 'binary-logical-and':
-      nodes = [{ kind: 'BinaryExpression', operator: '&&' }]
-      break
-    case 'conditional-ternary':
-      nodes = [{ kind: 'ConditionalExpression' }]
-      break
-    case 'chained-method-call':
-      nodes = [
-        { kind: 'CallExpression', callee: 'send' },
-        { kind: 'CallExpression', callee: 'getClient' },
-      ]
-      break
-    case 'direct-callee-call':
-    case 'wrapped-direct-callee':
-      nodes = [{ kind: 'CallExpression', callee: '(anonymous)' }]
-      break
-    default:
-      nodes = []
-      break
-  }
   return {
-    nodes,
+    nodes: history.moduleBy === 'nothing' ? [] : selectableIn(planShape(history)),
     activeLeasesAfter: 0,
   }
 }
 
-const enumeratedSelectableHistories: ReadonlyArray<SelectableHistory> = SELECTABLE_CASES.flatMap(
-  (exprCase) => [
-    { exprCase, wrapParens: false, wrapAsAssertion: false },
-    { exprCase, wrapParens: true, wrapAsAssertion: true },
-  ],
-)
+const NESTED_FUNCTION_CONTENTS: ReadonlyArray<string> = [
+  'await-in-async-arrow',
+  'await-in-object-method',
+  'await-in-class-method',
+  'yield-in-generator',
+  'super-call-in-arrow',
+  'eval-in-arrow',
+  'import-in-arrow',
+  'import-in-class-field',
+  'import-in-static-block',
+]
+const CALLED_POSITIONS: ReadonlyArray<string> = ['callee', 'optional-callee', 'new-callee', 'tag']
+
+/** What the shape shows of the rule: each is a predicate over the history alone. */
+function selectableStates(history: SelectableHistory): Array<string> {
+  const plan = planShape(history)
+  const verdicts = new Set(judge(plan).map((candidate) => candidate.verdict))
+  const subject = subjectVerdict(plan)
+  const states: Array<string> = []
+  if (history.moduleBy === 'nothing') return ['global-script-indexes-nothing']
+  if (history.moduleBy === 'import') states.push('module-by-import')
+  if (verdicts.has('selectable')) states.push('indexed-selectable-expr')
+  if (verdicts.has('assigns')) states.push('skipped-assignment-expr')
+  if (verdicts.has('needs-a-place')) states.push('skipped-reference-target')
+  if (verdicts.has('tied-to-its-function')) states.push('skipped-unsupported-inner')
+  if (verdicts.has('chain-goes-on')) states.push('skipped-chain-prefix')
+  if (subject !== 'selectable') return states
+  if (NESTED_FUNCTION_CONTENTS.includes(plan.shape.content)) states.push('nested-function-does-not-tie')
+  if (plan.shape.subject.startsWith('optional-')) states.push('optional-chain-selected')
+  if (plan.shape.subject === 'super-method') states.push('super-method-selected')
+  if (CALLED_POSITIONS.includes(plan.shape.position)) states.push('call-selected-where-it-is-called')
+  return states
+}
+
+const shape = (
+  position: Shape['position'],
+  wrapper: Shape['wrapper'],
+  subject: Shape['subject'],
+  content: Shape['content'],
+  moduleBy: SelectableHistory['moduleBy'] = 'export',
+) => (): SelectableHistory => ({ position, wrapper, subject, content, moduleBy })
 
 oracleProperty({
   id: 'discovery-selectable-expressions',
   owns: ['src/discovery.mjs#isSelectableExpression', 'src/discovery.mjs#indexTargetFile'],
   law: {
     statement:
-      'For every TypeScript source module, indexTargetFile indexes every CallExpression, non-assignment BinaryExpression, and ConditionalExpression that is not in a reference-only target position and does not contain await, yield, super, optional chaining, dynamic import(), or direct eval, and disposes its source-file lease.',
+      'For every TypeScript module, indexTargetFile indexes every call, every binary operation that does not assign, and every ternary, except where wrapping it in an arrow function would change what the code does: where JavaScript needs a place and not a value (assignment target, operand of delete, ++, or --); a binary operation or ternary that is called, constructed, or used as a template tag; an expression that itself, outside the functions it contains, awaits, yields, calls super(...), evaluates code with a direct eval, or imports; and an expression behind which an optional chain goes on without a ?. of its own. A file with no import or export is a global script and indexes nothing. indexTargetFile disposes its source-file lease.',
     authority:
-      'README.md:171-173 ("Indexed target kinds are ordinary CallExpression, non-assignment BinaryExpression, and ConditionalExpression nodes (including nested expressions). Reference-only positions and expressions containing await, yield, super, optional chains, dynamic import(), or direct eval are skipped.").',
+      'README.md, "Supported subset and limits". Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: an expression is skipped only when wrapping it in an arrow function would change what it does (an await or yield that belongs to the same function, a super(...) call, a direct eval, a dynamic import(), a prefix of an optional chain that continues outside it); a call in callee position is selectable because a call result carries no receiver; the exclusions that protect assignment targets, delete, ++/--, and receivers stay.',
     limits:
-      'Only CallExpression, BinaryExpression, and ConditionalExpression kinds are selectable; histories are bounded-exhaustive over 25 representative expression templates with and without parenthesized and type-assertion wrappers.',
+      'One expression inside one class member per history, built from four choices (position, wrapper, subject, content). A binary operation or ternary that is called stays excluded although its result carries no receiver either. The rule for global scripts is syntactic and does not consult moduleDetection.',
   },
   histories: {
-    enumerated: enumeratedSelectableHistories,
+    arbitrary: selectableArbitrary,
+    runs: 150,
+    fixedSeeds: [42],
     states: [
       'indexed-selectable-expr',
       'skipped-assignment-expr',
       'skipped-reference-target',
       'skipped-unsupported-inner',
+      'skipped-chain-prefix',
+      'nested-function-does-not-tie',
+      'optional-chain-selected',
+      'super-method-selected',
+      'call-selected-where-it-is-called',
+      'global-script-indexes-nothing',
+      'module-by-import',
+    ],
+    constructed: [
+      { name: 'plain-call', enters: ['indexed-selectable-expr'], build: shape('value', 'none', 'call', 'plain') },
+      { name: 'assignment', enters: ['skipped-assignment-expr'], build: shape('value', 'none', 'assign', 'call') },
+      { name: 'last-assignment-operator', enters: ['skipped-assignment-expr'], build: shape('value', 'none', 'compound-assign', 'call') },
+      {
+        name: 'ternary-assigned-if-unset',
+        enters: ['skipped-reference-target', 'skipped-assignment-expr'],
+        build: shape('compound-target', 'none', 'conditional', 'plain'),
+      },
+      {
+        name: 'ternary-assigned-to',
+        enters: ['skipped-reference-target'],
+        build: shape('assign-target', 'as', 'conditional', 'plain'),
+      },
+      { name: 'ternary-deleted', enters: ['skipped-reference-target'], build: shape('delete', 'paren', 'conditional', 'plain') },
+      { name: 'sum-incremented', enters: ['skipped-reference-target'], build: shape('postfix', 'non-null', 'add', 'plain') },
+      { name: 'sum-decremented', enters: ['skipped-reference-target'], build: shape('prefix', 'angle', 'add', 'plain') },
+      { name: 'ternary-called', enters: ['skipped-reference-target'], build: shape('callee', 'satisfies', 'conditional', 'plain') },
+      { name: 'sum-constructed', enters: ['skipped-reference-target'], build: shape('new-callee', 'none', 'add', 'plain') },
+      { name: 'ternary-as-tag', enters: ['skipped-reference-target'], build: shape('tag', 'none', 'conditional', 'plain') },
+      { name: 'own-await', enters: ['skipped-unsupported-inner'], build: shape('value', 'none', 'call', 'own-await') },
+      { name: 'own-yield', enters: ['skipped-unsupported-inner'], build: shape('argument', 'none', 'add', 'own-yield') },
+      { name: 'super-call', enters: ['skipped-unsupported-inner'], build: shape('value', 'none', 'conditional', 'super-call') },
+      { name: 'direct-eval', enters: ['skipped-unsupported-inner'], build: shape('value', 'none', 'method', 'own-eval') },
+      { name: 'own-import', enters: ['skipped-unsupported-inner'], build: shape('value', 'none', 'call', 'own-import') },
+      { name: 'await-in-key', enters: ['skipped-unsupported-inner'], build: shape('value', 'none', 'call', 'await-in-class-key') },
+      {
+        name: 'await-in-decorator',
+        enters: ['skipped-unsupported-inner'],
+        build: shape('value', 'none', 'call', 'await-in-class-decorator'),
+      },
+      {
+        name: 'callback-awaits',
+        enters: ['nested-function-does-not-tie'],
+        build: shape('value', 'none', 'call', 'await-in-async-arrow'),
+      },
+      {
+        name: 'method-awaits',
+        enters: ['nested-function-does-not-tie'],
+        build: shape('value', 'none', 'call', 'await-in-class-method'),
+      },
+      {
+        name: 'generator-callback-yields',
+        enters: ['nested-function-does-not-tie'],
+        build: shape('value', 'none', 'logical-and', 'yield-in-generator'),
+      },
+      { name: 'field-imports', enters: ['nested-function-does-not-tie'], build: shape('value', 'none', 'call', 'import-in-class-field') },
+      {
+        name: 'static-block-imports',
+        enters: ['nested-function-does-not-tie'],
+        build: shape('value', 'none', 'call', 'import-in-static-block'),
+      },
+      { name: 'callback-evaluates', enters: ['nested-function-does-not-tie'], build: shape('value', 'none', 'call', 'eval-in-arrow') },
+      { name: 'whole-optional-chain', enters: ['optional-chain-selected'], build: shape('argument', 'none', 'optional-method', 'plain') },
+      { name: 'optional-call', enters: ['optional-chain-selected'], build: shape('operand', 'none', 'optional-call', 'optional-read') },
+      {
+        name: 'chain-continued-with-question',
+        enters: ['optional-chain-selected'],
+        build: shape('optional-member-call', 'none', 'optional-method', 'plain'),
+      },
+      { name: 'chain-ended-by-parens', enters: ['optional-chain-selected'], build: shape('member-call', 'paren', 'optional-method', 'plain') },
+      { name: 'chain-ended-by-non-null', enters: ['optional-chain-selected'], build: shape('argument', 'non-null', 'optional-method', 'plain') },
+      { name: 'chain-prefix', enters: ['skipped-chain-prefix'], build: shape('member-call', 'none', 'optional-method', 'plain') },
+      { name: 'chain-prefix-read', enters: ['skipped-chain-prefix'], build: shape('member', 'none', 'optional-method', 'plain') },
+      { name: 'chain-prefix-element', enters: ['skipped-chain-prefix'], build: shape('element', 'none', 'optional-method', 'plain') },
+      { name: 'chain-prefix-called', enters: ['skipped-chain-prefix'], build: shape('callee', 'none', 'optional-call', 'plain') },
+      {
+        name: 'chain-prefix-through-non-null',
+        enters: ['skipped-chain-prefix'],
+        build: shape('member-call', 'non-null', 'optional-method', 'plain'),
+      },
+      { name: 'chain-prefix-inside', enters: ['skipped-chain-prefix'], build: shape('value', 'none', 'call', 'chain-through-non-null') },
+      { name: 'super-method', enters: ['super-method-selected'], build: shape('value', 'none', 'super-method', 'plain') },
+      { name: 'curried-call', enters: ['call-selected-where-it-is-called'], build: shape('callee', 'none', 'call', 'plain') },
+      {
+        name: 'call-constructed',
+        enters: ['call-selected-where-it-is-called'],
+        build: shape('new-callee', 'none', 'call', 'plain'),
+      },
+      { name: 'call-as-tag', enters: ['call-selected-where-it-is-called'], build: shape('tag', 'as', 'method', 'plain') },
+      {
+        name: 'global-script',
+        enters: ['global-script-indexes-nothing'],
+        build: shape('value', 'none', 'call', 'call', 'nothing'),
+      },
+      { name: 'module-by-import', enters: ['module-by-import'], build: shape('value', 'none', 'call', 'call', 'import') },
     ],
   },
-  label: (h) => `${h.exprCase}:${h.wrapParens ? 'wrapped' : 'bare'}`,
   model: (history) => selectableModel(history),
   driver: (history, observe) => {
     try {
-      if (
-        [
-          'simple-call',
-          'binary-add',
-          'binary-logical-and',
-          'conditional-ternary',
-          'chained-method-call',
-          'rhs-of-assignment',
-          'prefix-not-call',
-        ].includes(history.exprCase)
-      ) {
-        observe('reach', 'indexed-selectable-expr')
-      } else if (
-        ['assign-equals', 'assign-plus-equals', 'assign-logical-or', 'assign-bitwise-xor'].includes(
-          history.exprCase,
-        )
-      ) {
-        observe('reach', 'skipped-assignment-expr')
-      } else if (
-        [
-          'direct-callee-call',
-          'wrapped-direct-callee',
-          'new-callee-target',
-          'tagged-template-tag',
-          'lhs-of-assignment',
-          'delete-operand',
-          'postfix-increment-operand',
-          'prefix-decrement-operand',
-        ].includes(history.exprCase)
-      ) {
-        observe('reach', 'skipped-reference-target')
-      } else {
-        observe('reach', 'skipped-unsupported-inner')
-      }
-
-      const expr = buildExpressionSnippet(history)
-      const src =
-        history.exprCase === 'contains-yield'
-          ? `export function* gen(a: any, b: any, cond: boolean, obj: any, client: any) { return ${expr}; }`
-          : history.exprCase === 'contains-super'
-            ? `class B { send(x: any) { return x } }\nexport class C extends B { work(a: any) { return ${expr}; } }`
-            : `export async function work(a: any, b: any, cond: boolean, obj: any, client: any) { return ${expr}; }`
-
-      const indexed = indexTargetFile('/app/sel.ts', src, '/app', sharedApi)
+      for (const state of selectableStates(history)) observe('reach', state)
+      const { plan, source, at } = shapeModule(history)
+      const indexed = indexTargetFile('/app/shape.ts', source, '/app', sharedApi)
+      // The host adds no call, operation, or ternary of its own around the expression.
       const nodes = indexed.nodes.map((n) => ({
         kind: n.kind,
         ...(n.callee !== undefined ? { callee: n.callee } : {}),
         ...(n.operator !== undefined ? { operator: n.operator } : {}),
+        start: n.start - at,
+        end: n.end - at,
       }))
       const activeLeasesAfter = (
         sharedApi as unknown as { activeSourceFileLeases: Set<unknown> }
       ).activeSourceFileLeases.size
-      observe('selectable', { nodes, activeLeasesAfter })
+      observe('selectable', { nodes, activeLeasesAfter, text: plan.text })
     } catch (err) {
       observe('selectable', { threw: err instanceof Error ? err.message : String(err) })
     }
   },
-  check: (_history, observations, expected) => {
+  check: (history, observations, expected) => {
     const entry = observations.find((o) => o.checkpoint === 'selectable')
-    if (!entry) return differs('selectable', 'selectable-expressions', undefined, expected) ?? pass
-    return differs('selectable', 'selectable-expressions', entry.value, expected) ?? pass
+    const text = planShape(history).text
+    return differs('selectable', 'selectable-expressions', entry?.value, { ...expected, text }) ?? pass
   },
   calibrations: [
     {
-      name: 'wrong-selectable-list',
+      name: 'chain-prefix-indexed',
       law: 'selectable-expressions',
-      history: { enumerated: 'chained-method-call:bare' },
+      history: { constructed: 'chain-prefix' },
+      // The wrong answer of a rule that looks only at the expression itself: both calls.
       corrupt: (trace) =>
         trace.map((o) =>
           o.checkpoint === 'selectable'
-            ? { ...o, value: { ...(o.value as object), nodes: [] } }
+            ? {
+                ...o,
+                value: {
+                  ...(o.value as object),
+                  nodes: [
+                    { kind: 'CallExpression', callee: 'k', start: 0, end: 14 },
+                    { kind: 'CallExpression', callee: 'm', start: 0, end: 9 },
+                  ],
+                },
+              }
+            : o,
+        ),
+    },
+    {
+      name: 'callback-with-await-hidden',
+      law: 'selectable-expressions',
+      history: { constructed: 'callback-awaits' },
+      // The answer of the rule before 2026-11-24: an `await` anywhere inside hides the call.
+      corrupt: (trace) =>
+        trace.map((o) =>
+          o.checkpoint === 'selectable' ? { ...o, value: { ...(o.value as object), nodes: [] } } : o,
+        ),
+    },
+    {
+      name: 'global-script-indexed',
+      law: 'selectable-expressions',
+      history: { constructed: 'global-script' },
+      corrupt: (trace) =>
+        trace.map((o) =>
+          o.checkpoint === 'selectable'
+            ? {
+                ...o,
+                value: {
+                  ...(o.value as object),
+                  nodes: [
+                    { kind: 'CallExpression', callee: 'f', start: 0, end: 7 },
+                    { kind: 'CallExpression', callee: 'g', start: 2, end: 6 },
+                  ],
+                },
+              }
             : o,
         ),
     },
@@ -654,299 +713,386 @@ oracleProperty({
 })
 
 // ---------------------------------------------------------------------------
-// Law D3: TDZ-safe local binding capture discovery
+// Law D3: Captures are the locals that are initialized whenever the code reaches the point
 // ---------------------------------------------------------------------------
 
-const TDZ_SCENARIOS = [
-  'inner-shadow-let-const',
-  'param-default-sequence',
-  'for-of-header-vs-body',
-  'for-in-header-vs-body',
-  'for-classic-init-cond-body',
-  'hoisted-fn-vs-class-decl',
-  'destructured-object-and-array',
-  'catch-clause-binding',
-] as const
+const op = (kind: ScopeOpKind, n = 0, k = 0): ScopeOp => ({ op: kind, n, k })
+const scopes =
+  (...ops: Array<ScopeOp>) =>
+  (base: ScopeShape): ScopeShape => ({ ...base, ops })
 
-type TdzScenario = (typeof TDZ_SCENARIOS)[number]
-
-interface TdzHistory {
-  scenario: TdzScenario
-  includeOuterBinding: boolean
+/**
+ * JavaScript's answer, from running the truth program: the names every reach of a point could
+ * read. No capture read in the instrumented program may fail.
+ */
+function capturesModel(history: ScopeShape) {
+  const answers = askJavaScript(planScopeShape(history))
+  return {
+    captures: answers.map((answer) => (answer === 'never reached' ? answer : answer.readable)),
+    failedReads: [],
+  }
 }
 
-const tdzArbitrary: fc.Arbitrary<TdzHistory> = fc.record({
-  scenario: fc.constantFrom(...TDZ_SCENARIOS),
-  includeOuterBinding: fc.boolean(),
-})
-
-function tdzModel(history: TdzHistory) {
-  const outer = history.includeOuterBinding ? ['outerVal'] : []
-  const sorted = (items: Array<string>) => [...new Set([...outer, ...items])].sort()
-
-  switch (history.scenario) {
-    case 'inner-shadow-let-const':
-      return {
-        beforeShadowDecl: sorted([]), // `x` is shadowed in inner block and in TDZ before `const x = 'inner'`!
-        afterShadowDecl: sorted(['innerOnly', 'x']),
-        afterBlockExit: sorted(['x']), // `innerOnly` was popped when inner block exited!
-      }
-    case 'param-default-sequence':
-      return {
-        atFirstParamDefault: sorted([]), // neither p0 nor p1 is ready inside p0 = call0()
-        atSecondParamDefault: sorted(['p0']), // p0 is ready inside p1 = call1(), p1 is in TDZ
-        inBody: sorted(['p0', 'p1']),
-      }
-    case 'for-of-header-vs-body':
-    case 'for-in-header-vs-body':
-      return {
-        atLoopHeader: sorted([]), // loop variable `item` is in TDZ inside `getSource()`
-        inLoopBody: sorted(['item']),
-        inExistingVarLoopBody: sorted(['preExisting']),
-      }
-    case 'for-classic-init-cond-body':
-      return {
-        atInit: sorted([]),
-        atCondition: sorted(['i']),
-        inBody: sorted(['i']),
-        inBareForBody: sorted([]),
-      }
-    case 'hoisted-fn-vs-class-decl':
-      return {
-        beforeClassAndFn: sorted(['hoistedFn']), // local function is hoisted; class is in TDZ
-        afterClassAndFn: sorted(['LocalClass', 'hoistedFn']),
-        inAnonDefaultClass: [],
-      }
-    case 'destructured-object-and-array':
-      return {
-        beforeDestructure: sorted([]),
-        afterDestructure: sorted(['a', 'b', 'c']),
-      }
-    case 'catch-clause-binding':
-      return {
-        inTryBlock: sorted([]),
-        inCatchBlock: sorted(['err']),
-      }
-  }
+/** What the program shows of the law: predicates over the history and JavaScript's answer. */
+function capturesStates(history: ScopeShape): Array<string> {
+  const plan = planScopeShape(history)
+  const answers = askJavaScript(plan)
+  const some = (holds: (answer: Exclude<(typeof answers)[number], string>, index: number) => boolean) =>
+    answers.some((answer, index) => answer !== 'never reached' && holds(answer, index))
+  const states: Array<string> = []
+  if (some((answer) => answer.uninitializedOnce.length > 0)) states.push('uninitialized-name-at-the-point')
+  if (some((answer) => answer.dependsOnOrder.length > 0)) states.push('readable-in-some-orders-only')
+  if (some((answer, index) => plan.points[index]!.inSwitch && answer.uninitializedOnce.length > 0))
+    states.push('switch-clause-skips-a-declaration')
+  if (some((answer, index) => plan.points[index]!.inFunction && answer.uninitializedOnce.length > 0))
+    states.push('function-runs-before-a-declaration')
+  if (some((answer, index) => plan.points[index]!.inFunction && answer.readable.length >= 2))
+    states.push('function-reads-its-surroundings')
+  if (some((_answer, index) => plan.points[index]!.classes.length > 0)) states.push('inside-a-class')
+  for (const part of ['parameter-defaults', 'loop', 'destructure', 'catch']) if (plan.has.has(part)) states.push(part)
+  if (history.moduleDeclaresName) states.push('module-declares-a-local-name')
+  return states
 }
 
 oracleProperty({
   id: 'discovery-tdz-safe-captures',
   owns: [
-    'src/discovery.mjs#collectBindingEntries',
-    'src/discovery.mjs#scopeBindingsOf',
+    'src/discovery.mjs#declarationsOf',
+    'src/discovery.mjs#declaredNames',
+    'src/discovery.mjs#reachOf',
     'src/discovery.mjs#indexTargetFile',
   ],
   law: {
     statement:
-      'For every indexed expression at position start, node.captures is the sorted list of local identifier bindings in enclosing non-module scopes whose declaration is initialized before start and is not shadowed by an uninitialized declaration of the same name in an inner enclosing scope.',
+      'For every indexed expression, node.captures lists, sorted, exactly the local names that are initialized every time the code reaches the expression, in every order in which the code can be called; reading each of them where the instrumented code reaches the expression succeeds.',
     authority:
-      'README.md:171 ("with enclosing function name, callee/operator, nth, and safe pre-expression local bindings") and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-22: exclude TDZ bindings in shadowed blocks, parameter defaults, and loop headers.',
+      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: for every capture the registry offers at a point, reading it when the instrumented code reaches that point succeeds; the model is JavaScript\'s own scoping. README.md, "Select an execution point in a test": ".capture(...) autocompletes every in-scope local at that expression".',
     limits:
-      'Module top-level bindings are excluded from local captures by design.',
+      'Module-level bindings are never captures. The name of a class is not offered inside that class. The generated functions declare names with let, const, class, function, parameters, loop heads, catch, and destructuring, and use a function only by calling it: var, the names inside one destructuring pattern, and calls made through eval or with are not generated.',
   },
   histories: {
-    arbitrary: tdzArbitrary,
-    runs: 50,
+    arbitrary: scopeShapeArbitrary,
+    runs: 100,
     fixedSeeds: [42],
     states: [
-      'shadowed-inner-tdz-masked',
-      'param-default-tdz-masked',
-      'for-of-header-tdz-masked',
-      'hoisted-fn-and-class-tdz',
-      'destructured-and-catch-bindings',
-      'catch-clause-binding-captured',
+      'uninitialized-name-at-the-point',
+      'readable-in-some-orders-only',
+      'switch-clause-skips-a-declaration',
+      'function-runs-before-a-declaration',
+      'function-reads-its-surroundings',
+      'inside-a-class',
+      'parameter-defaults',
+      'loop',
+      'destructure',
+      'catch',
+      'module-declares-a-local-name',
     ],
     constructed: [
       {
-        name: 'shadowed-block-tdz',
-        enters: ['shadowed-inner-tdz-masked'],
-        build: (base) => ({
-          ...base,
-          scenario: 'inner-shadow-let-const',
-          includeOuterBinding: true,
-        }),
+        // const a; switch { case 0: at(); break; default: let a; at() }
+        name: 'later-case-declares-the-outer-name',
+        enters: ['switch-clause-skips-a-declaration', 'uninitialized-name-at-the-point'],
+        build: scopes(op('let'), op('switch'), op('point'), op('case'), op('let'), op('point')),
       },
       {
-        name: 'param-defaults-tdz',
-        enters: ['param-default-tdz-masked'],
-        build: (base) => ({ ...base, scenario: 'param-default-sequence' }),
+        name: 'later-case-declares-a-class',
+        enters: ['switch-clause-skips-a-declaration'],
+        build: scopes(op('let'), op('switch'), op('point'), op('case'), op('class', 0, 1), op('point')),
       },
       {
-        name: 'for-of-header-tdz',
-        enters: ['for-of-header-tdz-masked'],
-        build: (base) => ({ ...base, scenario: 'for-of-header-vs-body' }),
+        // The second clause is entered directly, and by running on from the first.
+        name: 'case-entered-two-ways',
+        enters: ['readable-in-some-orders-only'],
+        build: scopes(op('switch'), op('let'), op('point'), op('case', 0, 1), op('point'), op('case'), op('point')),
       },
       {
-        name: 'hoisted-fn-before-class',
-        enters: ['hoisted-fn-and-class-tdz'],
-        build: (base) => ({ ...base, scenario: 'hoisted-fn-vs-class-decl' }),
+        // call b; let a; function b() { at() }
+        name: 'function-called-before-a-later-const',
+        enters: ['function-runs-before-a-declaration', 'uninitialized-name-at-the-point'],
+        build: scopes(op('call', 1), op('let'), op('function', 1), op('point'), op('close'), op('point')),
       },
       {
-        name: 'destructured-bindings',
-        enters: ['destructured-and-catch-bindings'],
-        build: (base) => ({ ...base, scenario: 'destructured-object-and-array' }),
+        name: 'function-called-early-through-another',
+        enters: ['function-runs-before-a-declaration'],
+        build: scopes(
+          op('call', 1),
+          op('let'),
+          op('function', 2),
+          op('point'),
+          op('close'),
+          op('function', 1),
+          op('call', 2),
+          op('close'),
+        ),
       },
       {
-        name: 'catch-clause-capture',
-        enters: ['catch-clause-binding-captured'],
-        build: (base) => ({ ...base, scenario: 'catch-clause-binding' }),
+        // b and c call each other; b is called before `a` exists.
+        name: 'functions-that-call-each-other',
+        enters: ['function-runs-before-a-declaration'],
+        build: scopes(
+          op('call', 1),
+          op('let'),
+          op('function', 1),
+          op('call', 2),
+          op('close'),
+          op('function', 2),
+          op('call', 1),
+          op('point'),
+          op('close'),
+        ),
+      },
+      {
+        // The function's block lies in a case, behind the case's own declaration.
+        name: 'function-in-a-block-inside-a-case',
+        enters: ['function-reads-its-surroundings'],
+        build: scopes(op('switch'), op('let'), op('block'), op('function', 1), op('point'), op('close'), op('close')),
+      },
+      {
+        name: 'function-read-from-an-object-early',
+        enters: ['function-runs-before-a-declaration'],
+        build: scopes(op('call', 1, 1), op('let'), op('function', 1), op('point'), op('close')),
+      },
+      {
+        // function b() { at() }; let a: b runs only where the scope ends, after a.
+        name: 'function-called-only-after-a-later-const',
+        enters: ['function-reads-its-surroundings'],
+        build: scopes(op('function', 1), op('point'), op('close'), op('let'), op('point')),
+      },
+      {
+        name: 'function-name-only-as-a-property',
+        enters: ['function-reads-its-surroundings'],
+        build: scopes(op('member', 1), op('member', 1, 1), op('let'), op('function', 1), op('point'), op('close')),
+      },
+      {
+        // The inner `a` is a number: reading it is no use of the outer function `a`.
+        name: 'use-of-a-shadowing-name',
+        enters: ['function-reads-its-surroundings'],
+        build: scopes(
+          op('function'),
+          op('point'),
+          op('close'),
+          op('block'),
+          op('let'),
+          op('call'),
+          op('close'),
+          op('let', 1),
+        ),
+      },
+      {
+        name: 'function-in-a-case-called-from-another',
+        enters: ['function-runs-before-a-declaration', 'switch-clause-skips-a-declaration'],
+        build: scopes(
+          op('switch'),
+          op('let'),
+          op('function', 1),
+          op('point'),
+          op('close'),
+          op('call', 1),
+          op('case'),
+          op('call', 1),
+        ),
+      },
+      {
+        // The function's own case is the last one: nothing else calls it.
+        name: 'function-called-from-its-own-case',
+        enters: ['function-reads-its-surroundings'],
+        build: scopes(op('switch'), op('point'), op('case'), op('let'), op('function', 1), op('point'), op('close')),
+      },
+      {
+        name: 'function-inside-a-function',
+        enters: ['function-runs-before-a-declaration'],
+        build: scopes(
+          op('let'),
+          op('function', 1),
+          op('call', 2),
+          op('let', 0),
+          op('function', 2),
+          op('point'),
+          op('close'),
+          op('close'),
+        ),
+      },
+      {
+        name: 'inner-block-declares-the-outer-name',
+        enters: ['uninitialized-name-at-the-point'],
+        build: scopes(op('let'), op('block'), op('point'), op('let'), op('let', 1), op('point'), op('close'), op('point')),
+      },
+      {
+        name: 'name-initialized-by-the-point',
+        enters: ['uninitialized-name-at-the-point'],
+        build: scopes(op('let', 0, 1), op('point')),
+      },
+      {
+        name: 'parameter-defaults',
+        enters: ['parameter-defaults'],
+        build: scopes(op('let', 1), op('function', 0, 2), op('point'), op('close'), op('arrow', 2, 1), op('point')),
+      },
+      {
+        name: 'loop-heads',
+        enters: ['loop'],
+        build: scopes(
+          op('let'),
+          op('loop', 0, 0),
+          op('point'),
+          op('close'),
+          op('loop', 1, 1),
+          op('point'),
+          op('close'),
+          op('loop', 0, 2),
+          op('point'),
+          op('close'),
+          op('loop', 0, 3),
+          op('point'),
+          op('close'),
+          op('loop', 0, 4),
+          op('point'),
+        ),
+      },
+      {
+        name: 'classes',
+        enters: ['inside-a-class'],
+        build: scopes(
+          op('let'),
+          op('point'),
+          op('class', 1, 0),
+          op('point'),
+          op('close'),
+          op('class', 2, 1),
+          op('point'),
+          op('close'),
+          op('point'),
+        ),
+      },
+      {
+        name: 'class-heritage-and-field',
+        enters: ['inside-a-class', 'uninitialized-name-at-the-point'],
+        build: scopes(
+          op('let'),
+          op('block'),
+          op('class', 0, 3),
+          op('point'),
+          op('close'),
+          op('class', 1, 2),
+          op('point'),
+          op('close'),
+        ),
+      },
+      {
+        name: 'class-expression',
+        enters: ['inside-a-class', 'uninitialized-name-at-the-point'],
+        build: scopes(op('let'), op('class', 0, 4), op('point'), op('close'), op('point')),
+      },
+      {
+        name: 'destructured-names',
+        enters: ['destructure'],
+        build: scopes(op('destructure'), op('point')),
+      },
+      {
+        name: 'catch-binding',
+        enters: ['catch'],
+        build: scopes(op('point'), op('try'), op('point'), op('close'), op('point')),
+      },
+      {
+        name: 'module-declares-the-name',
+        enters: ['module-declares-a-local-name'],
+        build: (base) => ({ moduleDeclaresName: true, ops: scopes(op('point'), op('let', 2), op('point'))(base).ops }),
       },
     ],
   },
-  model: (history) => tdzModel(history),
-  driver: (history, observe) => {
+  model: (history) => capturesModel(history),
+  driver: async (history, observe) => {
+    const dir = mkdtempSync(join(tmpdir(), 'ep-disc-d3-'))
     try {
-      const outerDecl = history.includeOuterBinding ? 'const outerVal = 0;\n  ' : ''
-      const capturesOf = (indexed: ReturnType<typeof indexTargetFile>, callee: string) =>
-        indexed.nodes.find((n) => n.callee === callee)?.captures ?? []
+      for (const state of capturesStates(history)) observe('reach', state)
+      const plan = planScopeShape(history)
+      const file = join(dir, 'scopes.ts')
+      writeFileSync(file, plan.target)
 
-      if (history.scenario === 'inner-shadow-let-const') {
-        observe('reach', 'shadowed-inner-tdz-masked')
-        const src = `export function work() {
-  ${outerDecl}const x = 'outer';
-  {
-    beforeShadow();
-    const x = 'inner';
-    const innerOnly = 1;
-    afterShadow(x, innerOnly);
-  }
-  afterBlock(x);
-}`
-        const indexed = indexTargetFile('/app/tdz.ts', src, '/app', sharedApi)
-        observe('tdz', {
-          beforeShadowDecl: capturesOf(indexed, 'beforeShadow'),
-          afterShadowDecl: capturesOf(indexed, 'afterShadow'),
-          afterBlockExit: capturesOf(indexed, 'afterBlock'),
-        })
-        return
+      const indexed = indexTargetFile(file, plan.target, dir, sharedApi)
+      const captures: Array<Array<string> | 'not indexed'> = plan.points.map(() => 'not indexed')
+      for (const node of indexed.nodes) {
+        const point = /^at\((\d+),/.exec(plan.target.slice(node.start, node.end))
+        if (point) captures[Number(point[1])] = node.captures
       }
 
-      if (history.scenario === 'param-default-sequence') {
-        observe('reach', 'param-default-tdz-masked')
-        const src = `export function outer() {
-  ${outerDecl}function inner(p0 = call0(), p1 = call1()) {
-    return bodyCall(p0, p1);
-  }
-  return inner;
-}`
-        const indexed = indexTargetFile('/app/tdz.ts', src, '/app', sharedApi)
-        observe('tdz', {
-          atFirstParamDefault: capturesOf(indexed, 'call0').filter((n) => n !== 'inner'),
-          atSecondParamDefault: capturesOf(indexed, 'call1').filter((n) => n !== 'inner'),
-          inBody: capturesOf(indexed, 'bodyCall').filter((n) => n !== 'inner'),
-        })
+      // The instrumented function, run with every flag on, so that every indexed expression
+      // goes through `invoke`; `invoke` reads every capture the expression offers.
+      const plugin = executionPoints({ root: dir, targets: ['scopes.ts'] })
+      await plugin.buildStart.call({ addWatchFile() {} })
+      const instrumented = await plugin.transform.call({}, plan.target, file)
+      if (!instrumented) {
+        // Nothing in the function can be selected, so nothing is read.
+        observe('captures', { captures, failedReads: [] })
         return
       }
-
-      if (history.scenario === 'for-of-header-vs-body' || history.scenario === 'for-in-header-vs-body') {
-        observe('reach', 'for-of-header-tdz-masked')
-        const kw = history.scenario === 'for-of-header-vs-body' ? 'of' : 'in'
-        const src = `export function work() {
-  ${outerDecl}for (const item ${kw} getSource()) {
-    inBody(item);
-  }
-  let preExisting = '';
-  for (preExisting ${kw} getSource2()) {
-    inExistingBody(preExisting);
-  }
-}`
-        const indexed = indexTargetFile('/app/tdz.ts', src, '/app', sharedApi)
-        observe('tdz', {
-          atLoopHeader: capturesOf(indexed, 'getSource'),
-          inLoopBody: capturesOf(indexed, 'inBody'),
-          inExistingVarLoopBody: capturesOf(indexed, 'inExistingBody'),
-        })
-        return
+      const aliases = /import \{ invoke as (\w+), registerFile as (\w+) \}[^\n]*\n/.exec(instrumented.code)!
+      const failedReads = new Set<string>()
+      const invoke = (id: string, original: () => unknown, captureThunk: () => Record<string, () => unknown>) => {
+        for (const [name, read] of Object.entries(captureThunk())) {
+          try {
+            read()
+          } catch (error) {
+            failedReads.add(`${name} at ${id}: ${(error as Error).message}`)
+          }
+        }
+        return original()
       }
-
-      if (history.scenario === 'for-classic-init-cond-body') {
-        observe('reach', 'for-of-header-tdz-masked')
-        const src = `export function work() {
-  ${outerDecl}for (let i = initCall(); condCall(i); ) {
-    bodyCall(i);
-  }
-  for (; bareCond(); ) {
-    bareBody();
-  }
-}`
-        const indexed = indexTargetFile('/app/tdz.ts', src, '/app', sharedApi)
-        observe('tdz', {
-          atInit: capturesOf(indexed, 'initCall'),
-          atCondition: capturesOf(indexed, 'condCall'),
-          inBody: capturesOf(indexed, 'bodyCall'),
-          inBareForBody: capturesOf(indexed, 'bareBody'),
-        })
-        return
-      }
-
-      if (history.scenario === 'hoisted-fn-vs-class-decl') {
-        observe('reach', 'hoisted-fn-and-class-tdz')
-        // Note: `class LocalClass {}afterBoth(...)` with 0 whitespace makes LocalClass.end === afterBoth.start!
-        const src = `export function work() {
-  ${outerDecl}beforeBoth();
-  function hoistedFn() { return 1; }
-  class LocalClass {}afterBoth(LocalClass, hoistedFn);
-}
-export default class {
-  m() { return anonClassCall(); }
-}`
-        const indexed = indexTargetFile('/app/tdz.ts', src, '/app', sharedApi)
-        observe('tdz', {
-          beforeClassAndFn: capturesOf(indexed, 'beforeBoth'),
-          afterClassAndFn: capturesOf(indexed, 'afterBoth'),
-          inAnonDefaultClass: capturesOf(indexed, 'anonClassCall'),
-        })
-        return
-      }
-
-      if (history.scenario === 'destructured-object-and-array') {
-        observe('reach', 'destructured-and-catch-bindings')
-        const src = `export function work() {
-  ${outerDecl}const { a, nested: { b } } = makeObj();
-  const [, c] = [1, 2];
-  afterDestructure(a, b, c);
-}`
-        const indexed = indexTargetFile('/app/tdz.ts', src, '/app', sharedApi)
-        observe('tdz', {
-          beforeDestructure: capturesOf(indexed, 'makeObj'),
-          afterDestructure: capturesOf(indexed, 'afterDestructure'),
-        })
-        return
-      }
-
-      // catch-clause-binding
-      observe('reach', 'catch-clause-binding-captured')
-      const src = `export function work() {
-  ${outerDecl}try {
-    inTry();
-  } catch (err) {
-    inCatch(err);
-  }
-}`
-      const indexed = indexTargetFile('/app/tdz.ts', src, '/app', sharedApi)
-      observe('tdz', {
-        inTryBlock: capturesOf(indexed, 'inTry'),
-        inCatchBlock: capturesOf(indexed, 'inCatch'),
+      const register = (_file: string, _nodes: unknown, homes: ReadonlyArray<number>) =>
+        Array.from({ length: Math.max(0, ...homes) + 1 }, () => ({ on: true }))
+      runScopeProgram(instrumented.code.replace(aliases[0], ''), plan.clauseCounts, (_point, value) => value, {
+        [aliases[1]!]: invoke,
+        [aliases[2]!]: register,
       })
+
+      observe('captures', { captures, failedReads: [...failedReads].sort() })
     } catch (err) {
-      observe('tdz', { threw: err instanceof Error ? err.message : String(err) })
+      observe('captures', { threw: err instanceof Error ? err.message : String(err) })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   },
-  check: (_history, observations, expected) => {
-    const entry = observations.find((o) => o.checkpoint === 'tdz')
-    if (!entry) return differs('tdz', 'tdz-safe-captures', undefined, expected) ?? pass
-    return differs('tdz', 'tdz-safe-captures', entry.value, expected) ?? pass
-  },
+  check: (_history, observations, expected) =>
+    differs('captures', 'tdz-safe-captures', observations.find((o) => o.checkpoint === 'captures')?.value, expected) ??
+    pass,
   calibrations: [
     {
-      name: 'leaked-tdz-capture',
+      // What discovery answered before 2026-11-24: the outer `a` at the point in the first case.
+      name: 'outer-name-offered-under-a-later-case',
       law: 'tdz-safe-captures',
-      history: { constructed: 'shadowed-block-tdz' },
+      history: { constructed: 'later-case-declares-the-outer-name' },
       corrupt: (trace) =>
         trace.map((o) =>
-          o.checkpoint === 'tdz'
-            ? { ...o, value: { ...(o.value as object), beforeShadowDecl: ['leaked'] } }
+          o.checkpoint === 'captures'
+            ? { ...o, value: { ...(o.value as object), captures: [['a'], ['a']] } }
+            : o,
+        ),
+    },
+    {
+      name: 'offered-capture-cannot-be-read',
+      law: 'tdz-safe-captures',
+      history: { constructed: 'function-called-before-a-later-const' },
+      corrupt: (trace) =>
+        trace.map((o) =>
+          o.checkpoint === 'captures'
+            ? {
+                ...o,
+                value: {
+                  ...(o.value as object),
+                  failedReads: ["a at scopes.ts#b:CallExpression:at:0: Cannot access 'a' before initialization"],
+                },
+              }
+            : o,
+        ),
+    },
+    {
+      // A rule that offers nothing inside a hoisted function is safe, and hides `a` here.
+      name: 'initialized-name-left-out',
+      law: 'tdz-safe-captures',
+      history: { constructed: 'function-called-only-after-a-later-const' },
+      corrupt: (trace) =>
+        trace.map((o) =>
+          o.checkpoint === 'captures'
+            ? { ...o, value: { ...(o.value as object), captures: [['b'], ['a', 'b']] } }
             : o,
         ),
     },

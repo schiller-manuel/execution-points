@@ -54,9 +54,14 @@ export function parseManifest(content, manifestFile, root) {
     }
     const properties = new Map(lease.sourceFile.statements[0].expression.properties.map((property) => [property.name.text, property]))
     for (const [key, property] of properties) {
-      if (key !== 'targets' && key !== 'tsconfig') {
-        report(90102, `Unknown key ${JSON.stringify(key)}. The keys of a manifest are "targets" and "tsconfig".`, ...at(property.name))
+      if (key !== 'targets' && key !== 'tsconfig' && key !== '$schema') {
+        report(90102, `Unknown key ${JSON.stringify(key)}. The keys of a manifest are "targets", "tsconfig" and "$schema".`, ...at(property.name))
       }
+    }
+
+    const schema = properties.get('$schema')
+    if (schema && typeof parsed.$schema !== 'string') {
+      report(90106, '"$schema" must be the location of points.schema.json, in a string.', ...at(schema.initializer))
     }
 
     const tsconfig = properties.get('tsconfig')

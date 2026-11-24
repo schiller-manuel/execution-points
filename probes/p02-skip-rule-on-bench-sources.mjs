@@ -1,4 +1,6 @@
-// Probe: how much real code does the "contains await / ?. / yield / super" skip rule hide?
+// Probe: how much real code does the skip rule hide? (F11: until 2026-11-24 an await, a yield,
+// a super, or a ?. anywhere inside an expression hid it; now only what cannot move into a
+// function of its own is skipped.)
 // Counts CallExpression / BinaryExpression / ConditionalExpression nodes in the benchmark task
 // sources and the repo's own src/, and compares with what discovery indexes.
 import { globSync, readFileSync } from 'node:fs'
@@ -64,6 +66,6 @@ for (const [label, rels] of Object.entries(groups)) {
   console.log(`  candidate expressions: ${t.all}, indexed: ${t.indexed}, hidden: ${hidden} (${((100 * hidden) / t.all).toFixed(1)}%)`)
   console.log(`  hidden because await is only inside a nested callback: ${t.awaitNestedFnOnly}`)
   console.log(`  hidden because await is in the same function:          ${t.awaitSameFn}`)
-  console.log(`  hidden because ?. appears somewhere inside:            ${t.optChainInside}`)
+  console.log(`  hidden with a ?. inside (a chain that goes on behind it): ${t.optChainInside}`)
 }
 api.close()

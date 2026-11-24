@@ -204,6 +204,11 @@ interface ManifestHistory {
   missingTargets?: boolean
 }
 
+/** The keys a manifest may have are the ones its schema describes. The model reads them there. */
+const MANIFEST_KEYS: ReadonlyArray<string> = Object.keys(
+  (JSON.parse(readFileSync(join(repoRoot, 'points.schema.json'), 'utf8')) as { properties: object }).properties,
+)
+
 /** The project every manifest history runs in. */
 const MANIFEST_PROJECT = {
   // The name of Quote is an import relative to the manifest, so it holds only for the right manifest file.
@@ -306,6 +311,16 @@ const MANIFEST_HISTORIES: ReadonlyArray<ManifestHistory> = [
     tokens: ['{', key('tsconfig'), ': ', wrong('42', 'tsconfig'), ', ', key('targets'), ': [', path('src/app.ts'), ']}'],
   },
   {
+    name: 'schema-key-beside-targets',
+    states: ['followed-exactly'],
+    tokens: ['{', key('$schema'), ': "./points.schema.json", ', key('targets'), ': [', path('src/app.ts'), ']}'],
+  },
+  {
+    name: 'schema-that-is-not-a-string',
+    states: ['refused-at-a-value'],
+    tokens: ['{', key('$schema'), ': ', wrong('42', '$schema'), ', ', key('targets'), ': [', path('src/app.ts'), ']}'],
+  },
+  {
     name: 'tsconfig-that-does-not-exist',
     states: ['refused-at-a-value'],
     tokens: ['{', key('tsconfig'), ': ', wrong('"nope.json"', 'nope.json'), ', ', key('targets'), ': [', path('src/app.ts'), ']}'],
@@ -320,7 +335,7 @@ function owedDiagnostics(history: ManifestHistory) {
   for (const { token, text: at, start } of placed(history.tokens)) {
     if (typeof token === 'string') continue
     if ('key' in token) {
-      if (token.key !== 'targets' && token.key !== 'tsconfig') owed.push({ at, names: token.key, start })
+      if (!MANIFEST_KEYS.includes(token.key)) owed.push({ at, names: token.key, start })
     } else if ('wrong' in token) {
       owed.push({ at, names: token.subject, start, ...(token.subject === '"targets" array' ? { code: 90101 } : {}) })
     } else if (!token.isString || token.matches.length === 0) {
@@ -349,11 +364,11 @@ oracleProperty({
   owns: ['src/content-mapper.mjs#parseManifest', 'src/content-mapper.mjs#transform', 'src/content-mapper.mjs#scanProject'],
   law: {
     statement:
-      'For every manifest, either the registry reflects exactly the listed targets that exist, or a diagnostic names what is wrong: empty content is an empty registry with no diagnostic, invalid JSON is diagnostic 90100, JSON that is not an object with a "targets" array is diagnostic 90101, and an unknown key, a wrong value, an entry that is not a string, and an entry that matches no file each get a diagnostic at that text. Each registry file’s nodes are mapped to the entry that lists the file, for diagnostics and for go-to-definition.',
+      'For every manifest, either the registry reflects exactly the listed targets that exist, or a diagnostic names what is wrong: empty content is an empty registry with no diagnostic, invalid JSON is diagnostic 90100, JSON that is not an object with a "targets" array is diagnostic 90101, and a key that points.schema.json does not describe, a wrong value, an entry that is not a string, and an entry that matches no file each get a diagnostic at that text. Each registry file’s nodes are mapped to the entry that lists the file, for diagnostics and for go-to-definition.',
     authority:
-      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: for every manifest, either the registry reflects exactly the listed targets that exist, or a diagnostic names what is wrong; registry lines are mapped to something useful. Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23: Law M1 (90100 for invalid JSON, 90101 for JSON that is not an object with a "targets" array).',
+      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: for every manifest, either the registry reflects exactly the listed targets that exist, or a diagnostic names what is wrong; registry lines are mapped to something useful. Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23: Law M1 (90100 for invalid JSON, 90101 for JSON that is not an object with a "targets" array). Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: one source of truth for targets, with a published schema for the manifest (points.schema.json), which names the keys.',
     limits:
-      'Twenty-one manifests over one project of three modules. A diagnostic’s message is checked for naming its subject, and only the codes 90100 and 90101 are fixed. The mapping is checked for the manifest text it points at and the files whose nodes it covers.',
+      'Twenty-three manifests over one project of three modules. A diagnostic’s message is checked for naming its subject, and only the codes 90100 and 90101 are fixed. The mapping is checked for the manifest text it points at and the files whose nodes it covers.',
   },
   histories: {
     enumerated: MANIFEST_HISTORIES,

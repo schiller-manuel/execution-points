@@ -1,54 +1,65 @@
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { buildTargetPlan } from './discovery.mjs'
+import { indexTargetFile, loadManifest, resolveTargetFiles } from './discovery.mjs'
 
 const runtimeModule = 'execution-points-prototype/runtime'
+const setupModule = 'execution-points-prototype/vitest'
 
-/** Instrument target modules listed in points.ep; test files need no transformation. */
+/**
+ * Instruments the target modules; test files need no transformation. The targets are
+ * `options.targets`, or else the ones that points.ep in the root lists.
+ */
 export function executionPoints(options = {}) {
   let root = resolve(options.root ?? process.cwd())
-  let plan
-  let observedFiles = new Map()
+  // The target files, until a watched file changes, and each target as it was last instrumented.
+  let targets
+  const indexed = new Map()
 
-  function getPlan(context) {
-    if (
-      plan &&
-      [...observedFiles].every(([file, expected]) => readSource(file) === expected)
-    ) {
-      return plan
-    }
-    plan = buildTargetPlan({ ...options, root })
-    observedFiles = new Map(plan.files.map((entry) => [entry.file, entry.source]))
-    if (context.addWatchFile) {
-      for (const file of observedFiles.keys()) context.addWatchFile(file)
-    }
-    return plan
+  function resolveTargets(context) {
+    // Explicit targets win. Without them, points.ep in the root is the one list of targets.
+    const { targets: listed, manifestPath } = options.targets ? options : loadManifest(root)
+    targets = new Set(resolveTargetFiles(root, listed))
+    for (const file of targets) context.addWatchFile?.(file)
+    if (manifestPath) context.addWatchFile?.(manifestPath)
+    return targets
   }
 
   return {
     name: 'execution-points-prototype',
     enforce: 'pre',
 
+    config() {
+      // After each test, the library's setup module checks what the test's replacements still owe.
+      return { test: { setupFiles: [setupModule] } }
+    },
+
     configResolved(config) {
       if (!options.root) root = resolve(config.root)
     },
 
     buildStart() {
-      getPlan(this)
+      resolveTargets(this)
     },
 
     watchChange() {
-      plan = undefined
+      targets = undefined
     },
 
     transform(code, id) {
+      // Most modules are no targets: for them nothing is read, however many targets there are.
       const file = sourceFileName(id)
-      if (!file) return null
+      if (!file || !(targets ?? resolveTargets(this)).has(file)) return null
 
-      const currentPlan = getPlan(this)
-      const entry = currentPlan.files.find((item) => item.file === file)
-      if (!entry || entry.nodes.length === 0) return null
+      let entry = indexed.get(file)
+      if (entry?.source !== code) {
+        // The code is new to the plugin: the file was edited, or an earlier plugin changed the code.
+        const source = readSource(file)
+        if (source === undefined) return null
+        entry = indexTargetFile(file, source, root)
+        indexed.set(file, entry)
+      }
+      if (entry.nodes.length === 0) return null
 
       if (entry.source !== code) {
         throw new Error(
@@ -149,9 +160,10 @@ function instrument(code, file, entry, header, names) {
     }
   }
 
-  const headerAt = importOffset(code)
+  // Leading directives stay the file's first statements, so the header goes on a line behind them.
+  const headerAt = entry.directivesEnd || importOffset(code)
   out.source(0, headerAt)
-  out.text(header + flags)
+  out.text((entry.directivesEnd ? '\n' : '') + header + flags)
   between(root.children, headerAt, code.length, (child) => original(child, undefined))
   return out.finish()
 }
