@@ -210,7 +210,19 @@ async function verifyLsp() {
       0,
       `Expected 0 LSP diagnostics on valid checkout.test.ts, got:\n${JSON.stringify(cleanDiag.items, null, 2)}`,
     )
-    passed('TypeScript 7.1 LSP typechecks both select() and fromFile() natively with 0 errors')
+
+    const exprFile = join(root, 'examples/expressions.test.ts')
+    const exprUri = pathToFileURL(exprFile).href
+    notify('textDocument/didOpen', {
+      textDocument: { uri: exprUri, languageId: 'typescript', version: 1, text: await readFile(exprFile, 'utf8') },
+    })
+    const exprDiag = await request('textDocument/diagnostic', { textDocument: { uri: exprUri } })
+    assert.equal(
+      exprDiag.items?.length ?? 0,
+      0,
+      `Expected 0 LSP diagnostics on valid expressions.test.ts, got:\n${JSON.stringify(exprDiag.items, null, 2)}`,
+    )
+    passed('TypeScript 7.1 LSP typechecks checkout.test.ts and expressions.test.ts natively with 0 errors')
 
     const userHover = await request('textDocument/hover', {
       textDocument: { uri: testUri },

@@ -74,7 +74,7 @@ type VisitorNode<N extends NodeDescriptor> = N extends NodeDescriptor
 type RegistryIsEmpty = keyof ExecutionPointFileRegistry extends never ? true : false
 
 type ExecutionPointsNotLoaded =
-  'ExecutionPointFileRegistry is empty. Ensure points.ep is included in tsconfig.json with contentMappers enabled, run tsc with --runExternalCode, and verify the package is inside the open workspace (TS18124).'
+  'ExecutionPointFileRegistry is empty. Ensure points.ep is included in tsconfig.json with contentMappers enabled, run tsc with --runExternalCode (or in VS Code choose "TypeScript: Select TypeScript Version -> Use Workspace Version" with TypeScript 7.1), and verify the package is inside the open workspace (TS18124).'
 
 type RegisteredTargetFile =
   RegistryIsEmpty extends true
@@ -124,9 +124,13 @@ type SelectFromNodes<N extends NodeDescriptor, Captured extends object> =
           }
         : SelectablePoint<N, Captured>
 
+interface EmptyRegistryPoint extends Point<any, any> {
+  capture(...keys: readonly string[]): EmptyRegistryPoint
+}
+
 type SelectedPoint<R> =
   RegistryIsEmpty extends true
-    ? Point<any, any>
+    ? EmptyRegistryPoint
     : SelectFromNodes<ExtractNode<R>, ExtractCapturedLocals<R>>
 
 type VisitorReturn =

@@ -129,7 +129,15 @@ Register the content mapper in `tsconfig.json` and include `points.ep`:
 }
 ```
 
-(Inside this repository itself, `tsconfig.json` uses `"package": "."` to point at the local package root. `.vscode/settings.json` enables `"js/ts.contentMappers.enabled": true` and uses the workspace TypeScript 7.1 SDK.)
+(Inside this repository itself, `tsconfig.json` uses `"package": "."` to point at the local package root.)
+
+### VS Code setup
+
+Content mappers require **TypeScript 7.1** (`tsgo`), not VS Code's bundled TypeScript version. `.vscode/settings.json` in this repo already sets `"typescript.tsdk"`, `"js/ts.tsdk.path"`, `"js/ts.contentMappers.enabled": true`, and `"js/ts.experimental.useTsgo": true`, **but VS Code will still use its bundled TypeScript until you opt in**:
+
+1. Open any `.ts` file in VS Code.
+2. Run **TypeScript: Select TypeScript Version…** from the Command Palette and choose **Use Workspace Version** (`7.1.0-dev...`).
+3. If you see `ExecutionPointFileRegistry is empty` in the editor, check the TypeScript version indicator in the status bar and run **TypeScript: Restart TS Server**.
 
 `vitest.config.mjs` reads `points.ep` directly via `loadManifest()` so Vitest and TypeScript share a single configuration:
 

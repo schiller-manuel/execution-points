@@ -341,8 +341,8 @@ oracleProperty({
 const p = select('examples/type-oracle-target.ts', (n) => n.kind === 'CallExpression' && n.callee === 'send' && n.capture('chosen'))
 p.withReplacement(({ locals, original }) => { void locals.chosen; return original() }, () => 0)`
         : `import { select } from 'execution-points-prototype'
-const p = select('examples/type-oracle-target.ts', (n) => n.callee === 'send' && n)
-p.withReplacement(({ original }) => original(), () => 0)`
+const p = select('examples/type-oracle-target.ts', (n) => n.callee === 'send' && n).capture('chosen')
+p.withReplacement(({ locals, original }) => { void locals.chosen; return original() }, () => 0)`
     const res = checkSnippet(code, { emptyRegistry: true })
     observe('t2', {
       ok: res.ok,
