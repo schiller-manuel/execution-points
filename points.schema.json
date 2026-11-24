@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/schiller-manuel/execution-points/blob/main/points.schema.json",
+  "title": "Execution points manifest",
+  "description": "points.ep lists the application modules whose expressions tests can select. The TypeScript content mapper, the Vite plugin, and the `execution-points list` command all read it.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Where this schema is, so that an editor can check and complete the manifest.",
+      "type": "string"
+    },
+    "tsconfig": {
+      "description": "The tsconfig.json that describes the target modules, relative to the manifest. Defaults to the tsconfig.json beside it.",
+      "type": "string"
+    },
+    "targets": {
+      "description": "The target modules: paths and glob patterns, relative to the manifest.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": ["targets"],
+  "additionalProperties": false
+}

@@ -12,10 +12,32 @@ const indexableKinds = new Set([
 let defaultApi
 const getDefaultApi = () => (defaultApi ??= new API())
 
+const isString = (value) => typeof value === 'string'
+/** What a manifest may hold, as points.schema.json describes it. */
+const manifestKeys = new Map([
+  ['$schema', isString],
+  ['tsconfig', isString],
+  ['targets', (value) => Array.isArray(value) && value.every(isString)],
+])
+
+/** The manifest of a project: its targets and its tsconfig. Anything else in its place is refused by name. */
 export function loadManifest(root = process.cwd(), file = 'points.ep') {
   const manifestPath = resolve(root, file)
-  const raw = JSON.parse(readFileSync(manifestPath, 'utf8'))
-  return { root: resolve(root), manifestPath, ...raw }
+  let manifest
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  } catch (error) {
+    throw new Error(`[execution-points] Cannot read the manifest ${manifestPath}: ${error.message}`)
+  }
+  // Only a JSON object has a key named "targets": a list, a text, or a number has none.
+  const keys = Object.keys(Object(manifest))
+  if (!keys.includes('targets') || !keys.every((key) => manifestKeys.get(key)?.(manifest[key]))) {
+    throw new Error(
+      `[execution-points] ${manifestPath} is not a manifest: it must hold a JSON object with a "targets" array of paths, ` +
+        'and may name a "tsconfig" and a "$schema" (see points.schema.json).',
+    )
+  }
+  return { root: resolve(root), manifestPath, ...manifest }
 }
 
 export function resolveTargetFiles(root, configuredTargets = []) {
@@ -159,11 +181,12 @@ function homeKind(node) {
   const fn = node.parent
   if (node.kind !== SyntaxKind.Block || fn.body !== node || !functionKinds.has(fn.kind)) return undefined
   // A directive must stay the first statement of its function, so such a body is left whole.
-  const first = node.statements[0]
-  const hasDirective =
-    first?.kind === SyntaxKind.ExpressionStatement && first.expression.kind === SyntaxKind.StringLiteral
-  return fn.kind === SyntaxKind.Constructor || fn.asteriskToken || hasDirective ? undefined : 'body'
+  return fn.kind === SyntaxKind.Constructor || fn.asteriskToken || isDirective(node.statements[0]) ? undefined : 'body'
 }
+
+/** A string that stands as a statement of its own: a directive such as `'use strict'`, where it comes first. */
+const isDirective = (statement) =>
+  statement?.kind === SyntaxKind.ExpressionStatement && statement.expression.kind === SyntaxKind.StringLiteral
 
 /** Whether the expression begins an expression statement: only there can it follow a line that lacks its `;`. */
 function startsStatement(node, start, tree) {
@@ -388,7 +411,10 @@ export function indexTargetFile(file, source, root, api = getDefaultApi()) {
     if (tree.externalModuleIndicator) tree.forEachChild((child) => visit(child))
     // Captures wait until every use of every function is known.
     const nodes = found.map(({ node, at, scope }) => ({ ...node, captures: capturesAt(at, scope) }))
-    return { file, relativeFile, source, nodes, bodies }
+    // Where the file's leading directives end: they must stay its first statements.
+    const leading = tree.statements.findIndex((statement) => !isDirective(statement))
+    const directivesEnd = leading ? tree.statements.at(leading - 1).end + bomOffset : 0
+    return { file, relativeFile, source, nodes, bodies, directivesEnd }
   } finally {
     lease.dispose()
   }
