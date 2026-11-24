@@ -321,3 +321,88 @@ Recomputed from the stored `results.jsonl` files with `bench/analyze.mjs`. The e
 10. **Four documents this log cites are not in the repository:** `bench-critical-review.md`, `bench-v2-re-review.md`, `bench-v2.1-re-review.md`, and `bench-v2.2-audit.md`. The finding IDs used throughout this log (`E-..`, `R-..`, `N-..`, `G-..`, `V-..`) refer to them and cannot be looked up here.
 
 The `solved` counts in the tables above reproduce exactly from the stored data: pooled pilot 22/29 against 27/29 (primary 19/21 against 20/21, Stratum A 3/8 against 7/8), matrix 31/40 against 35/40 (primary 23/28 against 24/28, Stratum A 8/12 against 11/12), with the same discordant pairs and exact McNemar p-values.
+
+---
+
+## The Library's New API in the Guide and the Toolchain (2026-11-24, `66ccb34` to `393f6cd`, still v2.4)
+
+This entry was written afterwards, from the commits. Between the merge of v2.4 (`327dd29`) and `393f6cd` the library changed, and three commits changed `bench/` with it. The harness version stayed `v2.4` and nothing was logged at the time. **No paid run was made in between.**
+
+1. **What the library does differently.** A replacement that never runs fails the test; for an asynchronous action the check runs after the test, through a setup module that the Vite plugin adds (`38411c2`, `ff8c90e`). New on a point: `pause()`, `replace()` with the shorthands `returns`, `throws`, `resolves` and `rejects`, and `calls`. New in the package: `interleavings`, selection through a visitor object, and the command `execution-points list`. The two type-generation defects that failed the treatment typecheck (`FINDINGS.md` F1 and F16) are fixed (`24dc30e`).
+2. **What a treatment workspace gets.** The library's sources became TypeScript, built by `tsdown` into `dist/`. Toolchain preparation runs that build and installs `package.json`, `points.schema.json` and `dist/` (`66ccb34`, `a717b83`); up to then it copied `src/`. The build wrote the checkout's own `dist/`; v2.5 changes that.
+3. **The treatment guide's library section was rewritten** (`393f6cd`). It teaches `pause()` in place of a hand-written barrier inside `withReplacement`, says that a replacement or a pause that never runs fails the test and names `{ times: 'any' }`, names `npx execution-points list <file>`, the visitor-object form, and `interleavings`. The section grew from 411 to 576 words. The control guide did not change, and the sections the two guides share are still identical (self-test step 13).
+4. **The `stale-cache` treatment witness uses `pause()`** (`393f6cd`).
+5. **Two classification cases changed** (`393f6cd`): a library message that no longer exists was dropped and two that it now has were added.
+
+For the record of runs this means: the three stored runs measured the library and the guide of their own commits. A run from `393f6cd` on measures a different treatment. `gitCommit`, `toolSha256` and `tasksSha256` (which covers the guides) differ, so `bench/analyze.mjs` refuses to pool the two.
+
+**Self-test at `393f6cd`:** passed, 139 check lines and 0 failures (140 lines of output contain `PASS`, counting the final one), 699 s with other work running. Step 9: all 65 variants typecheck in both arms, 27 of 27 reference and valid fixes. This replaces the four failures recorded for `cb94a6b` above.
+
+What this state of the harness got wrong is the next section.
+
+---
+
+## v2.5 — Library Use by Operation, Error Types from a Reporter, the Guide's Command, `dist/` (2026-11-24)
+
+A re-evaluation of the harness against the library's new API found four defects. The first, the third and the fourth come from the changes of the section above; the second is a defect of v2.4 itself that a re-grade of the stored matrix exposed. **No paid run was made and no credits were spent.** The stored `results.jsonl` files are unchanged; every re-grade below wrote into a scratch directory and is a re-analysis. The pre-registered decisions are `D-18` and `D-19` in `bench/PROTOCOL.md`.
+
+### What changed
+
+1. **A test uses the library by any operation of a point (`D-18`).** The auditor counted a test as using the library only when it called `withReplacement`. A test written as the guide now teaches calls `pause()`, so it was reported as plain Vitest; the harness's own `stale-cache` witness came out as `usesExecutionPoints=false, technique=deferred-only`. The split by adoption and the robustness table by adoption would have put nearly every library test of a new run on the wrong side. Now a test uses the library when it imports `select` from the package, calls it, and puts a selected point to use: `withReplacement`, `replace`, `returns`, `throws`, `resolves`, `rejects`, `pause`, or handing it to `interleavings`. The technique stays the one value `execution-points`; the row records the operations in `libraryOperations`, and `bench/analyze.mjs` prints the number of trials per operation. The list is read off `Point` in the library's declarations: the self-test compares it with the declarations a treatment workspace gets and fails when the library has a member the auditor does not know. The audit is syntactic; `D-18` lists what it follows and what it does not.
+2. **The type of an error is read from Vitest's own record of it (`D-19`).** v2.4 implemented "only an `AssertionError` is a reproduction" by reading the first line of the stack that Vitest prints. For a failed `expect(p).rejects`, `expect(p).resolves`, `expect(p).rejects.toThrow(message)` and `expect.poll` that line says `Error:`, although the error is an `AssertionError`. v2.4 graded those reproductions as `error`, in both arms. The harness now reads each error's `name`, and the `name` of every `cause` behind it, through a Vitest reporter of its own (`bench/failure-reporter.mjs`), and grades by that. A run whose failure report is missing, or names other failures than Vitest's JSON report, is not graded from text: the trial becomes `ungradable`. For every variant that is not a pass the row records the kind, name and causes of up to four errors.
+3. **`npx execution-points list <file>` resolves in a treatment workspace.** The guide tells the agent to run it. The harness installed the package by copying files and made no link in `node_modules/.bin`, so `npx` asked the npm registry for a package called `execution-points`, which is not this library's name. The toolchain now installs the package as its `package.json` ships it and links each command of its `bin`, as an install does.
+4. **No bench process and no probe writes the checkout's `dist/`.** Since `66ccb34` toolchain preparation ran `tsdown` in the checkout, which empties `dist/` and writes it again, every time a self-test, a re-grade or a run started; `probes/e2e.mjs` did the same. A type check or a gap check in the same checkout reads `dist/` at that moment. Both now build into their own temp directory (`tsdown --out-dir`); the output is the same.
+
+### Two gradings that are not decided
+
+They were put to the maintainer on 2026-11-24 and v2.5 does not change them. Each is one rule in `UNDECIDED_GRADINGS` (`bench/classify.mjs`), stated by self-test cases of its own:
+
+- An error of the library that has an `AssertionError` among its causes is a loud break. An assertion that fails inside `order.run(...)` of `interleavings` arrives this way; the library's README recommends that placement. The same assertion after `order.run(...)` is a reproduction.
+- `expect.assertions(n)`, `expect.hasAssertions()` and a snapshot that does not match throw a plain `Error` and are graded `error`.
+
+Neither occurs in the stored matrix: in the v2.5 re-grade below no trial has a library error caused by an `AssertionError`, and none has an expectation thrown as a plain `Error`. The stored tests could not use `interleavings`, which did not exist.
+
+### Self-test verification (`e02f774`)
+
+`node bench/run.mjs --self-test` ran to its end in 605 s, with a re-grade running beside it, and passed: **156 check lines passed, 0 failed.** That is 17 more than at `393f6cd`: the checkout's `dist/` (step 1), library use with the comparison against the shipped declarations (step 2), the guide's command (step 3), and 14 more cases through real Vitest runs (step 4, 25 instead of 11). The final line of the self-test now gives this count.
+
+- Step 1: `dist/` of the checkout is 14 files, before and after.
+- Step 2: 18 library-use cases. The operations the auditor knows are the members of `Point` in the declarations a treatment workspace gets.
+- Step 3: `npx execution-points list src/profile-store.ts` in a treatment workspace, npm offline, printed 31 selectable expressions.
+- Step 4: 33 single-error cases and 9 run cases; the v2.4 rule gets 4 of the 33 wrong and the v2.3 rule 14. 25 cases through real Vitest runs in both arms, among them a failed `expect(p).rejects`, `expect(p).resolves`, `expect(p).rejects.toThrow(message)` and `expect.poll` (all `true_red`), a replacement that never ran and a pause that was never reached (both `loud_break`, from the library's check after the test), and an assertion that fails while a pause is held (`true_red`).
+- Unchanged and passing: 8 of 8 cheats rejected, 5 of 5 legal witnesses, the deterministic I/O probe, 20 of 20 baselines, 65 of 65 variants typechecked in both arms, 57 of 57 calibration variants, 16 of 16 mutants rejected by the hidden oracle, 10 of 10 reference-fix audits, guide parity, version strings, the stale-directory sweep, credit projection.
+
+Each new case was also run against the v2.4 implementation, unpacked from `71f3fdc` into a scratch directory, by handing the case that implementation's auditor, toolchain, classifier and runner:
+
+| Case | v2.4 implementation (`71f3fdc`) | v2.5 |
+| --- | --- | --- |
+| Library use, 18 cases | 0 pass. 12 get the use itself wrong: `point.pause()`, `interleavings`, `replace` and the shorthands all give `usesExecutionPoints=false`, and the witness gives `technique=deferred-only`. The other 6 record no operation | 18 pass |
+| `dist/` of the checkout | fails: absent before, 14 files after; in a tree that already had one, 14 of 14 files written again | pass |
+| The guide's command, npm offline | fails: exit 1, `npm error code ENOTCACHED`, `request to https://registry.npmjs.org/execution-points failed` | pass |
+| Single errors, 33 cases | 29 pass. The 4 failures are a failed `.rejects`, `.resolves`, `.rejects.toThrow(message)` and `expect.poll`, each classified `error` | 33 pass |
+| The same through Vitest, 25 cases | 11 pass. 4 fail on the outcome (`error` where `true_red` is right); 10 because the result records no error name or cause | 25 pass |
+
+### Re-analysis: the stored matrix under v2.4 and under v2.5 (not the record of the run)
+
+All 80 trials of `v2-2026-11-24T09-15-06-057Z`, re-graded into a scratch directory with 3 runs per variant: once at `393f6cd` (v2.4) and once at `e02f774` (v2.5). Both re-grades ran the stored tests with the library of the re-grading checkout, not with the library of the run.
+
+| Solved (control, treatment) | Stored | Re-graded, v2.4 | Re-graded, v2.5 |
+| --- | --- | --- | --- |
+| `retry-storm` | 4/4, 4/4 | 2/4, 3/4 | 4/4, 4/4 |
+| `double-submit` | 4/4, 4/4 | 0/4, 0/4 | 1/4, 2/4 |
+| `stale-cache` | 0/4, 3/4 | 0/4, 2/4 | 0/4, 2/4 |
+| The other seven tasks | 23/28, 24/28 | 23/28, 24/28 | 23/28, 24/28 |
+| All ten tasks | 31/40, 35/40 | 25/40, 29/40 | 28/40, 32/40 |
+
+- **No variant was unstable** in either re-grade.
+- **v2.4 against v2.5: six verdicts, all back from unsolved to solved.** Three `retry-storm` trials (two control, one treatment) and three `double-submit` trials (one control, two treatment). In each a single-bug mutant is detected by a failed `expect(p).rejects` or `expect(p).resolves`, which v2.4 read as `error` (item 2). Between the two checkouts the library differs only in `src/content-mapper.ts` and its entry file, so this difference is the harness.
+- **v2.5 against the stored verdicts: six differ, all from solved to unsolved.**
+  - Five `double-submit` trials (three control, two treatment), all on the mutant `DS-M1-rejection-poison`: the test awaits a call that rejects with `Gateway 502`, and no assertion fails. That is `D-16` as decided. A test that wrote `await expect(p).resolves…` instead of `expect(await p)…` counts. The stored tests were written before both guides stated the rule.
+  - One `stale-cache` treatment trial (`gpt-6.2-sol:medium`): on the agent's own fix and on every valid fix its test now fails with "The replacement … ran 0 times". The test holds a replacement that is meant never to run, a tripwire that throws if a warm read reaches storage. With the library of the run that was silent. This verdict changes because of the library of the re-grading checkout, not because of the harness.
+- **`bench/analyze.mjs` on the v2.5 rows:** 28/40 against 32/40, 6 treatment-only and 2 control-only pairs, exact McNemar p = 0.289; the stored run has the same numbers of discordant pairs. Strata B + C: 23/28 against 24/28 with 3 and 2, as stored. Stratum A: 5/12 against 8/12 with 3 and 0; stored 8/12 against 11/12.
+
+### What v2.5 does not change, and what it corrects in this log
+
+- The re-analysis of the 14 stored `cancel-commit` trials under v2.4 above stands: its three `error` outcomes are `ENOENT` rejections that escaped the test, not assertions misread from the stack.
+- `usesExecutionPoints` of the stored rows is unchanged by `D-18`: the v2.5 re-grade finds the library in the same 23 of 40 treatment trials, all through `withReplacement`.
+- A re-grade of stored trials from `38411c2` on is not like for like, whatever the harness version: the stored tests were written for a library in which a replacement that never ran was silent. In the matrix that changed one verdict (above).
