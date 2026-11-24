@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { indexTargetFile, loadManifest, resolveTargetFiles } from './discovery.mjs'
+
+const usage = `Usage: execution-points list [file] [--json]
+
+Lists what a test can select in the target modules that points.ep names: one line for each
+expression, with its place, the fields that select(file, visitor) hands to the visitor, and
+its text.
+
+  file     list this target only; without it, every target
+  --json   print the entries as one JSON array`
+
+const excerptLength = 72
+
+/** One expression as the command reports it: where an editor shows it, what a visitor sees of it, and its text on one line. */
+function entryOf({ source, relativeFile }, { id, kind, callee, operator, inFunction, nth, start, end }) {
+  // A byte-order mark is no character of the first line.
+  const linesBefore = source.slice(source.charCodeAt(0) === 0xfeff ? 1 : 0, start).split(/\r\n|\r|\n/)
+  const text = source.slice(start, end).replace(/\s+/g, ' ')
+  return {
+    file: relativeFile,
+    line: linesBefore.length,
+    column: linesBefore.at(-1).length + 1,
+    id,
+    kind,
+    ...(callee !== undefined ? { callee } : {}),
+    ...(operator !== undefined ? { operator } : {}),
+    inFunction,
+    nth,
+    text: text.length > excerptLength ? `${text.slice(0, excerptLength - 1)}…` : text,
+  }
+}
+
+/** The line for one entry: its place, its fields under the names a visitor reads, and its text. */
+function lineOf({ file, line, column, id, text, ...fields }) {
+  const named = Object.entries(fields).map(([name, value]) => `${name}=${value}`)
+  // The id is the longest field and the least read one, so it comes last.
+  return `${file}:${line}:${column}  ${named.join(' ')} id=${id}  ${text}`
+}
+
+/** Runs one command line in the project at `cwd`, and returns its exit code. */
+export function run(argv, { cwd = process.cwd(), out = console.log, err = console.error } = {}) {
+  const flags = argv.filter((arg) => arg.startsWith('-'))
+  const [command, asked, ...more] = argv.filter((arg) => !arg.startsWith('-'))
+  if (flags.includes('--help') || flags.includes('-h')) {
+    out(usage)
+    return 0
+  }
+  if (command !== 'list' || more.length || flags.some((flag) => flag !== '--json')) {
+    err(usage)
+    return 2
+  }
+
+  let files
+  try {
+    const manifest = loadManifest(cwd)
+    const targets = resolveTargetFiles(cwd, manifest.targets)
+    const file = asked === undefined ? undefined : resolve(cwd, asked)
+    if (file && !existsSync(file)) throw new Error(`[execution-points] ${asked} does not exist.`)
+    if (file && !targets.includes(file)) {
+      throw new Error(
+        `[execution-points] ${asked} is not a target: add it to "targets" in ${relative(cwd, manifest.manifestPath)} to select its expressions.`,
+      )
+    }
+    // A target that the manifest lists and the disk lacks is left out, as the plugin leaves it out.
+    files = file ? [file] : targets.filter((target) => existsSync(target))
+  } catch (error) {
+    err(error.message)
+    return 1
+  }
+
+  const entries = files.flatMap((file) => {
+    const indexed = indexTargetFile(file, readFileSync(file, 'utf8'), cwd)
+    return indexed.nodes.map((node) => entryOf(indexed, node))
+  })
+  if (flags.length) out(JSON.stringify(entries, null, 2))
+  else for (const entry of entries) out(lineOf(entry))
+  if (!entries.length) {
+    err('[execution-points] Nothing to select: a call, a binary operation, or a ternary in a file with an import or export.')
+  }
+  return 0
+}
+
+// `npx execution-points` starts this file through a link.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exitCode = run(process.argv.slice(2))
+}

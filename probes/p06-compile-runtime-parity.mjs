@@ -12,7 +12,8 @@ function runtimeIds(root, rel) {
   const file = join(root, rel)
   const res = plugin.transform.call(ctx, readFileSync(file, 'utf8'), file)
   if (!res) return null
-  const m = /__epRegister\w*\((".*?"), (\[.*?\])\);\n/s.exec(res.code)
+  // registerFile(file, nodes, homes): the nodes are the second argument.
+  const m = /__epRegister\w*\((".*?"), (\[.*?\]), \[[\d,]*\]\);\n/s.exec(res.code)
   return JSON.parse(m[2]).map((n) => n.id)
 }
 

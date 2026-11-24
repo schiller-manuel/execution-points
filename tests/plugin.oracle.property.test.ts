@@ -98,7 +98,7 @@
  * left to Vite. Code that reads its own source text sees the instrumented text. P7 judges
  * what the hook contributes, not that Vitest loads the setup module.
  */
-import fs, { mkdirSync } from 'node:fs'
+import fs, { mkdirSync, readFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import fc from 'fast-check'
 import { mergeConfig } from 'vite'
@@ -1701,7 +1701,7 @@ oracleProperty({
 // Law P6: Without `targets`, the plugin reads them from points.ep in the Vite root
 // ---------------------------------------------------------------------------
 
-// What `points.ep` in the root holds. Only the first two are manifests.
+// What `points.ep` in the root holds; most of these are no manifests.
 const MANIFESTS = {
   'lists-a': JSON.stringify({ targets: ['a.js'] }),
   'lists-a-with-schema': JSON.stringify({
@@ -1709,13 +1709,18 @@ const MANIFESTS = {
     tsconfig: 'tsconfig.json',
     targets: ['a.js'],
   }),
+  'lists-nothing': JSON.stringify({ targets: [] }),
   missing: undefined,
   'not-json': '{ "targets": [',
   'not-an-object': '["a.js"]',
+  'a-text': '"a.js"',
   'no-targets': JSON.stringify({ tsconfig: 'tsconfig.json' }),
   'targets-is-a-path': JSON.stringify({ targets: 'a.js' }),
   'target-is-a-number': JSON.stringify({ targets: ['a.js', 42] }),
+  'tsconfig-is-a-list': JSON.stringify({ targets: ['a.js'], tsconfig: ['tsconfig.json'] }),
+  'schema-is-a-number': JSON.stringify({ targets: ['a.js'], $schema: 7 }),
   'unknown-key': JSON.stringify({ targets: ['a.js'], tsconfg: 'tsconfig.json' }),
+  'key-of-every-object': JSON.stringify({ targets: ['a.js'], toString: 'tsconfig.json' }),
 } as const
 type ManifestKind = keyof typeof MANIFESTS
 
@@ -1734,6 +1739,46 @@ const enumeratedManifestHistories: ReadonlyArray<ManifestHistory> = (
   ),
 )
 
+// The schema the package ships is what says what a manifest is.
+const manifestSchema = JSON.parse(readFileSync(new URL('../points.schema.json', import.meta.url), 'utf8')) as JsonSchema
+interface JsonSchema {
+  type?: string
+  properties?: Record<string, JsonSchema>
+  required?: Array<string>
+  additionalProperties?: boolean
+  items?: JsonSchema
+}
+const JUDGED = ['$schema', '$id', 'title', 'description', 'type', 'properties', 'required', 'additionalProperties', 'items']
+
+/** Whether a JSON schema of the few keywords that points.schema.json uses accepts the value. */
+function schemaAccepts(schema: JsonSchema, value: unknown): boolean {
+  const unjudged = Object.keys(schema).find((keyword) => !JUDGED.includes(keyword))
+  if (unjudged || !['object', 'array', 'string'].includes(schema.type!)) {
+    throw new Error(`points.schema.json says "${unjudged ?? schema.type}", which this oracle cannot judge`)
+  }
+  if (schema.type === 'string') return typeof value === 'string'
+  if (schema.type === 'array') return Array.isArray(value) && value.every((item) => !schema.items || schemaAccepts(schema.items, item))
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const properties = schema.properties ?? {}
+  return (
+    (schema.required ?? []).every((key) => Object.hasOwn(value, key)) &&
+    Object.entries(value).every(([key, item]) =>
+      Object.hasOwn(properties, key) ? schemaAccepts(properties[key]!, item) : schema.additionalProperties !== false,
+    )
+  )
+}
+
+/** The targets a manifest lists, if the text is JSON that the schema accepts. */
+function listedBy(manifest: ManifestKind): Array<string> | undefined {
+  let value: unknown
+  try {
+    value = JSON.parse(MANIFESTS[manifest] ?? '')
+  } catch {
+    return undefined
+  }
+  return schemaAccepts(manifestSchema, value) ? (value as { targets: Array<string> }).targets : undefined
+}
+
 /**
  * Explicit targets decide alone, and the manifest is not read. Without them the manifest
  * decides; a manifest that cannot be read or is not one stops the build with its name. The
@@ -1745,9 +1790,15 @@ function manifestModel(history: ManifestHistory) {
     const targets = history.explicit === 'lists-b' ? ['b'] : []
     return { start: { outcome: 'ok', ...quiet }, instrumented: targets, transformReads: 0, afterWatchChange: quiet }
   }
-  if (!history.manifest.startsWith('lists-a')) return { start: { outcome: 'error names points.ep', ...quiet, manifestReads: 1 } }
+  const listed = listedBy(history.manifest)
+  if (!listed) return { start: { outcome: 'error names points.ep', ...quiet, manifestReads: 1 } }
   const reads = { manifestReads: 1, watchesManifest: true }
-  return { start: { outcome: 'ok', ...reads }, instrumented: ['a'], transformReads: 0, afterWatchChange: reads }
+  return {
+    start: { outcome: 'ok', ...reads },
+    instrumented: listed.includes('a.js') ? ['a'] : [],
+    transformReads: 0,
+    afterWatchChange: reads,
+  }
 }
 
 oracleProperty({
@@ -1759,7 +1810,7 @@ oracleProperty({
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: one source of truth for targets: executionPoints() reads points.ep by default, explicit options still win, and the manifest has a published JSON schema.',
     limits:
-      'Two target modules, nine contents of points.ep, three forms of explicit targets, and both sources of the root.',
+      'Two target modules, fourteen contents of points.ep, three forms of explicit targets, and both sources of the root. What a manifest is, the model takes from points.schema.json, read with the few schema keywords that file uses.',
   },
   histories: {
     enumerated: enumeratedManifestHistories,

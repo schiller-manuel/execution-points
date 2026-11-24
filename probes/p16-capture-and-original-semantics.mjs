@@ -1,9 +1,8 @@
 // Probe: runtime semantics a test author could trip over (captures in the temporal dead zone,
 // calling original() late or twice, async handler on a sync point from untyped code).
-import { instrument, runtime } from './lib.mjs'
+import { discovery, instrument, runtime } from './lib.mjs'
 
-const p = instrument({
-  'src/app.ts': `export function early() {
+const source = `export function early() {
   const r = peek()          // runs before "limit" is initialized
   const limit = 5
   function peek() { return compute(1) }
@@ -27,27 +26,26 @@ function bump() { return ++counter }
 export function ordered(log) { return first(log) + second(log) }
 function first(log) { log.push('first'); return 1 }
 function second(log) { log.push('second'); return 2 }
-`,
-})
+`
+const p = instrument({ 'src/app.ts': source })
 const app = await p.load('src/app.ts')
 const ids = (callee) => runtime.select('src/app.ts', (n) => n.callee === callee && n)
 
-// 1. A local that discovery offers for capture but that is still uninitialized when the point runs.
-const descriptor = []
-runtime.select('src/app.ts', (n) => { if (n.callee === 'compute') descriptor.push(n.id); return n.callee === 'compute' && n })
-try {
-  const out = ids('compute').capture('limit').withReplacement(({ locals }) => locals.limit, () => app.early())
-  console.log(`capture('limit') at compute(1): handler saw ${out}`)
-} catch (error) {
-  console.log(`capture('limit') at compute(1) -> ${error.constructor.name}: ${error.message}   (without the capture, early() returns ${app.early()})`)
-}
-
-// 1b. Same class, inside a switch: an outer "a" is offered, but a later case declares its own "a".
-try {
-  const out = ids('send').capture('a').withReplacement(({ locals }) => locals.a, () => app.route(0))
-  console.log(`capture('a') at send(k) inside switch: handler saw ${JSON.stringify(out)}`)
-} catch (error) {
-  console.log(`capture('a') at send(k) inside switch -> ${error.constructor.name}: ${error.message}   (without the capture, route(0) returns ${app.route(0)})`)
+// 1. Captures in the temporal dead zone (F14, fixed). `limit` is declared before `peek` is, but
+//    `peek` is called first; in `route`, a later case declares an `a` of its own. Discovery offers
+//    neither, and every capture it does offer can be read when the point runs.
+const offered = new Map(
+  discovery.indexTargetFile(`${p.root}/src/app.ts`, source, p.root).nodes.map((n) => [n.callee, n.captures]),
+)
+for (const [callee, run] of [['compute', () => app.early()], ['send', () => app.route(0)]]) {
+  const names = offered.get(callee)
+  try {
+    let seen
+    const result = ids(callee).capture(...names).withReplacement(({ locals, original }) => { seen = Object.keys(locals); return original() }, run)
+    console.log(`${callee}(...): captures offered ${JSON.stringify(names)} -> read inside the call: ${JSON.stringify(seen)}, and the function still returns ${JSON.stringify(result)}`)
+  } catch (error) {
+    console.log(`${callee}(...): captures offered ${JSON.stringify(names)} -> ${error.constructor.name}: ${error.message}`)
+  }
 }
 
 // 2. original() twice, and original() after the scope has ended.

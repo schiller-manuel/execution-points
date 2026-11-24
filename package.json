@@ -4,6 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Experimental AST-selected expression replacement with local capture and virtual TypeScript checking",
+  "bin": {
+    "execution-points": "./src/cli.mjs"
+  },
+  "files": [
+    "src",
+    "points.schema.json"
+  ],
   "engines": {
     "node": ">=24"
   },
@@ -12,6 +19,7 @@
       "types": "./src/runtime.d.ts",
       "default": "./src/runtime.mjs"
     },
+    "./points.schema.json": "./points.schema.json",
     "./runtime": "./src/runtime.mjs",
     "./vite": "./src/plugin.mjs"
   },

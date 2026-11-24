@@ -119,16 +119,48 @@ Each function body is emitted twice: once as written, and once with every select
 
 Once a replacement is installed for an expression, the function that contains it runs its wrapped form for the rest of the worker. The emitted code is about twice the size of the wrapped form alone.
 
+## List what a test can select
+
+In an editor, `node.` inside a `select` visitor completes to what the file offers. In a terminal, ask the package:
+
+```sh
+npx execution-points list examples/checkout.ts
+```
+
+```text
+examples/checkout.ts:39:17  kind=CallExpression callee=send inFunction=checkout nth=0 id=examples/checkout.ts#checkout:CallExpression:send:0  getClient().send(order.id, attempt++)
+examples/checkout.ts:39:17  kind=CallExpression callee=getClient inFunction=checkout nth=0 id=examples/checkout.ts#checkout:CallExpression:getClient:0  getClient()
+```
+
+Each line is one selectable expression of the target: where it starts (`file:line:column`, both counted from 1), the fields a visitor reads under the names it reads them by, and the expression's text on one line, cut to 72 characters. So `grep callee=send` finds the call, and `node.callee === 'send' && node` selects it.
+
+| Command | Prints |
+| --- | --- |
+| `npx execution-points list <file>` | The selectable expressions of one target file. |
+| `npx execution-points list` | The same for every target that `points.ep` lists. |
+| `npx execution-points list --json` | The same entries as one JSON array (`file`, `line`, `column`, `id`, `kind`, `callee` or `operator`, `inFunction`, `nth`, `text`). |
+
+The command lists exactly what the Vite plugin registers when the tests run. It reads `points.ep` in the directory it is started in. A file that is not a target, a file that does not exist, and a missing or broken manifest are answered with a reason on the error stream and exit code 1; a command line it does not understand, with the usage and exit code 2. Field values are printed as they are, so use `--json` when a name could hold a space.
+
 ## Configuration
 
-`points.ep` lists the target application modules to index (explicit paths or glob patterns) and anchors the TypeScript 7.1 content mapper. Test files do not need to be listed or transformed:
+`points.ep` lists the target application modules (explicit paths or glob patterns) and anchors the TypeScript 7.1 content mapper. It is the one list of targets: TypeScript, the Vite plugin, and `execution-points list` all read it. Test files do not need to be listed or transformed:
 
 ```json
 {
+  "$schema": "./node_modules/execution-points-prototype/points.schema.json",
   "tsconfig": "tsconfig.json",
   "targets": ["examples/checkout.ts", "examples/expressions.ts"]
 }
 ```
+
+| Key | Meaning |
+| --- | --- |
+| `targets` | Required. The target modules: paths and glob patterns, relative to the manifest. |
+| `tsconfig` | The tsconfig that describes the targets. Defaults to `tsconfig.json` beside the manifest. |
+| `$schema` | Where `points.schema.json` is, so that an editor checks and completes the manifest. |
+
+The package ships the manifest's JSON schema as `points.schema.json`. A manifest with any other key, or with `targets` that is not a list of paths, is refused by name when the plugin or the `list` command reads it. (Inside this repository itself, `points.ep` refers to `./points.schema.json`.)
 
 Register the content mapper in `tsconfig.json` and include `points.ep`:
 
@@ -146,6 +178,24 @@ Register the content mapper in `tsconfig.json` and include `points.ep`:
 
 (Inside this repository itself, `tsconfig.json` uses `"package": "."` to point at the local package root.)
 
+Add the plugin to `vitest.config.mjs`. Called without arguments, it reads the targets from `points.ep` in the Vite root, so Vitest and TypeScript share one list:
+
+```js
+import { defineConfig } from 'vitest/config'
+import { executionPoints } from 'execution-points-prototype/vite'
+
+export default defineConfig({
+  plugins: [executionPoints()],
+  test: {
+    include: ['examples/**/*.test.ts'],
+    environment: 'node',
+    isolate: true,
+  },
+})
+```
+
+The plugin also adds the package's Vitest setup module, `execution-points-prototype/vitest`, to `test.setupFiles`, next to any setup files of your own: after each test it fails the test when a replacement did not run as often as the test said. `executionPoints({ targets: [...] })` lists the targets in the config instead; explicit targets win and the manifest is then not read. `executionPoints({ root })` names the directory that holds `points.ep` when it is not the Vite root.
+
 ### VS Code setup
 
 Content mappers require **TypeScript 7.1** (`tsgo`), not VS Code's bundled TypeScript version. `.vscode/settings.json` in this repo already sets `"typescript.tsdk"`, `"js/ts.tsdk.path"`, `"js/ts.contentMappers.enabled": true`, and `"js/ts.experimental.useTsgo": true`, **but VS Code will still use its bundled TypeScript until you opt in**:
@@ -154,24 +204,7 @@ Content mappers require **TypeScript 7.1** (`tsgo`), not VS Code's bundled TypeS
 2. Run **TypeScript: Select TypeScript Version…** from the Command Palette and choose **Use Workspace Version** (`7.1.0-dev...`).
 3. If you see `ExecutionPointFileRegistry is empty` in the editor, check the TypeScript version indicator in the status bar and run **TypeScript: Restart TS Server**.
 
-`vitest.config.mjs` reads `points.ep` directly via `loadManifest()` so Vitest and TypeScript share a single configuration:
-
-```js
-import { defineConfig } from 'vitest/config'
-import { executionPoints } from 'execution-points-prototype/vite'
-import { loadManifest } from './src/discovery.mjs'
-
-const points = loadManifest(import.meta.dirname)
-
-export default defineConfig({
-  plugins: [executionPoints(points)],
-  test: {
-    include: ['examples/**/*.test.ts'],
-    environment: 'node',
-    isolate: true,
-  },
-})
-```
+To have VS Code check `points.ep` against its schema, treat the file as JSON: `"files.associations": { "*.ep": "json" }`.
 
 ## How the types work
 
@@ -185,10 +218,18 @@ TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfi
 
 ## Supported subset and limits
 
-- Targets are TypeScript modules configured in `points.ep`. Global scripts are skipped.
-- Indexed target kinds are ordinary `CallExpression`, non-assignment `BinaryExpression`, and `ConditionalExpression` nodes (including nested expressions).
-- Reference-only positions and expressions containing `await`, `yield`, `super`, optional chains, dynamic `import()`, or direct `eval` are skipped.
+- Targets are TypeScript modules configured in `points.ep`. A file with no import or export is a global script: it is skipped by the type registry, by the Vite plugin, and by `execution-points list` alike.
+- Selectable expressions are calls, binary operations that do not assign, and ternaries, including nested ones.
+- An expression is skipped only where moving it into a function of its own, which is how it is intercepted, would change what the code does:
+  - where JavaScript needs a place and not a value: the target of an assignment, the operand of `delete`, `++`, or `--`;
+  - a binary operation or ternary that is itself called, constructed, or used as a template tag. A call is selectable there, as `make(a)` is in `make(a)(b)`: its result carries no receiver;
+  - an expression that itself awaits, yields, calls `super(...)`, evaluates code with a direct `eval`, or imports with `import()`. What a function inside the expression does is its own business: `retry(async () => { await load() })` and `super.save(id)` are selectable;
+  - a part of an optional chain that goes on behind it without a `?.` of its own, such as `o?.find(1)` in `o?.find(1).name(2)`. The chain as a whole, a chain inside an argument, and `o?.find(1)` in `o?.find(1)?.name(2)` are selectable.
+- `new X()`, property reads, and an `await` itself are not selectable kinds.
+- Captures are the local names that are initialized every time the code reaches the expression, in every order in which it can be called. A name that a later `case` of the same `switch` declares, and a name that is declared after the first use of the function declaration the expression is in, are not offered. Module-level bindings are never captures, a `var` is offered like a `let` written in its place, and the name of a class is not offered inside that class.
 - Captures expose explicitly selected binding values via lazy thunks; objects retain normal mutability while the `locals` container is shallowly frozen with a null prototype.
+- The plugin leaves what must come first in a file where it is: a byte-order mark, a shebang line, and leading directives such as `'use client'`.
+- Code that reads its own source text (`fn.toString()`) sees the instrumented text.
 - The runtime uses Node `AsyncLocalStorage` to isolate concurrent and nested async replacement scopes.
 
 ## Source layout
