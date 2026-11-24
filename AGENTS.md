@@ -5,7 +5,11 @@ and runnable, and continue discussing unresolved API choices with the user.
 
 ## Agreed direction
 
-- Select an expression externally using an existing AST query language.
+- Select an expression externally with `select(file, visitor)`: an ordinary
+  TypeScript callback that narrows the file's typed union of selectable
+  expressions and returns the one it wants. `select` is the only selection API;
+  the earlier query-string API built on an AST query language was replaced by
+  it.
 - Leave authored application source unchanged; instrument it during tests.
 - Run application code and replacement callbacks in the same Node test worker.
 - Use ordinary TypeScript files and virtual compiler projections for types.

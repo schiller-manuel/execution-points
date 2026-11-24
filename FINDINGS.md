@@ -12,17 +12,26 @@ Nothing in `src/`, `tests/`, or `bench/` was changed by this review. The laws be
 - **Two more type-generation defects** leave the editor with stale types (F2) and make expressions unselectable when the project declares global types outside the targets (F3).
 - **The oracles are green but hold less than that suggests.** The gap check misses 248 of 1,472 small code changes (17%), all in `contracts.mjs` and `content-mapper.mjs`. It notices every small change in `runtime.mjs`, `discovery.mjs`, and `plugin.mjs`, yet seven deliberately wrong versions of the runtime, discovery, plugin, and type contract pass every oracle file. No law compiles the generated registry, which is why F1 went unseen.
 - **Listing a module as a target makes it run 30 to 120 times slower** even when no test replaces anything (F6). Resolving the registry once per module instead of once per call recovers about two thirds of that.
+- **A second type-generation defect hits the benchmark directly.** A type that cannot be written as a helper leaves its name behind with no definition (F16). `AbortController` is one, so the benchmark's own reference fix for `cancel-commit` fails the treatment-only typecheck.
 - **Do not rerun the whole benchmark now.** The runtime, plugin, and discovery code are byte-identical to the last paid run; only the types and twelve lines of the treatment guide changed. A full rerun would cost about 2,700 credits and, by the protocol's own power calculation, could not reach significance. The section "Should the benchmark be rerun" gives the sequence I recommend instead.
-- **The benchmark measures regression-test quality, not bug fixing.** Across all 138 stored trials the hidden grader passed 68 of 69 in each arm. Every difference in `solved` comes from one component, `adequateReproduction`.
+- **The benchmark measures regression-test quality, not bug fixing.** Across all 138 stored trials the hidden grader passed 68 of 69 in each arm. Every difference in `solved` comes from one component, `adequateReproduction`, and on `cancel-commit`, the only equal-capability task with signal, that component changes between identical re-gradings.
 
-## Decisions needed
+## Decisions
 
-1. F1, F2, F3, F8, F9, F10, F14, F15: is each a bug, or intended? Each one becomes a law and a failing history first, then a fix. F1 also needs Law C3 of the contracts oracle changed, which is yours to approve.
+Made on 2026-11-24 by Manuel Schiller:
+
+- `select` replaced the earlier query-string API. `AGENTS.md` is corrected.
+- F6: performance must be optimal. The design chosen from the measurements is in F6; the work is in progress.
+- F7: a replacement that never runs must be loud, or at least noticeable. API options are in F7; none is chosen yet.
+
+Still open:
+
+1. F1, F2, F3, F8, F9, F10, F14, F15, F16: is each a bug, or intended? Each one becomes a law and a failing history first, then a fix. F1 also needs Law C3 of the contracts oracle changed, which is yours to approve.
 2. F4: should the promise that selector breaks are loud cover `nth`, or should `nth` be documented as the one selector that can retarget silently?
-3. F5 and F7: should a replacement that never runs fail the test by default, and should there be a scope that is not tied to the async context?
-4. F6: is there a performance budget for instrumented code with no replacement active? If so it can become a `work` bound in the runtime oracle.
-5. The potential laws in "Oracle suites": approve, change, or reject each. Law 1 (the registry compiles and means the same type) is the one that would have caught F1.
-6. Two statements that disagree and need one answer: `AGENTS.md` says selection uses "an existing AST query language" while an adopted law says `select` is the sole selection API; and repeated `original()` is called provisional while a law enforces its exact count.
+3. F5: should there be a scope that is not tied to the async context, for tests against a running server or worker?
+4. F7: which API, and for an async action whether the returned promise may reject or the test fails at its end.
+5. Repeated `original()`: `AGENTS.md` and `README.md:105` call it provisional while runtime Law 2 enforces the exact count. Either settle it as "evaluates on every call" or move the count out of the law.
+6. The potential laws in "Oracle suites": approve, change, or reject each.
 7. The benchmark sequence at the end of this file: approve, or change.
 
 ---
@@ -175,7 +184,20 @@ With the drain loop, A's replacement either leaks onto B's work or never runs fo
 
 **Two readings:** (a) this is the documented meaning of async-context scoping (`README.md:99-101`) and needs a warning plus a way to notice (F7). (b) Tests need a second scope that is not tied to the async context, for code with shared workers, batchers, and pools.
 
-**Why it matters:** queues are the usual fix for the concurrency bugs this tool is aimed at, and several of the benchmark's calibrated valid fixes are queue designs. A test written against a promise-chain fix can hang or pass vacuously against a drain-loop fix. Probe: `p13-scope-vs-shared-worker.mjs`.
+**Who is affected:** any test whose work runs in an async context that began before the scope. Unit-style tests that call a function directly are not.
+
+| Application shape | A replacement around the test's call |
+| --- | --- |
+| HTTP server started in `beforeAll`, test calls it with `fetch` | does not apply |
+| polling loop (`setInterval`) started at startup | does not apply |
+| batcher where another caller opened the batch | does not apply |
+| drain-loop queue started by another caller | does not apply, or leaks onto the other caller |
+| event listener with a synchronous `emit` | applies |
+| mutex with a waiter list | applies |
+| callback registered earlier, called inside the scope | applies |
+| HTTP server started inside the scope | applies |
+
+The first row is the ordinary integration test. In the benchmark it never showed: every calibrated valid fix that queues work uses a promise chain. Probes: `p13-scope-vs-shared-worker.mjs`, `p23-who-is-outside-the-scope.mjs`.
 
 ### F6. An instrumented module runs 30 to 120 times slower with no replacement active
 
@@ -196,7 +218,16 @@ What-if measurements on throwaway copies of the runtime (production untouched):
 | registry resolved once per module instead of per call | 33x | 12x |
 | a flag check emitted around each point, original expression in the else branch | 9.6x | 1.1x |
 
-**Why it matters:** targets are listed by glob, so a whole `src/` tree pays this in every test, including tests that never use the library. Suites with compute-heavy paths slow down by an order of magnitude or more. The first variant is a one-line change.
+**Why it matters:** targets are listed by glob, so a whole `src/` tree pays this in every test, including tests that never use the library. Suites with compute-heavy paths slow down by an order of magnitude or more.
+
+**Decision (2026-11-24): performance must be optimal.** Two designs that keep today's wrappers only for files in which a test has installed a replacement, hand-written for the same two functions:
+
+| Design | `sum` | `fib` |
+| --- | --- | --- |
+| one flag check at each outermost expression of a statement | 8 to 9.5x | 1.0x |
+| one flag check per function call, the original body untouched behind it | 1.0 to 1.1x | about 1.0x |
+
+The second is indistinguishable from uninstrumented code and is the one being built. Why one check per call is enough: a function invocation's async context is fixed when it starts, so if no replacement for the file exists at that moment, none can apply to that invocation later, across `await` too. Generators resume in their caller's context, so they keep the per-expression check, as do module top-level code, parameter defaults, field initializers, and constructors. The price is emitted code about twice as large.
 
 **A caution on the numbers:** ratios were 61x to 191x in an earlier run on a loaded machine. Rerun on your hardware before quoting them. Probes: `p10-runtime-overhead.mjs`, `p17-overhead-what-if.mjs`.
 
@@ -211,6 +242,15 @@ action that never reaches the point -> result=10, handler fired 0 times, no erro
 ```
 
 This is how a test stops testing anything after a refactor moves the call out of the path, and it is the only way to notice F5. Probe: `p04-silent-never-fired.mjs`.
+
+**Decision (2026-11-24): it must be loud, or at least noticeable.** API options, not yet chosen:
+
+1. **Strict by default.** `withReplacement(handler, action)` fails when the handler never ran. A third argument covers the other cases: `{ times: 0 }` means the point must not be reached, and fails even when the application swallows what the handler throws; `{ times: 2 }` means exactly twice; `{ times: 'any' }` is today's behavior. A synchronous action fails when it returns. For an async action there is a choice: the returned promise rejects, which means it can no longer be the same promise the action returned (`README.md:99` promises that today); or the promise is left alone and the test fails at its end through a hook the Vite plugin registers.
+2. **A built-in pause whose `reached` rejects** as soon as the action settles without reaching the point. Today that case is a test timeout with no explanation. `const gate = point.pause(); const a = gate.run(() => op()); await gate.reached; ...; gate.release()`.
+3. **`using r = point.replace(handler)`.** Active for the whole worker until the block ends, restored and verified on dispose. It is also the scope F5 lacks. It is wrong for concurrent tests in one worker, which keep `withReplacement`.
+4. **`point.calls`** for explicit assertions. Noticeable, not loud.
+
+Recommended: 1 and 2, with 3 for server tests and 4 as a small extra.
 
 ### F8. The runtime accepts capture names that are not locals
 
@@ -354,6 +394,26 @@ The error is thrown inside the application call, and the registry gives the capt
 
 `README.md:61` says the replacement's result must match the selected expression's inferred type. Both shapes tried are wrong; the control passes. Probe: `p21-registry-type-fidelity.mjs`.
 
+### F16. A type that cannot be written as a helper leaves its name behind
+
+**Kind:** possible bug.
+
+**The class:** `emitHelper` records a helper's name before it has built the helper's body (`src/contracts.mjs:307-322`). When building the body fails (more than 24 members, a generic method), the first expression that needs the type is marked unportable, and every later expression or local with the same type gets the recorded name, for which no interface was emitted.
+
+```text
+## AbortController local seen by two expressions
+   helper names referenced: ..., __EP_AbortSignal_2, __EP_AbortController_1 | defined: __EP_EventListenerOptions_5, __EP_EventTarget_4, __EP_Event_3
+   registry errors: TS2304: Cannot find name '__EP_AbortSignal_2'. | TS2552: Cannot find name '__EP_AbortController_1'.
+## private interface with 25 members, returned twice
+   "src/app.ts#a:CallExpression:make:0"  UNSELECTABLE "Object type has too many properties to inline in a virtual contract."
+   "src/app.ts#b:CallExpression:make:0"  result __EP_Wide_1
+   registry errors: TS2304: Cannot find name '__EP_Wide_1'.
+```
+
+**Why it matters:** `AbortController` and `AbortSignal` are how async code is cancelled, so this is common in exactly the code the tool is for. As with F1, the whole project fails `tsc`. The benchmark's reference fix for `cancel-commit` uses `AbortController`; an independent audit graded that fix under both arm labels and it was solved as control and unsolved as treatment, on `contractTypecheckPass` alone. No stored trial hit it.
+
+**How often:** both shapes tried; the control with a 3-member interface is fine. Probe: `p22-dangling-helper-names.mjs`. Potential law 1 would catch it.
+
 ### What held
 
 - All baseline checks pass at `b26e2c1`: `pnpm check`, `pnpm test` (353 tests), `pnpm verify` (16 checks), `node bench/run.mjs --self-test` (57 variants, 16 mutants, 8 cheats).
@@ -419,7 +479,7 @@ The first four are one-to-four-line edits found by an independent review of the 
 
 | Inconsistency | Where |
 | --- | --- |
-| `AGENTS.md` "Agreed direction" says to select "using an existing AST query language". Runtime Law 4 records a decision of 2026-11-22 that "`select` is the sole selection API". One of the two is stale. | `AGENTS.md`; `tests/runtime.oracle.property.test.ts:59-61` |
+| Fixed 2026-11-24: `AGENTS.md` said to select "using an existing AST query language" while runtime Law 4 records the decision that "`select` is the sole selection API". The query-string API was the earlier design; `AGENTS.md` now says so. | `AGENTS.md`; `tests/runtime.oracle.property.test.ts:59-61` |
 | `AGENTS.md` and `README.md:105` call repeated `original()` provisional and undecided. Runtime Law 2 enforces the exact evaluation count. | `tests/runtime.oracle.property.test.ts`, Law 2 model |
 | Law C3 prescribes the bare-name behavior behind F1. | `tests/contracts.oracle.property.test.ts:669` |
 | Laws cite README line numbers that have moved. For example the contracts oracle cites `README.md:170-171` for sentences now at `:173` and `:167`. The review counted ten such citations. | `tests/contracts.oracle.property.test.ts:909` |
@@ -461,9 +521,11 @@ Ordered by how much evidence there is that users need them.
 
 ## Benchmark
 
+Everything here is recomputed from the three stored `results.jsonl` files or rerun at zero credits. An independent audit of the harness produced several of the points; each one below was rechecked before it went in, and the ones I did not recheck are listed separately.
+
 ### What the stored data shows
 
-Three paid runs, 138 started trials, 69 matched blocks. Numbers below are recomputed from the three `results.jsonl` files.
+Three paid runs, 138 started trials, 69 matched blocks.
 
 | Task | Stratum | Control solved | Treatment solved | Treatment used the library | Hidden grader passed (C / T) |
 | --- | --- | --- | --- | --- | --- |
@@ -478,46 +540,59 @@ Three paid runs, 138 started trials, 69 matched blocks. Numbers below are recomp
 | `event-order` | B io-seam | 7/7 | 6/7 | 4/7 | 7/7, 7/7 |
 | `cross-module-transfer` | B io-seam | 7/7 | 7/7 | 6/7 | 7/7, 7/7 |
 
-What this supports:
+1. **The endpoint is one gate.** In the last run `solved` equals `adequateReproduction` in 80 of 80 rows. The hidden grader passed 68 of 69 trials in each arm over all runs, and 22 of the 23 unsolved trials failed `adequateReproduction`. The benchmark measures whether the agent's regression test is adequate under the harness's gates. Nothing here was hard to fix, even for `claude-haiku-5.5` at low reasoning.
+2. **In the equal-capability strata the difference is not the library.** In the last run's 28 primary blocks, treatment trials that used the library produced 1 treatment-only and 2 control-only pairs out of 11; treatment trials that used plain Vitest produced 2 and 0 out of 17. Two of the three treatment-only pairs are `vi.mock` tests on both sides. The +3.6 point difference is run-to-run variation between agents doing the same thing.
+3. **The Stratum A result is one task.** All three Stratum A discordant pairs of the last run are `stale-cache` (0/4 against 3/4). `token-session` and `double-submit` are 4/4 against 4/4, solved by control without any interception. The pilot's `token-session` gap (4/7 against 7/7 pooled) came from the single-reference gate that the log already calls biased. `stale-cache` is built so that plain Vitest has no legal way in; reporting it as a capability demonstration is fair, pooling it into "31/40 against 35/40" is not.
+4. **`cancel-commit` is graded by a coin in part.** The harness runs each variant once. I re-graded three stored trials six times each on a quiet machine: two of them flipped between adequate and inadequate (5 of 6 and 4 of 6 adequate), always on the `CC-M1-shared-stage-file` mutant. One of those is stored as unsolved. The audit's larger rerun found 6 of 14 `cancel-commit` trials unstable and 0 of 72 trials on the other nine tasks. `cancel-commit` carries the only discordant pair of the pilot's primary strata.
+5. **Library-based tests break on refactors far more often than the log says.** The log reports false greens, which are 0 for everyone. The data behind it, last run, adequate rows only:
 
-1. **Fix quality is at ceiling in both arms.** The hidden grader passed 68 of 69 trials in each arm, and 80 of 80 in the cheaper-model run. 22 of the 23 unsolved trials failed `adequateReproduction`; the other one failed the hidden grader. The benchmark therefore measures whether the agent's regression test is adequate under the harness's gates. It says nothing about whether the tool helps agents find or fix bugs, because nothing here was hard to fix, even for `claude-haiku-5.5` at low reasoning.
-2. **Six of ten tasks carry no information.** `debounce-search`, `retry-storm`, and `cross-module-transfer` are 7/7 in both arms, and three more differ by one trial. All the signal is in `stale-cache`, `token-session`, and `cancel-commit`.
-3. **The effect that exists is the capability one.** In Stratum A, where plain Vitest has no legal seam, treatment solved 18 of 20 and control 11 of 20. The protocol rightly keeps this out of the primary test. In the equal-capability strata the two runs gave 1/0 and 3/2 discordant pairs.
-4. **`cancel-commit` is weak evidence for the tool.** Treatment won 4 to 1, but only 2 of the 7 treatment agents used the library there. Both of those solved it; so did 2 of the 5 who did not, so half of treatment's wins came without it.
+| Regression tests | Buggy refactors still red | Loud break instead | Valid fixes green |
+| --- | --- | --- | --- |
+| control | 66/66 | 0 | 75/78 |
+| treatment, used the library | 38/47 | 9 (19%) | 54/61 |
+| treatment, plain Vitest | 30/30 | 0 | 33/33 |
+
+A loud break is the designed behavior, and it is better than a false green. It is still a test that stopped testing, and it happened on one refactor in five. `bench/analyze.mjs` computes the count and never prints it.
 
 ### Threats to validity
 
 | Threat | Detail | Could favor |
 | --- | --- | --- |
-| The treatment guide replaces the `vi.mock` recipe instead of adding to it | `control-guide.md:22-43` has a worked `vi.mock` example and a fake-timers note. `treatment-guide.md` has neither; it names `vi.mock` once in the first paragraph. The contrast is "library recipe instead of module-mock recipe", not "library available". In the io-seam stratum 19 of 35 treatment agents used the library where `vi.mock` is the natural tool. | either |
-| The task sources avoid everything the library cannot do | No generics, no optional chaining, one task with Node built-ins, about 60 lines per file. 0.4% of candidate expressions are hidden by the skip rule against 6 to 7% in this repository's own code (F11). F1 and F3 cannot occur in these tasks. | treatment |
-| `contractTypecheckPass` can only fail in treatment | 0 failures so far. With F1 it fails for a fix that touches `fs.stat` or similar. | control |
-| Selector coupling was fixed by changing the guide after seeing the losses | Both control-only wins in the last run were `inFunction` bound to a new helper; `72d8bc8` then told agents not to do that. A rerun measures the tuned guide. That is legitimate product iteration, but the next run is a new experiment, not a replication. | treatment |
-| Power | The protocol computes 78 to 231 blocks for 80% power at the observed discordance (`bench/PROTOCOL.md:60`). The primary strata had 21 and 28 blocks. | neither |
+| A treatment-only gate rejects valid fixes | `contractTypecheckPass` fails for a fix that uses `AbortController` (F16) or `fs.stat` (F1), whether or not the test uses the library. The benchmark's own `cancel-commit` reference fix fails it. The audit found 5 of 65 calibrated variants failing treatment `tsc`. `--self-test` typechecks baselines only, so it passes. No stored trial hit it. | control |
+| The control guide's example is one of the tasks | `control-guide.md:22-41` uses `'./storage'`, `readFromDb`, `getProfile`, and `updateProfile('u1', 'Bob')`, which are the real names in `stale-cache-seam`. The treatment guide uses placeholders. Control solved that task 7/7, treatment 6/7. | control |
+| The treatment guide replaces the `vi.mock` recipe instead of adding to it | The treatment guide has no `vi.mock` example and no fake-timers note. The contrast is "library recipe instead of module-mock recipe". In the io-seam stratum 19 of 35 treatment agents used the library where `vi.mock` is the natural tool. | either |
+| The treatment guide was tuned on the last run's failures | The selector note was added in `72d8bc8`, after the results commit, and targets exactly the two control-only pairs. The control guide has not changed. A rerun on the same tasks measures the tuning. | treatment |
+| The task sources avoid everything the library cannot do | 17 files, no generics, no optional chaining, no classes. 0.4% of candidate expressions are hidden by the skip rule against 6 to 7% in this repository's own code (F11). | treatment |
+| Any error counts as reproducing the bug | `classify` treats every failure that matches neither the timeout nor the loud-break pattern as `true_red` (`bench/run.mjs:834-849`). There is no check for `AssertionError`, although `PROTOCOL.md` section 2 says "genuine `AssertionError`". The loud-break pattern looks for `ExecutionPoint`, which matches none of the runtime's `[execution-points]` messages, so "was not instrumented" counts as a reproduction. | neither systematically |
+| The same root cause is scored differently per arm | A missing interception point is a selector break for a library test and a timeout for a `vi.mock` test. Only the timeout enters the false-red rate. | treatment, in reporting |
+| Power | The protocol's arithmetic is right (78, 125, 231 blocks) but uses a best case. Under that best case the last run's 28 primary blocks had power 0.055. At the discordance and direction actually observed, 80% power needs 1,144 blocks (last run) or 610 (pooled). | neither |
+| Pairing and provenance | Pairs are keyed on the served model name, so a row whose served name differs, or an aborted row with none, silently loses its pair (`bench/stats.mjs:77-84`). `--regrade` stamps old trials with the current checkout's provenance, so re-graded old trials would pool with a new run. | neither |
 
-An independent audit of the harness, graders, and statistics is in progress; its results will be added here.
+Reported by the audit and not rechecked by me: a harness-exception row lacks provenance fields and makes `analyze.mjs` exit instead of running the promised sensitivity analysis; 12 of 69 treatment trials tried to open a README or `dist` for the library, which the workspace does not ship; the Newcombe interval collapses to `[0, 0]` for all-concordant data and may not be the variant its name says; several E9 denominators and pilot credit intervals in `BENCHMARK-LOG.md` differ from what `analyze.mjs` prints; the log says the host-sleep row was re-graded but the stored file still has it ungradable; the default `--max-total-credits` of 300 would stop a rerun of the last matrix early (it used 377.8).
 
 ### Should the benchmark be rerun
 
 Not as a whole, and not yet.
 
-**What actually changed since the last run** (`git diff da61474 b26e2c1 --stat`): `src/contracts.mjs`, `src/runtime.d.ts`, twelve lines of `bench/guides/treatment-guide.md`, tests, and docs. `src/runtime.mjs`, `src/plugin.mjs`, and `src/discovery.mjs` are unchanged. An agent's test behaves at runtime exactly as before. The changes can affect two things: how many turns an agent spends getting a selector past the type checker, and whether small models couple selectors to helpers they invent. The second one cost treatment 2 of 40 blocks.
+**What actually changed since the last run** (`git diff da61474 b26e2c1 --stat`): `src/contracts.mjs`, `src/runtime.d.ts`, twelve lines of `bench/guides/treatment-guide.md`, tests, and docs. At that commit an agent's test behaves at runtime exactly as before. The performance work in F6 will change the plugin and runtime next.
 
 **Why a full rerun is the wrong next step:**
 
-1. It cannot answer the primary question. At about 12% discordance in the equal-capability strata, the same 69 blocks would produce about six discordant pairs, and significance needs all six on one side.
-2. Whatever it produced could not be pooled with the earlier runs. The harness refuses mismatched `toolSha256`, correctly.
-3. The library should change again first. F1 is a type-generation bug that sits in the treatment arm's grading path. Fixing F1 to F3 changes `src/contracts.mjs`, which would orphan a run made today in the same way.
-4. The design problems above (ceiling tasks, the guide contrast, task realism) would be carried into another 2,700 credits of data.
+1. It cannot answer the primary question. See the power row above.
+2. The one equal-capability task with signal is graded unstably.
+3. A treatment-only gate currently rejects the reference fix of that same task.
+4. It would compare a tuned treatment guide against an untouched control guide whose example is one of the tasks.
+5. Whatever it produced could not be pooled with the earlier runs, and the library is about to change again (F1, F6, F16).
 
 **What I would do instead, in order:**
 
-1. Fix F1, and decide F2, F3, and the guide question. Then freeze the library and guides at a tagged commit.
-2. Run a small check of the one thing the recent changes target: `claude-haiku-5.5` at low and medium on the tasks where treatment lost or adopted the library heavily (`stale-cache-seam`, `event-order`, `stale-cache`, `cross-module-transfer`), three replicates each (`--trials 3`). That is 48 trials and roughly 60 credits at the haiku rates observed. Label it exploratory. It tells you whether the selector-coupling failure is gone.
-3. Design v3 before spending on frontier models. Replace the six ceiling tasks with tasks that have headroom on the fix itself and that look like ordinary code (generics, `?.`, Node types, several hundred lines, more than one module). Make the treatment guide the control guide plus the library section. Pre-register reproduction quality as its own endpoint, since that is what the data moves. Put replicates where discordance is.
-4. Then run one pre-registered matrix sized from the power table, across the model set you care about.
+1. Library: fix F1 and F16, land F6, decide F7. Then freeze the library at a tagged commit.
+2. Harness: grade every variant several times and require agreement; typecheck every reference and valid fix in a treatment workspace during `--self-test`; require `AssertionError` for a reproduction; print still-red, loud-break, and timeout counts per arm; pair on the requested model and warn on every unmatched row.
+3. Guides: give both arms both recipes with placeholder names, and freeze them.
+4. Tasks: replace the ceiling tasks with ones that have headroom on the fix itself and look like ordinary code (generics, `?.`, Node types, several hundred lines, more than one module). Keep `stale-cache` as a labeled capability demonstration outside the pooled numbers. Make reproduction quality its own pre-registered endpoint.
+5. Then run one pre-registered matrix with at least three trials per cell, sized from the power table, and print the split by adoption next to the intention-to-treat result.
 
-If you want a number sooner than that, step 2 alone is cheap and honest. Rerunning all five models on all ten tasks today would mostly reproduce the ceiling.
+A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where treatment lost or adopted heavily, `--trials 3`, about 60 credits) would show whether the selector-coupling failure is gone. It answers nothing else.
 
 ---
 
@@ -534,7 +609,7 @@ If you want a number sooner than that, step 2 alone is cheap and honest. Rerunni
 | `p07-stale-dependency-types.mjs` | F2 |
 | `p08-e2e-node-builtin-types.mjs` | F1 through real `tsc` and Vitest |
 | `p09-e2e-instrumentation-breaks-code.mjs` | what held: instrumentation preserves behavior |
-| `p10-runtime-overhead.mjs`, `p17-overhead-what-if.mjs` | F6 |
+| `p10-runtime-overhead.mjs`, `p17-overhead-what-if.mjs` | F6, including the two candidate designs |
 | `p11-scaling.mjs` | F12, registry generation time |
 | `p12-selector-vocabulary.mjs`, `p14-nth-shifts-silently.mjs` | F4 |
 | `p13-scope-vs-shared-worker.mjs` | F5 |
@@ -544,6 +619,8 @@ If you want a number sooner than that, step 2 alone is cheap and honest. Rerunni
 | `p19-project-ambient-types.mjs` | F3 |
 | `p20-typecheck-cost-vs-file-size.mjs` | what held: typecheck cost |
 | `p21-registry-type-fidelity.mjs` | F1 (enum members), F15 |
+| `p22-dangling-helper-names.mjs` | F16 |
+| `p23-who-is-outside-the-scope.mjs` | F5: which application shapes a scope covers |
 
 `probes/lib.mjs`, `probes/types.mjs`, and `probes/e2e.mjs` are shared helpers. `e2e.mjs` builds a real consumer project with the package copied into its `node_modules`, the way `bench/toolchain.mjs` does, and runs the real `tsc` and Vitest on it.
 
@@ -551,3 +628,4 @@ If you want a number sooner than that, step 2 alone is cheap and honest. Rerunni
 
 - 2026-11-24: first version at `b26e2c1`. Library findings F1 to F13, gap check, feature ideas, benchmark assessment from the stored results. Harness audit and oracle-file review still running.
 - 2026-11-24: added the oracle-file review. Each claim taken from it was rerun before it went in. F1 widened to the project's own enums (confirmed through real `tsc`) and tied to Law C3. New F14 (captures in the dead zone, moved out of F13 and extended with the `switch` shape) and F15 (registry type differs from the expression's type). "Oracle suites" rewritten: seven wrong versions that pass every oracle file, why, law and authority inconsistencies, eight potential laws. Harness audit still running.
+- 2026-11-24: added the harness audit, each point rechecked (grading instability on `cancel-commit` re-graded by me, power recomputed, robustness counts recomputed). New F16 (dangling helper names; `AbortController`). Recorded three decisions: `AGENTS.md` corrected for `select`, performance must be optimal (F6, two designs measured, the per-call one chosen), a replacement that never runs must be loud (F7, four API options). F5 now lists which application shapes a scope covers. Benchmark section rewritten around the audit.
