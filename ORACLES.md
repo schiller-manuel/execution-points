@@ -190,3 +190,19 @@ Another session's notes, taken over as written and not rechecked by me.
 **What happened:** `baseline fail … 14 of 733 tests failed` came with one failing test's name and replay. `results.json` holds the count and the same one name. The other thirteen can only be read by running Vitest alone, which this repository's rule forbids. I reasoned my way to the list (twelve histories of one law and two calibrations bound to a failing history) and confirmed it only through the fix.
 
 **Would have helped:** every failing test's name in `results.json`, or in the log up to some number.
+
+### A law that says something is absent gets no mutant
+
+**Doing:** dropping `line` and `text` from what a visitor is handed. The plugin stops registering them and the type registry stops declaring them, and three laws now say "exactly these properties".
+
+**What happened:** the red run was clear (25 of 27, 7 of 33 and 8 of 31 tests failed on the unchanged code). After the change the gap check has nothing to say about the new clause: its mutants alter and remove code, and none puts a removed property back. A registration that carried the line again would be a wrong version no generated mutant resembles. I wrote five authored mutants that put a line or a text back, in the plugin and in the registry writer, and three wrong declarations that do the same in the types; all eight were rejected, each by the law that states the absence.
+
+**Would have helped:** a sentence in the design skill that a law of absence needs an authored mutant, since no generated one can test it. And one generated mutant I would use every time: the previous version of each changed hunk, taken from `git diff` against a commit I name. The skill already asks for "the original defect, as a mutant" by hand; for a removal the original code is exactly that mutant.
+
+### "0 unowned (warnings)" reads like a run that had warnings
+
+**Doing:** reading the summary line of a clean run of authored mutants: `28 mutants, 28 killed, 0 gaps, 0 unowned (warnings)`.
+
+**What happened:** I went looking for the warnings in `summary.md`, `stream.log` and `results.json`. There were none: "(warnings)" is the label of the unowned count (`report.mjs:440`), printed whatever the count is.
+
+**Would have helped:** leaving the label off when the count is 0, or writing it as "0 unowned".

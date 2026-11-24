@@ -302,7 +302,7 @@ examples/checkout.ts:39:17  kind=CallExpression callee=send object=getClient() i
 examples/checkout.ts:39:17  kind=CallExpression callee=getClient inFunction=checkout nth=0 inside=Function:checkout>VariableDeclarator:quote id=examples/checkout.ts#checkout:CallExpression:getClient:0  getClient()
 ```
 
-Each line is one selectable expression of the target: where it starts (`file:line:column`, both counted from 1), the fields a visitor reads under the names it reads them by, what the expression stands inside (`inside=`, outermost first: the containers a visitor object traverses into), and the expression's text on one line, cut to 72 characters. So `grep callee=send` finds the call, and `node.callee === 'send' && node` selects it. A value with a space in it is written in JSON quotes.
+Each line is one selectable expression of the target: where it starts (`file:line:column`, both counted from 1), the fields a visitor reads under the names it reads them by, what the expression stands inside (`inside=`, outermost first: the containers a visitor object traverses into), and the expression's text on one line, cut to 72 characters. The place and the text are there to find an expression by; a visitor is not handed them. So `grep callee=send` finds the call, and `node.callee === 'send' && node` selects it. A value with a space in it is written in JSON quotes.
 
 | Command | Prints |
 | --- | --- |

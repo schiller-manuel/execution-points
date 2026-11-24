@@ -10,13 +10,14 @@ The review started read-only. Since the decisions below, the findings have been 
 
 Where things stand on 2026-11-24:
 
-- **Every finding from F1 to F17 is fixed or decided. F18 is new and needs your decision:** one expression selected twice with a different capture each time compiles, and fails when the test runs (`p33`).
-- **The gap check finds nothing.** All 2,114 small changes it tries in the six source files are noticed by a law, and no function is without an owner (commit `9210720`, 16 oracle files, seed 42). At the start it noticed 1,214 of 1,472.
-- **Zero gaps was not the end.** The gap check cannot change a type declaration and does not invent a wrong design. So I wrote 19 plausible wrong implementations and 38 wrong type declarations by hand. Three of the 19 and four of the 38 passed every oracle: a captured number that follows the application's variable, a captured object that is a copy, a captured local that can be assigned, a single point accepted where a list belongs. Each is held by a law now (18 of 19, 37 of 37); the one left is F18. The same work found that the compile error for `pause()` on an expression that is no promise never printed its reason; it does now.
-- **The API changed shape on your decisions:** TypeScript sources built with `tsdown`, replacements that must run, `pause`, `replace` with `using`, `interleavings` as a generator of orders, selection through a Babel-style visitor object, `execution-points list`.
+- **Every finding from F1 to F18 is fixed or decided.** F18 is fixed on your decision: an expression that several ways lead to is one selection, and its point captures every local that any way captured (`p33`).
+- **A node no longer says where it is written.** On your decision `line` and `text` are gone from what a visitor is handed, on expressions and on containers; `object` stays. `execution-points list` prints the line and the text as before, to find an expression by.
+- **The gap check finds nothing.** All 2,117 small changes it tries in the six source files are noticed by a law, and no function is without an owner (commit `eca441d`, 16 oracle files, seed 42). At the start it noticed 1,214 of 1,472.
+- **Zero gaps was not the end.** The gap check cannot change a type declaration and does not invent a wrong design. So I wrote 19 plausible wrong implementations and 38 wrong type declarations by hand. Three of the 19 and four of the 38 passed every oracle: a captured number that follows the application's variable, a captured object that is a copy, a captured local that can be assigned, a single point accepted where a list belongs. Each is held by a law now, and so is the one that was left, F18: 31 of 31 wrong implementations and 44 of 44 wrong declarations are rejected. The same work found that the compile error for `pause()` on an expression that is no promise never printed its reason; it does now.
+- **The API changed shape on your decisions:** TypeScript sources built with `tsdown`, replacements that must run, `pause`, `replace` with `using`, `interleavings` as a generator of orders, selection through a Babel-style visitor object whose nodes carry what the code calls things, `execution-points list`.
 - **Listing a module as a target costs nothing until a test replaces something in it** (F6: 1.0x, from 30 to 120 times slower).
 - **The benchmark harness can measure the new API since v2.5.** v2.4 recognized use of the library only by `withReplacement`, and graded three of Vitest's assertion forms as plain errors. Both are fixed, each with a self-test case that fails on v2.4; see "The harness on the new library".
-- **Do not rerun the benchmark yet.** The stored runs describe the old API, the guide was rewritten with their failures in view, and three grading rules wait for you (none of them changes a stored verdict). See "Should the benchmark be rerun".
+- **The three stored benchmark runs are retired, and a full run on the current library is under way in the benchmark thread.** Both are your decisions of 2026-11-24, made there together with the two open grading rules and a third arm in which the agent is told to use the library. Harness v2.6 is built there for them; it is not merged, and I have not verified it. What this file says about the stored runs is kept as the record of the review.
 
 ### Where the review started (`b26e2c1`)
 
@@ -41,17 +42,19 @@ Made on 2026-11-24 by Manuel Schiller:
 - The four laws the type-generation work had added or reworded are approved as worded, and so are the details of `interleavings` (`order.run`, `schedule`, `released`, the `schedule` and `choose` options, which misuse throws).
 - Selection gets a second form, built on Babel's visitor pattern: an object keyed by node type, with `Function` and `Class` (Babel's alias keys) as nodes you `traverse` into. The callback form `select(file, (n) => …)` stays, with `inFunction` as it is. `inClass` is not added: traversal says "inside". Evidence that the compiler can follow traversal and cannot follow a parent chain: `p30`.
 - Schedule exploration is a primitive to compose, not a function that takes the checks: `interleavings(points)` is a generator of orders, and the caller runs the scenario and checks it in the loop body. Rebuilt that way; the first form with `run`, `check`, `setup` and `limit` options is gone.
+- "keep object, drop line and text from the selectors." Done (`eca441d`). I took "the selectors" to include the containers, so `Function`, `Class` and `VariableDeclarator` nodes lost their `line` too; say so if you meant expressions only. Discovery still records line and text, because `execution-points list` prints them.
+- F18, "yes fix this". Built as the option I had recommended: the captures of all ways are merged, on the runtime's side and on the compiler's. Done (`eca441d`, `d279bda`); see F18.
+- Benchmark, decided by you in the benchmark thread and reported to me by it. A failed assertion inside `order.run(...)` counts as a reproduction (D-20). `expect.assertions`, `expect.hasAssertions` and a snapshot mismatch count as failed assertions (D-21). The three stored runs are retired as evidence ("drop all store previous runs, they are not relevant anymore"). A third arm, `required`, tells the agent to write the regression tests with the library (D-23). And the run itself: "run the full run with all models etc when you are done setting this up. i want the full results."
 
 Still open:
 
 0. Laws the discovery and plugin work reworded or added under the direction you gave, with wording that is the delegate's. Confirm or strike: discovery D1 (a call is also selectable as the callee of `new` and as a template tag; a file with no import or export indexes nothing) and D3 (captures are exactly the locals initialized on every reach; `var` is treated like `let`); plugin P1 to P3 (global scripts return `null`; the header goes behind leading directives; a target is read only by the transform that instruments it), P5 (instrumented code does what the module does as written), P6 (without `targets` the plugin follows `points.ep`; a manifest the schema does not describe stops the build), P7 (the `config()` hook adds the setup module); and the two laws of the `list` command (it prints exactly what the plugin registers; exit codes 1 and 2).
-1. Names inside the new selector form that your decision did not fix: `object` for the receiver of a member call (ESTree's word for it, flattened), `VariableDeclarator` as a third kind of node to traverse into (for "the call that initializes `total`"), and `text` as the expression's source with whitespace collapsed. I build them as proposals and list them in the law's limits.
+1. One name inside the selector form that your decisions did not fix: `VariableDeclarator` as a third kind of node to traverse into (for "the call that initializes `total`"). It is built as a proposal and listed in the laws' limits. `object` is decided (kept), and so are `line` and `text` (dropped).
 2. New benchmark tasks: which, and in which stratum.
-3. The benchmark sequence at the end of this file: approve, or change.
+3. The benchmark sequence at the end of this file. Overtaken on 2026-11-24: you asked the benchmark thread for a full run on the current library, which follows a sequence of its own.
 4. Your global pnpm broke during this work (see "Incidents" below); say whether I should repair it.
-5. F18: one expression selected with a different capture on each way. The compiler accepts it and gives `locals` every captured name; the runtime refuses it as two matches. Either the runtime merges the captures, which is what the types already say and what I recommend, or the compiler refuses it too.
-6. Three grading rules of the benchmark, from the re-evaluation below. Should a failed assertion inside `order.run` count as a reproduction? Should the assertion-only rule apply to new runs only? Should `expect.assertions`, `expect.hasAssertions` and a snapshot mismatch count as assertions? The harness work recommends yes to all three. The first and the third are one line each in `bench/classify.mjs` (`UNDECIDED_GRADINGS`), and neither case occurs in the stored matrix.
-7. The wording of six laws written today under your direction that every feature gets oracle coverage: the five of `tests/types-point.oracle.property.test.ts` (values, waiting, options, results, argument kinds) and `runtime-captured-values`. Their rules are the README's and your decisions; the sentences are mine.
+5. The wording of the laws written or changed today under your direction that every feature gets oracle coverage. Their rules are the README's and your decisions; the sentences are mine. The five of `tests/types-point.oracle.property.test.ts` (values, waiting, options, results, argument kinds) and `runtime-captured-values`. And the three changed for the two decisions of the evening: `plugin-registers-places-and-containers` (a registration has exactly `id`, `kind`, `inFunction`, `nth`, `callee` or `operator`, and `object`; a container exactly `type`, `name` and what is inside it), `runtime-visitor-object` and `types-visitor-object` (no `line`, no `text`; the captures of all ways; each captured local read once).
+6. One clause in `types-visitor-object` that you did not ask for: the compile error for reading a local that no way captured shows the locals the point does have (`Readonly<{ each: string; }>`). My change for F18 had made the compiler print a type's name there instead, and no oracle noticed, so I made the snippet ask for it. Strike it if a message is not something you want a law about.
 
 ## Work in progress
 
@@ -69,7 +72,9 @@ Still open:
 | Benchmark harness fixes from the audit (harness v2.4) | merged; since the type-generation merge `--self-test` passes every check |
 | Benchmark harness v2.5: library use recognized by any operation, `npx execution-points list` in a treatment workspace, a classifier that reads the error's real name, no bench process writing `dist/` | merged (`9a8e0a9`); `--self-test` on the merged tree: 156 check lines pass, 0 fail |
 | F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command, the plugin adding the Vitest setup module | merged |
-| Selection by a visitor object with nested traversal (F4), plus `line`, `text` and the receiver of a member call (`object`); `list` shows `object=` and `inside=` | done through discovery, plugin, runtime, registry and CLI, with five new oracles; no gap left in it |
+| Selection by a visitor object with nested traversal (F4), plus the receiver of a member call (`object`); `list` shows `object=` and `inside=` | done through discovery, plugin, runtime, registry and CLI, with five new oracles; no gap left in it. `line` and `text` were selector properties too and were removed again on your decision (`eca441d`) |
+| F18: one expression reached on several ways with different captures | done: one selection that captures what any way captured, in the runtime and in the types (`eca441d`, `d279bda`) |
+| Benchmark harness v2.6 (grading decisions D-20 and D-21; the agent CLI refused the guide's `npx execution-points list`, D-22; a third arm that requires the library, D-23) and the full run on the current library | in work in the benchmark thread, on `t3/fix-ab-benchmark-harness`; not merged, and not verified by me |
 | Every file under `tests/` type-checks under `strict`, without `any` (F17) | done |
 | Schedule exploration: `interleavings(points)` as a generator of orders, with `schedule`, `choose`, and the `InterleavingFailure` error | done |
 | Move to TypeScript built with `tsdown`; drop run-time argument checks the compiler makes | done: every module in `src/` is TypeScript, the package ships `dist/`, and the benchmark self-test passes on it |
@@ -178,7 +183,7 @@ after ALSO editing the target (mapper re-runs, warm cache): ... loadLimit() resu
 
 ### F4. A selector that uses `nth` can move to a different expression without any error (fixed)
 
-**Fixed 2026-11-24**, by the decision "Nested traversal, keep callback too". A selector can now say where an expression stands instead of counting: `select(file, { Function: (fn) => fn.name === 'checkout' && fn.traverse({ CallExpression: (call) => call.callee === 'get' && call.object === 'cache' && call }) })`. Every expression also carries `line`, `text` and, for a call made on an object, `object`. `nth` is still there and still positional; nothing needs it any more to tell `cache.get` from `db.get`, or one function's call from another's. The compiler follows each `traverse` (`p30`), so a name that is not inside is a compile error. Four new oracles hold it: what discovery records, what the plugin registers, what the runtime selects, and what the compiler knows.
+**Fixed 2026-11-24**, by the decision "Nested traversal, keep callback too". A selector can now say where an expression stands instead of counting: `select(file, { Function: (fn) => fn.name === 'checkout' && fn.traverse({ CallExpression: (call) => call.callee === 'get' && call.object === 'cache' && call }) })`. A call made on an object also carries that object, as `object`. `nth` is still there and still positional; nothing needs it any more to tell `cache.get` from `db.get`, or one function's call from another's. For some hours every expression carried `line` and `text` as well. You had them dropped: a node says what the code calls things and not where it is written, and a selector by line breaks when a line is added above. Where two expressions differ in nothing a node carries, `nth` is what tells them apart, and `execution-points list` shows which is which. The compiler follows each `traverse` (`p30`), so a name that is not inside is a compile error. Four new oracles hold it: what discovery records, what the plugin registers, what the runtime selects, and what the compiler knows.
 
 **Kind:** inconsistency between the documented promise and the behavior.
 
@@ -517,13 +522,15 @@ both `error` and `failure` are `any`, `tsc` reports nothing, and every property 
 
 What is done about it: an order's `run` rejects with an exported class, `InterleavingFailure`, so a test writes `(error: unknown) => error` and narrows with `instanceof`, and the example does. I had also added a script that failed on such an `any`; it was removed at the maintainer's request, so nothing reports this shape automatically until the lint rule supports this compiler.
 
-### F18. One expression selected twice with different captures compiles, and fails when the test runs
+### F18. One expression selected twice with different captures compiled, and failed when the test ran (fixed)
 
 Probe: `p33`.
 
-**Kind:** design question. The compiler and the runtime disagree.
+**Fixed 2026-11-24** on your decision, as the first of the options below: an expression that several ways lead to is one selection, and its point captures every local that a handler captured on any of the ways. The runtime merges the captures and reads each captured local once; the compiler gives `locals` the captures of every way, also when one way returns the node itself.
 
-**The class:** an expression that several containers lead to is one expression; that was decided with the visitor form, and both sides agree when every way selects it alike. When the handlers capture differently on each way, they disagree:
+**Kind:** design question. The compiler and the runtime disagreed.
+
+**The class:** an expression that several containers lead to is one expression; that was decided with the visitor form, and both sides agreed when every way selected it alike. When the handlers captured differently on each way, they disagreed:
 
 ```ts
 // prefix + each lies in outer() and in the callback inside it
@@ -534,27 +541,30 @@ const point = select('src/app.ts', {
 })
 ```
 
-```text
-## the same capture on both ways
-   tsc exit=0: no error
-   vitest exit=0
-## a different capture on each way
-   tsc exit=0: no error
-   vitest exit=1
-   Error: [execution-points] Visitor for "src/app.ts" must match exactly 1 expression; matched 2.
-```
+Before, `tsc` and Vitest for four ways of writing it (`p33` on `8501d09`):
 
-The compiler gives `locals` both `prefix` and `each`. The runtime counts a selection per capture list, so it sees two, and its message says "matched 2" about one expression.
+| Case | Compiler | Test run |
+| --- | --- | --- |
+| the same capture on both ways | no error | passes |
+| a different capture on each way | no error, `locals` has both | `must match exactly 1 expression; matched 2` |
+| the node on one way, a capture on the other | `Property 'each' does not exist on type 'Readonly<{}>'` | `matched 2` |
+| captures that overlap | no error | `matched 2` |
 
-**How it was found:** a hand-written wrong version of the runtime that keeps one selection per expression whatever it captures passes every oracle. No law speaks about this case, so no history has it.
+The third row was not in the first report of F18: the compiler was wrong there too, in the other direction. Now all four compile and pass, and reading a local that no way captured is a compile error that lists the locals there are.
 
-**Options:**
+**How it was found:** a hand-written wrong version of the runtime that keeps one selection per expression whatever it captures passed every oracle. No law spoke about this case, so no history had it.
 
-1. The runtime merges the captures of one expression. This is what the types already promise, and it needs no new error.
+**The options were:**
+
+1. The runtime merges the captures of one expression. This is what the types already promised for two captures, and it needs no new error.
 2. The compiler refuses it, with a message of its own, and the runtime's message says "selected with different captures".
 3. Only the runtime's message changes.
 
-I recommend 1. Not built: it is your API.
+**Oracle first.** Seven new histories in `runtime-visitor-object` (the same, different and overlapping captures on two ways; a capture on the first way only and on the second only; one way through a function and one without a step; two expressions captured alike, which stay two) and three in `types-visitor-object`. On the unchanged code the runtime oracle failed for five of its seven (7 of 33 tests, with the calibrations bound to them), and the type oracle for the capture on one way only; all pass now.
+
+**What the compiler cannot know.** It types `locals` from everything the handlers can return. A capture on a way that the code never takes when the test runs is in the type and not in the handler's `locals`. That is stated as a limit of the type law.
+
+**A defect of my own on the way.** The first version of the type printed its own name in the error for a local that was not captured (`Readonly<ExtractCapturedLocals<CapturedSelection<…> | …>>`), where the error had listed the locals before. Every oracle passed. The snippet for that case now asks for the locals in the message; it failed on that version and passes (`d279bda`).
 
 ### What held
 
@@ -571,7 +581,7 @@ I recommend 1. Not built: it is your API.
 
 ### What the gap check shows
 
-**Now (2026-11-24, seed 42, all six sources): 2,114 small changes tried, 2,114 noticed, 0 gaps, no code without an owner.** Measured twice: at commit `71f3fdc` with 15 oracle files (`oracle-gaps: summary 6e96cb2faa3a: 2114 mutants, 2114 killed, 0 gaps, 0 unowned`), and at `9210720` with 16 (`summary 66248e0b8943`, the same counts). The last gaps before it were four endless loops in the mapper's frame reader, ten unowned changes in its standard-input block, and three in the listing's quoting. The frame reader was rewritten to walk a finite list of header ends, so a wrong length can no longer make it spin; the standard-input block became `serve(input, output)`, which an oracle drives; the process entry is two lines in `src/content-mapper-main.ts`.
+**Now (2026-11-24, seed 42, all six sources): 2,117 small changes tried, 2,117 noticed, 0 gaps, no code without an owner.** Measured three times: at commit `71f3fdc` with 15 oracle files (`oracle-gaps: summary 6e96cb2faa3a: 2114 mutants, 2114 killed, 0 gaps, 0 unowned`), at `9210720` with 16 (`summary 66248e0b8943`, the same counts), and at `eca441d`, after `line` and `text` were dropped and the captures merged (`oracle-gaps: summary 89bbf64280a5: 2117 mutants, 2117 killed, 0 gaps, 0 unowned`). `d279bda` came after the third run and changes one type declaration and one check of a type oracle, neither of which the gap check mutates. The last gaps before it were four endless loops in the mapper's frame reader, ten unowned changes in its standard-input block, and three in the listing's quoting. The frame reader was rewritten to walk a finite list of header ends, so a wrong length can no longer make it spin; the standard-input block became `serve(input, output)`, which an oracle drives; the process entry is two lines in `src/content-mapper-main.ts`.
 
 The sixteenth oracle file and one more law came between the two runs (see the next section). The only production change with them is in type declarations, which the gap check does not mutate, so the second run says that nothing was lost, not that the new laws are strong; the hand-written wrong versions say that.
 
@@ -584,13 +594,13 @@ The gap check makes small syntactic changes to JavaScript. It does not touch a t
 | | First run | After the work below |
 | --- | --- | --- |
 | Rejected by a law | 16 | 18 |
-| Passed every oracle | 3 | 1 (F18) |
+| Passed every oracle | 3 | 1 (F18; rejected since, see the second round below) |
 
 The three that passed:
 
 - **A captured number that follows the application's variable.** `locals.attempt` read the binding whenever the handler asked, instead of holding the value at interception. The README promises a snapshot; the capture law read each local once and at once, where the two look the same. This is the first review's wrong version 1, and it was still passing.
 - **A captured object that is a frozen copy.** The README promises the application's own object. The capture law only ever captured numbers. The first review's wrong version 2, still passing.
-- **One selection per expression whatever it captures.** No law says what this case owes: F18.
+- **One selection per expression whatever it captures.** No law said what this case owes. It became F18, which is decided and fixed since.
 
 The first two are held now by a law of their own, `runtime-captured-values` (the approved potential law 7): the application reassigns its binding while the handler runs, the handler writes into a captured object, and the law compares what `locals` holds before and after, whether the object is the application's own, and when each binding was read.
 
@@ -608,7 +618,15 @@ The type-level promises of the API built this month (what `returns`, `resolves`,
 
 **What became of the first review's seven wrong versions:** 1 and the copy half of 2 were still passing and are rejected now; the re-wrapped promise of 2, and 3 (three wrapper kinds, one mutant each) are rejected; 4 cannot be rebuilt as it was, because the plugin writes its source map itself now, and a stand-in (every token mapped to column 0) is rejected; 5 is rejected by 19 snippets where one stood before; 6 was still passing and is rejected now; 7 is rejected.
 
-**Limits of this.** I wrote these wrong versions, and I wrote most of the oracles: the tool's own documentation says such mutants tend to be the ones the oracle already kills. Seven of the 57 were not, which says the next person's seven are still out there. The declaration changes run beside the tool, which cannot patch a file that a test reads as text: `node checks/wrong-declarations.mjs` applies each to the built `dist/runtime.d.mts`, runs the gap check's baseline with the type oracles, and puts the file back.
+**A second round, for the two decisions of the evening** (no `line`, no `text`; one expression captures what any way captured). Twelve more wrong implementations and seven more wrong declarations, written before or right after the change:
+
+- Eight put something back that a law now says is absent. Five implementations: the plugin registering an expression's line and text, or a container's line; the registry writer declaring an expression's line, its text, or a container's line. Three declarations: an expression handed with a line or with its text, a container handed with a line. The gap check cannot make these: it alters and removes code and never adds a property.
+- Seven more implementations get the selection wrong: the captures of the last way only, a name captured on two ways read twice, different captures counted as two selections again, captures merged across two expressions, `capture()` on the point adding to a capture in the visitor or losing against it, and a returned value that is no selection counted as a match.
+- Four more declarations get the captures wrong: a capture that counts only when every way captures, a point with every local of its expression, no capture reaching the point, and the error message that names a type.
+
+All were rejected on the first run, and the one that had been passing, F18, is rejected now: **31 of 31 wrong implementations, 44 of 44 wrong declarations.** The limit stated below holds for these too: I wrote them and the laws.
+
+**Limits of this.** I wrote these wrong versions, and I wrote most of the oracles: the tool's own documentation says such mutants tend to be the ones the oracle already kills. Seven of the first 57 were not, which says the next person's seven are still out there; that none of the second round's 19 passed says less than it seems, because I wrote the laws and the wrong versions within the same hour. The declaration changes run beside the tool, which cannot patch a file that a test reads as text: `node checks/wrong-declarations.mjs` applies each to the built `dist/runtime.d.mts`, runs the gap check's baseline with the type oracles, and puts the file back.
 
 The table and the paragraphs below describe the state the review started from.
 
@@ -686,7 +704,7 @@ Each needs approval. The first five come from the library findings, the rest fro
 
 ## Feature ideas
 
-Ordered by how much evidence there is that users need them. Built: 1, 2, 3, 6, 7, 9, 10 and 11, each with its own laws. 4 is built as selection through a visitor object plus `object`, `line` and `text` on every expression; `inClass` and `assignedTo` became traversal into a `Class` and a `VariableDeclarator` (your decision). 5 is built for selecting and passing through; pausing such an expression is open. 8 is open: `new` is like a call, `await` needs a design first.
+Ordered by how much evidence there is that users need them. Built: 1, 2, 3, 6, 7, 9, 10 and 11, each with its own laws. 4 is built as selection through a visitor object plus `object` on a call; `inClass` and `assignedTo` became traversal into a `Class` and a `VariableDeclarator`, and `text` and `line` were built and then dropped (your decisions). 5 is built for selecting and passing through; pausing such an expression is open. 8 is open: `new` is like a call, `await` needs a design first.
 
 1. **A built-in pause.** By a text search of the stored trials, all 43 treatment tests that used the library wrote their own barrier, and 110 of 135 handlers end in `original()`: they wait and continue. Something like `const gate = point.pause(); const a = gate.run(() => op()); await gate.reached; ...; gate.release()` removes 15 lines from every test and from the guide, and removes the deadlock the guide has to warn about.
 2. **Reach counts and a strict mode.** `point.calls`, or `withReplacement` failing when the handler never ran unless told otherwise. Closes F7 and makes F5 visible.
@@ -704,7 +722,11 @@ Ordered by how much evidence there is that users need them. Built: 1, 2, 3, 6, 7
 
 ## Benchmark
 
-Everything here is recomputed from the three stored `results.jsonl` files or rerun at zero credits. An independent audit of the harness produced several of the points; each one below was rechecked before it went in, and the ones I did not recheck are listed separately.
+**Retired on 2026-11-24.** You decided in the benchmark thread that the three stored runs are no longer evidence ("drop all store previous runs, they are not relevant anymore"). This section stays as the record of what the review found in them and of how the harness was repaired. None of its numbers describes the current library. The files in `~/.ep-bench-results/` were not deleted.
+
+**What runs next, as the benchmark thread reported it to me; I have verified none of it.** Harness v2.6 on `t3/fix-ab-benchmark-harness` builds in your two grading decisions (D-20: a library error is graded by its cause when that cause is a failed expectation; D-21: `expect.assertions`, `expect.hasAssertions` and a snapshot mismatch count as failed assertions) and repairs one more defect (D-22: the agent CLI was started with `--deny-tool shell(npx)` in both arms, so the treatment agent was refused the `npx execution-points list` its guide names; v2.5 had tested that command in a plain shell only). Asked how to get agents to use the library more, the thread recommended a third arm in which the agent is told to use it, next to the arm in which it is offered, and changes to the guide after the first results; you agreed, and the arm is built as `required` (D-23). You then asked for the full run with all models. As the thread sized it: 1,050 trials in five passes, three arms, about 20,300 credits and about 18 hours, from that branch with `d279bda` merged in, after its self-test and a live smoke run. It had my all-clear for the machine at about 22:20 on 2026-11-24. Until it ends, no gap check should run on this machine: the grading uses 1,500 ms test timeouts.
+
+Everything below is recomputed from the three stored `results.jsonl` files or rerun at zero credits. An independent audit of the harness produced several of the points; each one below was rechecked before it went in, and the ones I did not recheck are listed separately.
 
 **State on 2026-11-24.** Harness v2.5 is merged, and its self-test passes on the current library: `Self-test PASSED: 156 check lines passed, 0 failed`, run by me on the merged tree. Nothing was rerun for credits; the stored results were only read. `node bench/analyze.mjs` on the stored matrix prints the numbers of this section (31/40 against 35/40; 66/66, 38/47 with 9 loud breaks, 30/30).
 
@@ -805,6 +827,8 @@ Reported by the audit and not rechecked by me, with what v2.4 did about each: a 
 
 ### Should the benchmark be rerun
 
+**Overtaken on 2026-11-24:** you asked for a full run on the current library (see the top of this section). What follows is what I recommended before that. Of the five reasons, the second and the fifth no longer hold: the grading rules are decided, and the API questions that were open are answered. The first, third and fourth are unchanged, and the run's result should be read with them.
+
 Not as a whole, and not yet.
 
 **What changed since the last run.** When this review started, almost nothing (`git diff da61474 b26e2c1 --stat`: the type generator, twelve lines of the treatment guide, tests, docs). Now, everything an agent touches: how an expression is selected, replacements that must run, `pause`, `interleavings`, the guide's library section, and a runtime that fails a test whose replacement never ran.
@@ -812,7 +836,7 @@ Not as a whole, and not yet.
 **Why a full rerun is the wrong next step:**
 
 1. It cannot answer the primary question. See the power row above.
-2. Three grading rules are undecided ("Still open", 6).
+2. Three grading rules are undecided. *Decided since: see "Decisions".*
 3. The treatment guide was rewritten with the stored failures in view, and the same ten tasks would measure that.
 4. The tasks avoid what the old library could not do (generics, optional chains, Node types). It can do those now, and nothing in the task set would show it.
 5. The API is not frozen: the names under "Still open" may still change.
@@ -863,11 +887,11 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 | `p30-what-the-compiler-can-follow.mjs` | F4: which ways of naming an expression leave the compiler knowing which one was meant, and what each costs to type-check |
 | `p31-mapper-input-ends.mjs` | what the content mapper has to do when its input ends: a closed TypeScript API refuses every later request, closing twice is harmless |
 | `p32-what-the-compiler-says-about-a-point.mjs` | what the compiler says about each thing a test can do with a selected point: 37 calls, 24 of them rejected, and the message each gets |
-| `p33-one-expression-two-captures.mjs` | F18 |
+| `p33-one-expression-two-captures.mjs` | F18: one expression reached on two ways with the same capture, different ones, overlapping ones, and a capture on one way only; what `tsc` and the test run make of each, and what the compiler says about a local that no way captured |
 
 `probes/lib.mjs`, `probes/types.mjs`, and `probes/e2e.mjs` are shared helpers. `e2e.mjs` builds a real consumer project with the package copied into its `node_modules`, the way `bench/toolchain.mjs` does, and runs the real `tsc` and Vitest on it. A probe that needs what the package ships builds it from the sources into its own temporary directory (`buildLibrary` in `lib.mjs`), so no probe needs `pnpm build` first and none writes the checkout's `dist/`.
 
-All 33 probes were rerun on 2026-11-24 after the merge of harness v2.5, and all exit 0. Four things had stopped working along the way, each through an earlier change of mine, and are repaired. The helper through which nine probes read the registry's expressions (`nodeLines` in `types.mjs`) expected the layout the registry had before the selector work, so it found none, and `p21` failed outright. `p10` installed a replacement that is not meant to run, which the strict default refuses. `p24` had a comment with backticks inside a template string. `p05` lost its two third-party packages when the throwaway projects moved to the OS temp directory.
+All 33 probes were rerun on 2026-11-24 after the merge of harness v2.5, and again after the selector change (`d279bda`): all 33 exit 0. Four things had stopped working along the way, each through an earlier change of mine, and are repaired. The helper through which nine probes read the registry's expressions (`nodeLines` in `types.mjs`) expected the layout the registry had before the selector work, so it found none, and `p21` failed outright. `p10` installed a replacement that is not meant to run, which the strict default refuses. `p24` had a comment with backticks inside a template string. `p05` lost its two third-party packages when the throwaway projects moved to the OS temp directory.
 
 ## Changelog
 
@@ -887,6 +911,7 @@ All 33 probes were rerun on 2026-11-24 after the merge of harness v2.5, and all 
 - 2026-11-24: the last gaps closed. The mapper's frame reader walks a finite list of header ends instead of looping until done (four timeouts became four kills), `serve(input, output)` replaces the standard-input block (ten unowned mutants became owned and killed), and a new oracle generates streams of frames cut at arbitrary places.
 - 2026-11-24: the full gap check over all six sources is clean (2,114 of 2,114, nothing unowned). Wrong versions written by hand then found what it cannot see: 3 of 19 implementations and 4 of 38 type declarations passed every oracle. New oracle file `types-point` (five laws for what a point's methods take and give back), new law `runtime-captured-values`, five more histories in the type oracle's capture law; `checks/wrong-declarations.mjs` and `checks/wrong-versions/` keep the hand-written wrong versions rerunnable. One defect fixed oracle first: the compile error for `pause()` on an expression that is no promise now says why. New F18 (one expression, two captures). The benchmark harness was re-evaluated on the new library: six defects, v2.5 in work. The short version at the top now says where things stand. The full gap check was run again on that commit (`9210720`): 2,114 of 2,114, nothing unowned.
 - 2026-11-24: benchmark harness v2.5 merged (`9a8e0a9`): library use by any operation on a point (D-18), error types from a reporter of the harness's own (D-19), the guide's `list` command in a treatment workspace, no bench process or probe writing the checkout's `dist/`. Its self-test passes on the merged tree (156 check lines). The stored matrix re-graded with it gives 28/40 against 32/40, the numbers first derived. All 33 probes rerun; the ones that had stopped working are repaired.
+- 2026-11-24: two decisions built, oracle first (`eca441d`, `d279bda`). `line` and `text` are dropped from what a visitor is handed, on expressions and on containers; `object` stays; `execution-points list` prints both as before. F18 is fixed: an expression that several ways lead to is one selection that captures what any way captured, in the runtime and in the types. Three oracle files changed and failed on the unchanged code (25 of 27, 7 of 33 and 8 of 31 tests). Full gap check afterwards: 2,117 of 2,117, nothing unowned. 31 of 31 hand-written wrong implementations and 44 of 44 wrong declarations are rejected. The benchmark section is marked as retired on your decision in the benchmark thread, where harness v2.6 and a full run on the current library are in work.
 
 ## Incidents
 
