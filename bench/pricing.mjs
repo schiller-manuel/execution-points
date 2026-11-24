@@ -20,6 +20,65 @@ export const MODEL_PRICING_PER_M = {
   'claude-haiku-5.5': { input: 1.0, cacheRead: 0.1, cacheWrite: 1.25, output: 5.0 },
 }
 
+/**
+ * Billed AI credits per trial, observed in the three stored paid runs of
+ * 2026-11-23 and 2026-11-24 (138 started trials). `mean` and `max` are per
+ * trial for that `model:reasoning`; `n` is how many trials they come from.
+ * Used only to project the cost of a matrix before it starts.
+ */
+export const OBSERVED_CREDITS_PER_TRIAL = {
+  'gpt-6.2-astra:medium': { mean: 30.72, max: 50.42, n: 20 },
+  'claude-opus-5.5:medium': { mean: 44.29, max: 112.84, n: 20 },
+  'gemini-4-neon:medium': { mean: 41.43, max: 64.95, n: 18 },
+  'gpt-6.2-sol:low': { mean: 6.17, max: 8.39, n: 20 },
+  'gpt-6.2-sol:medium': { mean: 10.12, max: 16.8, n: 20 },
+  'claude-haiku-5.5:low': { mean: 1.04, max: 1.81, n: 20 },
+  'claude-haiku-5.5:medium': { mean: 1.56, max: 3.27, n: 20 },
+}
+
+/** Credits the mandatory live preflight used in the stored runs (17.8, 17.8, 4.4). */
+export const OBSERVED_PREFLIGHT_CREDITS = 17.8
+
+/** The projection is the sum of per-trial means times this margin. */
+export const PROJECTION_MARGIN = 1.2
+
+/**
+ * Projects the billed credits of a planned matrix.
+ *
+ * `jobs` is a list of `{ model, reasoning }`, one per trial. The estimate per
+ * trial is `creditsPerTrial` when given, else the observed mean for that
+ * `model:reasoning`. A combination with no observation and no override is
+ * listed in `unknown` and makes `projected` null: the caller must not guess.
+ */
+export function projectCredits(jobs, { creditsPerTrial = null, includePreflight = true } = {}) {
+  const perCell = {}
+  const unknown = new Set()
+  let sum = 0
+  for (const job of jobs) {
+    const key = `${job.model}:${job.reasoning}`
+    const estimate = creditsPerTrial ?? OBSERVED_CREDITS_PER_TRIAL[key]?.mean ?? null
+    if (estimate === null) {
+      unknown.add(key)
+      continue
+    }
+    const cell = (perCell[key] ??= { trials: 0, perTrial: estimate, credits: 0 })
+    cell.trials++
+    cell.credits += estimate
+    sum += estimate
+  }
+  const preflight = includePreflight ? OBSERVED_PREFLIGHT_CREDITS : 0
+  const complete = unknown.size === 0
+  return {
+    perCell,
+    unknown: [...unknown],
+    trialsMean: complete ? Number(sum.toFixed(1)) : null,
+    preflight,
+    margin: PROJECTION_MARGIN,
+    projected: complete ? Number((sum * PROJECTION_MARGIN + preflight).toFixed(1)) : null,
+    source: creditsPerTrial !== null ? '--credits-per-trial' : 'observed means of the stored runs',
+  }
+}
+
 export function formatUsd(usd) {
   if (typeof usd !== 'number' || Number.isNaN(usd)) return 'n/a'
   return `$${usd.toFixed(4)}`

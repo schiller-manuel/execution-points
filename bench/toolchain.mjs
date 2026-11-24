@@ -10,7 +10,10 @@
  * - Treatment workspaces receive a real file copy of `execution-points-prototype`
  *   (`package.json` + `src/`), never a symlink back to the repository.
  * - Full grader checksum hashes BOTH grader `node_modules` binaries AND every file
- *   under `bench/graders/` plus `bench/runtime-guard.setup.mjs`.
+ *   under `bench/graders/` plus `bench/runtime-guard.setup.mjs`,
+ *   `bench/deterministic-io.setup.mjs` and `bench/classify.mjs`.
+ * - Refuses a symlinked root `node_modules`: stripping the copies would delete
+ *   packages from the checkout the link points to.
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -273,6 +276,8 @@ function collectWholeGraderHashEntries(graderNm, repoRoot) {
     for (const f of readdirSync(gradersDir)) pushRepoFile(path.join(gradersDir, f))
   }
   pushRepoFile(path.join(repoRoot, 'bench/runtime-guard.setup.mjs'))
+  pushRepoFile(path.join(repoRoot, 'bench/deterministic-io.setup.mjs'))
+  pushRepoFile(path.join(repoRoot, 'bench/classify.mjs'))
 
   const binDir = path.join(graderNm, '.bin')
   if (existsSync(binDir)) {
@@ -297,6 +302,13 @@ export function prepareToolchains(repoRoot, parentDir = realpathSync(tmpdir())) 
   const srcNm = path.join(repoRoot, 'node_modules')
   if (!existsSync(srcNm)) {
     throw new Error(`Missing root node_modules at ${srcNm}. Run pnpm install first.`)
+  }
+  // `cp -R` copies a symlinked `node_modules` as a link, and the stripping below would then
+  // delete packages from whatever checkout the link points to. Refuse instead.
+  if (lstatSync(srcNm).isSymbolicLink()) {
+    throw new Error(
+      `${srcNm} is a symbolic link (to ${realpathSync(srcNm)}). Toolchain preparation deletes packages from its copies and would delete them through the link. Run \`pnpm install --frozen-lockfile\` in this checkout instead.`,
+    )
   }
 
   // N-00: Always realpath so macOS /var -> /private/var matches CLI paths

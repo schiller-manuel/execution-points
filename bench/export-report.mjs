@@ -127,7 +127,8 @@ for (const runDir of runDirs) {
         .map(([name, content]) => ({ name, content })),
     }
     allRows.push(entry)
-    const key = `${r.taskId}|${r.model}|${r.reasoning}|t${r.trialIndex ?? 1}`
+    // Same block identity as `blockKey` in stats.mjs: requested model, and the run it belongs to.
+    const key = `${r.runId ?? runDir}|${r.taskId}|${r.model}|${r.reasoning}|${r.promptStyle ?? 'unknown'}|t${r.trialIndex ?? 1}`
     const blk = blocksMap.get(key) ?? {
       key,
       taskId: r.taskId,
@@ -174,9 +175,15 @@ function renderTrialCard(t, armLabel) {
   const tokens = t.usage?.totalTokens ? `${t.usage.totalTokens.toLocaleString()} tok` : 'n/a'
   const secs = `${(t.durationMs / 1000).toFixed(1)}s`
   const failedOracle = (t.oracleTests ?? []).filter((x) => x.status !== 'passed')
+  // Rows graded by harness v2.4+ carry every repeated run; older rows were graded once.
+  const withRuns = (outcome, runs) => (runs?.length > 1 ? `${outcome} [${runs.join(', ')}]` : outcome)
   const mutantSummary = (t.singleBugMutants?.results ?? [])
-    .map((m) => `${m.id}: ${m.outcome}`)
+    .map((m) => `${m.id}: ${withRuns(m.outcome, m.runs)}`)
     .join(' · ')
+  const reproduction = t.reproduction ?? (t.adequateReproduction ? 'adequate' : 'inadequate')
+  const unstableNote = t.unstableVariants?.length
+    ? `<div class="err-box"><strong>Repeated runs disagreed on:</strong> ${esc(t.unstableVariants.join(', '))}</div>`
+    : ''
 
   return `<div class="card ${t.solved ? 'solved' : 'unsolved'}">
     <div class="card-head">
@@ -187,13 +194,14 @@ function renderTrialCard(t, armLabel) {
     <div class="badges">
       ${badge(t.solved, t.solved ? 'SOLVED' : 'FAIL')}
       ${badge(t.oraclePass, `Oracle: ${t.oraclePass ? 'PASS' : 'FAIL'}`)}
-      ${badge(t.adequateReproduction, `AdqRED: ${t.adequateReproduction ? 'YES' : 'NO'}`)}
+      ${badge(t.adequateReproduction, `Reproduction: ${reproduction}`)}
       ${badge(t.refFixPass, `RefFix: ${t.refFixOutcome ?? t.refFixPass}`)}
       ${badge(t.noGlobalMonkeyPatch !== false, `NoMP: ${t.noGlobalMonkeyPatch}`)}
       <span class="badge neutral">FG: ${esc(fg)}</span>
       <span class="badge neutral">VF: ${esc(vf)}</span>
     </div>
     ${mutantSummary ? `<div class="sub">Mutants: ${esc(mutantSummary)}</div>` : ''}
+    ${unstableNote}
     ${
       failedOracle.length
         ? `<div class="err-box"><strong>Failed oracle tests:</strong><pre>${esc(

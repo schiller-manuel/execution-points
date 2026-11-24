@@ -934,6 +934,9 @@ export function createSearchController(debounceMs = 20): SearchController {
 `
 
 // G-4: retry-storm design 2 — object-identity cycle token instead of numeric epoch
+// `run` is read inside its own initializer (in `finally`, after the first await). Written as
+// `const run = (async () => ...)()` that is TS2454 in both arms, so it is declared first;
+// the emitted JavaScript behaves the same.
 export const RETRY_STORM_TOKEN_REF = `import { callUpstream } from './upstream'
 
 export type BreakerState = 'CLOSED' | 'OPEN' | 'HALF_OPEN'
@@ -968,7 +971,8 @@ export function createResilientClient(failureThreshold = 2): ResilientClient {
     }
 
     const myToken = cycleToken
-    const run = (async () => {
+    let run!: Promise<string>
+    run = (async () => {
       try {
         const result = await callUpstream(payload)
         if (myToken === cycleToken) {

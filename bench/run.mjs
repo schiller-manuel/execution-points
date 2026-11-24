@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Controlled A/B benchmark runner (v2.1 — hardened against all re-review findings)
- * for evaluating whether `execution-points` helps coding agents (via GitHub Copilot CLI)
- * debug and fix hard asynchronous concurrency bugs.
+ * Controlled A/B benchmark runner (harness v2.4; see `HARNESS_VERSION` and
+ * `bench/PROTOCOL.md`) for evaluating whether `execution-points` helps coding
+ * agents (via GitHub Copilot CLI) debug and fix hard asynchronous concurrency bugs.
  *
  * Safe by default:
  *   - Importing this module NEVER starts a run (OPS-01).
@@ -48,8 +48,21 @@ import {
   SINGLE_BUG_MUTANTS,
   VALID_FIX_VARIANTS,
 } from './calibration/variants.mjs'
-import { buildMustRejectCheats, GOOD_WITNESSES } from './calibration/witnesses.mjs'
-import { extractUsageMetrics, formatUsd, MODEL_PRICING_PER_M } from './pricing.mjs'
+import {
+  buildMustRejectCheats,
+  GOOD_WITNESSES,
+  PROBE_CANCEL_COMMIT_SETTLE_TEST,
+} from './calibration/witnesses.mjs'
+import {
+  agreeOnOutcome,
+  classifyFailedTests,
+  classifyFailureMessage,
+  countRefactorResults,
+  countValidFixResults,
+  refactorOutcome,
+  validFixOutcome,
+} from './classify.mjs'
+import { extractUsageMetrics, formatUsd, MODEL_PRICING_PER_M, projectCredits } from './pricing.mjs'
 import { formatCI, matchedRiskDifferenceCI, stratifiedCMH, wilsonCI } from './stats.mjs'
 import { assertNoRepoLeak, prepareToolchains, sweepStaleTempDirs } from './toolchain.mjs'
 
@@ -57,6 +70,13 @@ const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(__dirname, '..')
 const RUNTIME_GUARD_PATH = path.join(__dirname, 'runtime-guard.setup.mjs')
+const DETERMINISTIC_IO_PATH = path.join(__dirname, 'deterministic-io.setup.mjs')
+
+/** One version string for the harness, the protocol, and every file header. */
+export const HARNESS_VERSION = 'v2.4'
+
+/** How often every graded variant is run; all runs must agree (see `agreeOnOutcome`). */
+export const DEFAULT_GRADE_REPEATS = 3
 
 const ENV_ALLOWLIST_KEYS = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM']
 
@@ -273,6 +293,10 @@ export const TASKS = {
     testRel: 'src/job-runner.test.ts',
     epTargets: ['src/job-runner.ts'],
     allowedTimerProdRels: [],
+    // D-09: this task does real disk I/O. Grading sandboxes run `node:fs/promises`
+    // through `bench/deterministic-io.setup.mjs` so that the result of an agent's
+    // test does not depend on how fast the disk is (see that file).
+    deterministicLeafIo: true,
     expectedExports: {
       createJobRunner: 1,
     },
@@ -374,6 +398,8 @@ export function computeProvenance() {
       path.join(__dirname, 'toolchain.mjs'),
       path.join(__dirname, 'ast-audit.mjs'),
       path.join(__dirname, 'runtime-guard.setup.mjs'),
+      path.join(__dirname, 'deterministic-io.setup.mjs'),
+      path.join(__dirname, 'classify.mjs'),
       path.join(__dirname, 'pricing.mjs'),
       path.join(__dirname, 'stats.mjs'),
       path.join(__dirname, 'analyze.mjs'),
@@ -413,6 +439,9 @@ function parseArgs(argv) {
     timeoutSec: 360,
     cliCreditCap: 0, // N-32: 0 omits --max-ai-credits so CLI doesn't inject live cost meter into tool results
     maxTotalCredits: 300,
+    creditsPerTrial: null, // overrides the projection's per-trial estimate (see projectCredits)
+    gradeRepeats: DEFAULT_GRADE_REPEATS,
+    only: null, // --regrade: comma-separated trial ids (or substrings) to re-grade
     maxConsecutiveInfra: 3, // N-05: abort run after k consecutive infra failures
     skipPreflight: false,
     sweepStale: false, // N-01: opt-in sweep so concurrent runs are never clobbered
@@ -435,6 +464,9 @@ function parseArgs(argv) {
     else if (a === '--timeout') opts.timeoutSec = Number(argv[++i])
     else if (a === '--max-credits' || a === '--cli-credit-cap') opts.cliCreditCap = Number(argv[++i])
     else if (a === '--max-total-credits') opts.maxTotalCredits = Number(argv[++i])
+    else if (a === '--credits-per-trial') opts.creditsPerTrial = Number(argv[++i])
+    else if (a === '--grade-repeats') opts.gradeRepeats = Number(argv[++i])
+    else if (a === '--only') opts.only = argv[++i].split(',').filter(Boolean)
     else if (a === '--max-consecutive-infra') opts.maxConsecutiveInfra = Number(argv[++i])
     else if (a === '--skip-preflight') opts.skipPreflight = true
     else if (a === '--sweep-stale') opts.sweepStale = true
@@ -447,6 +479,12 @@ function parseArgs(argv) {
   }
   if (opts.promptStyle !== 'symptom' && opts.promptStyle !== 'described') {
     throw new Error(`Invalid --prompt-style: ${opts.promptStyle} (expected symptom or described)`)
+  }
+  if (!Number.isInteger(opts.gradeRepeats) || opts.gradeRepeats < 1) {
+    throw new Error(`Invalid --grade-repeats: ${opts.gradeRepeats} (expected an integer >= 1)`)
+  }
+  if (opts.creditsPerTrial !== null && !(opts.creditsPerTrial > 0)) {
+    throw new Error(`Invalid --credits-per-trial: ${opts.creditsPerTrial} (expected a number > 0)`)
   }
   return opts
 }
@@ -528,9 +566,11 @@ function writePristineWorkspaceConfigs(dir, task, arm, { includeRuntimeGuard = f
   }
   writeFileSync(path.join(dir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n')
 
-  const setupLine = includeRuntimeGuard
-    ? `setupFiles: [${JSON.stringify(RUNTIME_GUARD_PATH)}],\n    `
-    : ''
+  // Grading sandboxes only: deterministic leaf disk I/O first (real-filesystem tasks), then the guard.
+  const setupFiles = includeRuntimeGuard
+    ? [...(task.deterministicLeafIo ? [DETERMINISTIC_IO_PATH] : []), RUNTIME_GUARD_PATH]
+    : []
+  const setupLine = setupFiles.length ? `setupFiles: ${JSON.stringify(setupFiles)},\n    ` : ''
   // N-23 & V-02: Pin exact include ONLY in grading sandboxes (includeRuntimeGuard=true) so
   // sibling .tsx files cannot run during grading, while agents can still run scratch checks in their workspace.
   // N-31: Pin reporters: ['default'] in both workspace and grading sandboxes.
@@ -682,17 +722,22 @@ async function runCmd(bin, args, cwd, { timeoutMs = 90_000, extraEnv = {} } = {}
 }
 
 /**
- * Runs Vitest with explicit `--config <pristineConfig>` (closes R-19),
+ * Runs Vitest ONCE with explicit `--config <pristineConfig>` (closes R-19),
  * JSON reporter, and runtime integrity guard (`BENCH_GUARD_REPORT`).
  *
- * Classifies outcome:
- * - 'passed': all tests passed AND numPassed > 0 AND 0 runtime guard violations
+ * Outcome of the run (the rules live in `bench/classify.mjs`):
+ * - 'passed': every test passed, at least one ran, Vitest exited 0, and the guard saw nothing
  * - 'runtime_violation': runtime guard detected global patch or real sleep
- * - 'true_red': >= 1 genuine AssertionError failure (no timeout/import/selector/guard error)
- * - 'timeout': Vitest test/hook timeout (NEVER counts as true_red!)
- * - 'loud_break': compile/import/transform/selection error or 0 executed tests
+ * - 'true_red': at least one test failed on an `AssertionError`
+ * - 'timeout': no assertion failed; a test or hook timed out (NEVER counts as true_red!)
+ * - 'loud_break': no assertion or timeout; an `[execution-points]` error, an import/transform
+ *   error, a file that did not load, or 0 executed tests
+ * - 'error': only other thrown errors (`TypeError: x is not a function`, an `ENOENT` that
+ *   escaped the code under test, or an unhandled error outside any test)
+ *
+ * Callers that gate on the outcome use `runVitestRepeated`, which requires agreement.
  */
-async function runVitestClassified(
+export async function runVitestClassified(
   dir,
   testRel,
   { configPath, testTimeoutMs = 1500, allowedTimerProdRels = [], requireGuardReport = false } = {},
@@ -809,6 +854,20 @@ async function runVitestClassified(
   }
 
   if (report.success && passedAssertions.length > 0 && failedAssertions.length === 0) {
+    // Vitest exits non-zero when an error escaped every test (an unhandled rejection, for
+    // example) even though each test passed. `npm test` is red for the agent in that case,
+    // so it is not a pass here either.
+    if (!res.ok) {
+      return {
+        ok: false,
+        outcome: 'error',
+        numPassed: passedAssertions.length,
+        numFailed: 0,
+        guardViolations,
+        failureKinds: null,
+        summary: `all ${passedAssertions.length} tests passed but Vitest exited ${res.code} (error outside a test): ${(res.stderr || res.stdout).slice(0, 300)}`,
+      }
+    }
     return {
       ok: true,
       outcome: 'passed',
@@ -831,22 +890,14 @@ async function runVitestClassified(
     }
   }
 
-  const timeoutPattern = /Test timed out|Hook timed out|timed out in \d+ms/i
-  const loudBreakPattern =
-    /matched 0|matched \d+|Cannot find module|SyntaxError|Transform failed|ExecutionPoint|Failed to resolve import|is not a function|Forbidden global monkey-patch|Forbidden sleep/i
-
-  let hasGenuineAssertionFail = false
-  let hasTimeout = false
-  for (const a of failedAssertions) {
-    const msg = (a.failureMessages ?? []).join('\n')
-    if (timeoutPattern.test(msg)) {
-      hasTimeout = true
-    } else if (!loudBreakPattern.test(msg)) {
-      hasGenuineAssertionFail = true
-    }
-  }
-
-  const outcome = hasGenuineAssertionFail ? 'true_red' : hasTimeout ? 'timeout' : 'loud_break'
+  // PROTOCOL section 2: only an assertion failure reproduces a bug (`bench/classify.mjs`).
+  const { outcome, kinds } = classifyFailedTests(failedAssertions)
+  const firstOfOutcome =
+    outcome === 'true_red'
+      ? failedAssertions
+          .flatMap((a) => a.failureMessages ?? [])
+          .find((m) => classifyFailureMessage(m) === 'assertion')
+      : undefined
 
   return {
     ok: false,
@@ -854,7 +905,38 @@ async function runVitestClassified(
     numPassed: passedAssertions.length,
     numFailed: failedAssertions.length,
     guardViolations,
-    summary: (failedAssertions[0]?.failureMessages?.[0] ?? res.stderr ?? '').slice(0, 400),
+    failureKinds: kinds,
+    summary: (firstOfOutcome ?? failedAssertions[0]?.failureMessages?.[0] ?? res.stderr ?? '').slice(0, 400),
+  }
+}
+
+/**
+ * Runs the same test file against the same code `repeats` times and requires
+ * the runs to agree. Disagreement is the outcome `unstable`: it is never a
+ * pass, never a reproduction, and is reported on its own.
+ */
+export async function runVitestRepeated(dir, testRel, runOpts, repeats = DEFAULT_GRADE_REPEATS) {
+  const runs = []
+  for (let i = 0; i < Math.max(1, repeats); i++) {
+    runs.push(await runVitestClassified(dir, testRel, runOpts))
+  }
+  const outcomes = runs.map((r) => r.outcome)
+  const outcome = agreeOnOutcome(outcomes)
+  const stable = outcome !== 'unstable'
+  return {
+    ok: stable && runs[0].ok,
+    outcome,
+    runs: outcomes,
+    numPassed: runs[0].numPassed,
+    numFailed: runs[0].numFailed,
+    guardViolations: {
+      globalPatches: [...new Set(runs.flatMap((r) => r.guardViolations?.globalPatches ?? []))],
+      realSleeps: [...new Set(runs.flatMap((r) => r.guardViolations?.realSleeps ?? []))],
+      guardMissing: runs.some((r) => r.guardViolations?.guardMissing),
+    },
+    summary: stable
+      ? runs[0].summary
+      : `unstable across ${runs.length} runs [${outcomes.join(', ')}]: ${(runs.find((r) => r.outcome !== 'passed')?.summary ?? '').slice(0, 300)}`,
   }
 }
 
@@ -972,11 +1054,39 @@ export default defineConfig({
   }
 }
 
+/**
+ * The verdict on a test suite's reproduction, from every repeated run of every
+ * gating variant (baseline, single-bug mutants, valid fixes, the agent's own fix):
+ * - 'adequate'   every run of every gate was what the gate needs.
+ * - 'inadequate' no combination of the observed runs would have been adequate.
+ * - 'unstable'   some runs satisfy the gates and others do not, so a grader that
+ *                ran each variant once could have said either. Never adequate.
+ *
+ * `runs` are raw run outcomes ('passed', 'true_red', ...), not the mapped ones.
+ */
+export function reproductionVerdict({ baselineRuns, mutantRuns, validFixRuns, ownFixRuns }) {
+  const all = (runs, want) => runs.length > 0 && runs.every((o) => o === want)
+  const any = (runs, want) => runs.some((o) => o === want)
+  const worst =
+    all(baselineRuns, 'true_red') &&
+    mutantRuns.every((runs) => all(runs, 'true_red')) &&
+    validFixRuns.some((runs) => all(runs, 'passed')) &&
+    all(ownFixRuns, 'passed')
+  if (worst) return 'adequate'
+  const best =
+    any(baselineRuns, 'true_red') &&
+    mutantRuns.every((runs) => any(runs, 'true_red')) &&
+    validFixRuns.some((runs) => any(runs, 'passed')) &&
+    any(ownFixRuns, 'passed')
+  return best ? 'unstable' : 'inadequate'
+}
+
 export async function evaluateAgentTests({
   taskId,
   arm,
   agentSrcFiles,
   toolchains,
+  repeats = DEFAULT_GRADE_REPEATS,
   parentDir = realpathSync(tmpdir()),
 }) {
   const task = TASKS[taskId]
@@ -991,13 +1101,15 @@ export async function evaluateAgentTests({
 
     const runtimeGlobalPatches = []
     const runtimeRealSleeps = []
-    const collectGuard = (r) => {
+    const unstableVariants = []
+    const collect = (variantId, r) => {
       if (r.guardViolations?.globalPatches?.length) {
         runtimeGlobalPatches.push(...r.guardViolations.globalPatches)
       }
       if (r.guardViolations?.realSleeps?.length) {
         runtimeRealSleeps.push(...r.guardViolations.realSleeps)
       }
+      if (r.outcome === 'unstable') unstableVariants.push(variantId)
     }
 
     const writeVariant = (filesMap) => {
@@ -1026,20 +1138,29 @@ export async function evaluateAgentTests({
       allowedTimerProdRels: task.allowedTimerProdRels,
       requireGuardReport: true,
     }
+    // Every variant runs `repeats` times; the runs must agree or the outcome is 'unstable'.
+    const runVariant = async (variantId, filesMap) => {
+      writeVariant(filesMap)
+      const r = await runVitestRepeated(evalDir, task.testRel, runOpts, repeats)
+      collect(variantId, r)
+      return r
+    }
 
     // 1. Baseline RED check
-    writeVariant(baselineFiles)
-    const redResult = await runVitestClassified(evalDir, task.testRel, runOpts)
-    collectGuard(redResult)
+    const redResult = await runVariant('baseline', baselineFiles)
 
     // 2. P1.2 Single-bug mutants
     const mutants = SINGLE_BUG_MUTANTS[taskId] ?? []
     const mutantResults = []
     for (const m of mutants) {
-      writeVariant({ ...baselineFiles, ...m.files })
-      const r = await runVitestClassified(evalDir, task.testRel, runOpts)
-      collectGuard(r)
-      mutantResults.push({ id: m.id, outcome: r.outcome, detected: r.outcome === 'true_red' })
+      const r = await runVariant(m.id, { ...baselineFiles, ...m.files })
+      mutantResults.push({
+        id: m.id,
+        outcome: r.outcome,
+        runs: r.runs,
+        detected: r.outcome === 'true_red',
+        summary: r.outcome === 'true_red' ? undefined : r.summary,
+      })
     }
     const allMutantsDetected = mutantResults.every((m) => m.detected)
 
@@ -1047,12 +1168,11 @@ export async function evaluateAgentTests({
     const refactors = buildBuggyRefactors(taskId, baselineFiles)
     const refactorResults = []
     for (const ref of refactors) {
-      writeVariant(ref.files)
-      const r = await runVitestClassified(evalDir, task.testRel, runOpts)
-      collectGuard(r)
+      const r = await runVariant(ref.id, ref.files)
       refactorResults.push({
         id: ref.id,
-        outcome: r.outcome === 'passed' ? 'false_green' : r.outcome,
+        outcome: refactorOutcome(r.outcome),
+        runs: r.runs,
         summary: r.summary,
       })
     }
@@ -1061,19 +1181,12 @@ export async function evaluateAgentTests({
     const validAlts = VALID_FIX_VARIANTS[taskId] ?? []
     const validResults = []
     for (const alt of validAlts) {
-      writeVariant({ ...baselineFiles, ...alt.files })
-      const r = await runVitestClassified(evalDir, task.testRel, runOpts)
-      collectGuard(r)
+      const r = await runVariant(alt.id, { ...baselineFiles, ...alt.files })
       validResults.push({
         id: alt.id,
-        outcome:
-          r.outcome === 'passed'
-            ? 'true_green'
-            : r.outcome === 'true_red'
-              ? 'false_red_assertion'
-              : r.outcome === 'timeout'
-                ? 'timeout'
-                : 'selector_or_compile_break',
+        outcome: validFixOutcome(r.outcome),
+        runs: r.runs,
+        summary: r.outcome === 'passed' ? undefined : r.summary,
       })
     }
 
@@ -1081,14 +1194,19 @@ export async function evaluateAgentTests({
     const refFixPass = refEntry?.outcome === 'true_green'
     const refFixOutcome = refEntry?.outcome === 'true_green' ? 'passed' : (refEntry?.outcome ?? 'loud_break')
     const passesAtLeastOneValidFix = validResults.some((v) => v.outcome === 'true_green')
+    const refactorCounts = countRefactorResults(refactorResults)
+    const validCounts = countValidFixResults(validResults)
 
     return {
+      repeats,
       redReproducesBug: redResult.outcome === 'true_red',
       redOutcome: redResult.outcome,
+      redRuns: redResult.runs,
       redSummary: redResult.summary,
       refFixPass,
       refFixOutcome,
       passesAtLeastOneValidFix,
+      unstableVariants,
       runtimeGlobalPatches: [...new Set(runtimeGlobalPatches)],
       runtimeRealSleeps: [...new Set(runtimeRealSleeps)],
       singleBugMutants: {
@@ -1097,24 +1215,30 @@ export async function evaluateAgentTests({
         allDetected: allMutantsDetected,
         results: mutantResults,
       },
+      // Counts are the same for both arms (`bench/classify.mjs`). `loudBreakCount` is the
+      // selector/compile break alone; up to v2.3 it also included timeouts.
       refactorRobustness: {
-        total: refactorResults.length,
-        trueRedCount: refactorResults.filter((r) => r.outcome === 'true_red').length,
-        loudBreakCount: refactorResults.filter(
-          (r) => r.outcome === 'loud_break' || r.outcome === 'timeout',
-        ).length,
-        falseGreenCount: refactorResults.filter((r) => r.outcome === 'false_green').length,
+        total: refactorCounts.total,
+        trueRedCount: refactorCounts.stillRed,
+        loudBreakCount: refactorCounts.loudBreak,
+        timeoutCount: refactorCounts.timeout,
+        errorCount: refactorCounts.error,
+        unstableCount: refactorCounts.unstable,
+        otherCount: refactorCounts.other,
+        stoppedTestingCount: refactorCounts.stoppedTesting,
+        falseGreenCount: refactorCounts.falseGreen,
         results: refactorResults,
       },
       validFixRobustness: {
-        total: validResults.length,
-        trueGreenCount: validResults.filter((r) => r.outcome === 'true_green').length,
-        falseRedAssertionCount: validResults.filter((r) => r.outcome === 'false_red_assertion')
-          .length,
-        timeoutCount: validResults.filter((r) => r.outcome === 'timeout').length,
-        selectorOrCompileBreakCount: validResults.filter(
-          (r) => r.outcome === 'selector_or_compile_break',
-        ).length,
+        total: validCounts.total,
+        trueGreenCount: validCounts.green,
+        falseRedAssertionCount: validCounts.assertion,
+        timeoutCount: validCounts.timeout,
+        selectorOrCompileBreakCount: validCounts.selectorOrCompileBreak,
+        runtimeErrorCount: validCounts.error,
+        unstableCount: validCounts.unstable,
+        otherCount: validCounts.other,
+        notGreenCount: validCounts.notGreen,
         results: validResults,
       },
     }
@@ -1583,6 +1707,26 @@ async function runAgentPhase({
  * Monitors wall-clock vs monotonic time during grading to detect host sleep
  * (e.g. macOS Clamshell Sleep on battery — closes G-2 / N-05!).
  */
+/**
+ * The provenance fields every row carries, graded or not. For a re-grade,
+ * `provenance` is the ORIGINAL trial's provenance (including its grader
+ * checksum); the re-grading checkout goes into `regradedWith`.
+ */
+function trialProvenanceFields(provenance, toolchains) {
+  return {
+    gitCommit: provenance?.gitCommit,
+    gitDirty: provenance?.gitDirty,
+    vitestVersion: provenance?.vitestVersion,
+    typescriptVersion: provenance?.typescriptVersion,
+    harnessSha256: provenance?.harnessSha256,
+    calibrationSha256: provenance?.calibrationSha256,
+    lockfileSha256: provenance?.lockfileSha256,
+    toolSha256: provenance?.toolSha256,
+    tasksSha256: provenance?.tasksSha256,
+    graderChecksum: provenance?.graderChecksum ?? toolchains?.graderChecksum,
+  }
+}
+
 function createSleepMonitor() {
   let hostSleepDetected = false
   let maxJumpMs = 0
@@ -1619,6 +1763,11 @@ export async function gradeTrialPhase({
   provenance,
   copilotVersion,
   toolchains,
+  gradeRepeats = DEFAULT_GRADE_REPEATS,
+  // `--regrade` only: what the stored row says about things a re-grade cannot recompute,
+  // and the checkout that does the re-grading (kept apart from the trial's own provenance).
+  carryOver = null,
+  regradedWith = null,
   parentDir = realpathSync(tmpdir()),
 }) {
   const {
@@ -1651,7 +1800,10 @@ export async function gradeTrialPhase({
     const modifiedConfigs = ['package.json', 'tsconfig.json', 'vitest.config.mjs', 'points.ep'].filter(
       (f) => f in initialSnapshot && allWorkspaceFiles[f] !== initialSnapshot[f],
     )
-    const tamperedConfigs = addedRootFiles.length > 0 || modifiedConfigs.length > 0
+    // A re-grade only has the trial's `src/` tree, so it keeps the stored verdict on root files.
+    const tamperedConfigs = carryOver
+      ? Boolean(carryOver.tamperedConfigs)
+      : addedRootFiles.length > 0 || modifiedConfigs.length > 0
 
     // 1. Hardened AST audits across ENTIRE `src/` tree (closes R-11, R-12, R-14, R-15, A-01, E-04, E-05)
     const productionAudit = targetText
@@ -1750,16 +1902,23 @@ export async function gradeTrialPhase({
 
     const tscBin = path.join(ownFixDir, 'node_modules/.bin/tsc')
     // R-08: Own-fix run uses the same 5000 ms timeout agents develop under!
+    // Like every other variant it runs `gradeRepeats` times and the runs must agree.
     const agentTestRun = testText
-      ? await runVitestClassified(ownFixDir, task.testRel, {
-          configPath: ownCfg,
-          testTimeoutMs: 5000,
-          allowedTimerProdRels: task.allowedTimerProdRels,
-          requireGuardReport: true,
-        })
+      ? await runVitestRepeated(
+          ownFixDir,
+          task.testRel,
+          {
+            configPath: ownCfg,
+            testTimeoutMs: 5000,
+            allowedTimerProdRels: task.allowedTimerProdRels,
+            requireGuardReport: true,
+          },
+          gradeRepeats,
+        )
       : {
           ok: false,
           outcome: 'loud_break',
+          runs: [],
           numPassed: 0,
           numFailed: 0,
           guardViolations: { globalPatches: [], realSleeps: [], guardMissing: false },
@@ -1801,14 +1960,24 @@ export async function gradeTrialPhase({
 
     // 3. Evaluate agent's test suite: RED + single-bug mutants + D-14 symmetric valid-fix gate + E9
     const testEval = testText
-      ? await evaluateAgentTests({ taskId, arm, agentSrcFiles: allWorkspaceFiles, toolchains, parentDir })
+      ? await evaluateAgentTests({
+          taskId,
+          arm,
+          agentSrcFiles: allWorkspaceFiles,
+          toolchains,
+          repeats: gradeRepeats,
+          parentDir,
+        })
       : {
+          repeats: gradeRepeats,
           redReproducesBug: false,
           redOutcome: 'loud_break',
+          redRuns: [],
           redSummary: 'missing test file',
           refFixPass: false,
           refFixOutcome: 'loud_break',
           passesAtLeastOneValidFix: false,
+          unstableVariants: [],
           runtimeGlobalPatches: [],
           runtimeRealSleeps: [],
           singleBugMutants: { total: 0, detectedCount: 0, allDetected: false, results: [] },
@@ -1816,6 +1985,11 @@ export async function gradeTrialPhase({
             total: 0,
             trueRedCount: 0,
             loudBreakCount: 0,
+            timeoutCount: 0,
+            errorCount: 0,
+            unstableCount: 0,
+            otherCount: 0,
+            stoppedTestingCount: 0,
             falseGreenCount: 0,
             results: [],
           },
@@ -1825,6 +1999,10 @@ export async function gradeTrialPhase({
             falseRedAssertionCount: 0,
             timeoutCount: 0,
             selectorOrCompileBreakCount: 0,
+            runtimeErrorCount: 0,
+            unstableCount: 0,
+            otherCount: 0,
+            notGreenCount: 0,
             results: [],
           },
         }
@@ -1848,11 +2026,19 @@ export async function gradeTrialPhase({
     const noRealSleeps = allRealSleeps.length === 0
 
     // D-14 symmetric two-sided adequacy: must pass >= 1 design-diverse independent valid fix (blocks E-06 without single-reference bias!)
-    const adequateReproduction =
-      testEval.redReproducesBug &&
-      testEval.singleBugMutants.allDetected &&
-      testEval.passesAtLeastOneValidFix &&
-      agentTestRun.ok
+    // Every gate is over repeated runs that agree; `reproduction` says whether a single-run
+    // grader could have decided either way ('unstable'), which never counts as adequate.
+    const reproduction = reproductionVerdict({
+      baselineRuns: testEval.redRuns ?? [],
+      mutantRuns: testEval.singleBugMutants.results.map((m) => m.runs ?? []),
+      validFixRuns: testEval.validFixRobustness.results.map((v) => v.runs ?? []),
+      ownFixRuns: agentTestRun.runs ?? [],
+    })
+    const adequateReproduction = reproduction === 'adequate'
+    const unstableVariants = [
+      ...(agentTestRun.outcome === 'unstable' ? ['own-fix'] : []),
+      ...(testEval.unstableVariants ?? []),
+    ]
 
     // 4. Hidden yield-engine oracle grader + pristine visible tests over entire non-test `src/`
     const prodSrcMap = {}
@@ -1909,16 +2095,10 @@ export async function gradeTrialPhase({
       reasoning,
       trialIndex,
       copilotVersion,
-      gitCommit: provenance.gitCommit,
-      gitDirty: provenance.gitDirty,
-      vitestVersion: provenance.vitestVersion,
-      typescriptVersion: provenance.typescriptVersion,
-      harnessSha256: provenance.harnessSha256,
-      calibrationSha256: provenance.calibrationSha256,
-      lockfileSha256: provenance.lockfileSha256,
-      toolSha256: provenance.toolSha256,
-      tasksSha256: provenance.tasksSha256,
-      graderChecksum: toolchains.graderChecksum,
+      ...trialProvenanceFields(provenance, toolchains),
+      ...(regradedWith ? { regradedWith } : {}),
+      harnessVersion: HARNESS_VERSION,
+      gradeRepeats,
       hostSleepDetected: sleepStats.hostSleepDetected,
       gradingDurationMs: sleepStats.wallElapsedMs,
       infraFailure,
@@ -1931,8 +2111,14 @@ export async function gradeTrialPhase({
       oracleTests: grader.oracleTests,
       visibleTestsPass: grader.visibleTestsPass,
       agentTestsPass: agentTestRun.ok,
+      agentTestsOutcome: agentTestRun.outcome,
+      agentTestsRuns: agentTestRun.runs,
       redReproducesBug: testEval.redReproducesBug,
       redOutcome: testEval.redOutcome,
+      redRuns: testEval.redRuns,
+      redSummary: testEval.redReproducesBug ? undefined : testEval.redSummary,
+      reproduction,
+      unstableVariants,
       refFixPass: testEval.refFixPass,
       refFixOutcome: testEval.refFixOutcome,
       passesAtLeastOneValidFix: testEval.passesAtLeastOneValidFix,
@@ -1949,8 +2135,8 @@ export async function gradeTrialPhase({
       noRealSleeps,
       realSleepViolations: allRealSleeps,
       tamperedConfigs,
-      addedRootFiles,
-      modifiedConfigs,
+      addedRootFiles: carryOver ? (carryOver.addedRootFiles ?? []) : addedRootFiles,
+      modifiedConfigs: carryOver ? (carryOver.modifiedConfigs ?? []) : modifiedConfigs,
       technique,
       usesExecutionPoints: testAudit.usesExecutionPoints,
       usesViMock: testAudit.usesModuleMock,
@@ -2003,13 +2189,16 @@ export async function gradeTrialPhase({
       reasoning,
       trialIndex,
       copilotVersion,
-      gitCommit: provenance?.gitCommit,
-      gitDirty: provenance?.gitDirty,
-      harnessSha256: provenance?.harnessSha256,
-      toolSha256: provenance?.toolSha256,
-      tasksSha256: provenance?.tasksSha256,
+      // Same provenance fields as a graded row, so `bench/analyze.mjs` can keep this row in
+      // the intention-to-treat denominator and run the sensitivity analysis without it.
+      ...trialProvenanceFields(provenance, toolchains),
+      ...(regradedWith ? { regradedWith } : {}),
+      harnessVersion: HARNESS_VERSION,
+      gradeRepeats,
+      infraFailure: false,
       ungradable: true,
       aborted: false,
+      notStarted: false,
       solved: false,
       oraclePass: false,
       visibleTestsPass: false,
@@ -2036,8 +2225,167 @@ export async function gradeTrialPhase({
   }
 }
 
+/**
+ * `bench/PROTOCOL.md` must state `HARNESS_VERSION`, and a file header under
+ * `bench/` that names a harness version must name that one.
+ */
+export function checkVersionStrings() {
+  const problems = []
+  const protocol = readFileSync(path.join(__dirname, 'PROTOCOL.md'), 'utf8')
+  const protocolVersion = /^Harness version: `(v[\d.]+)`/m.exec(protocol)?.[1]
+  if (protocolVersion !== HARNESS_VERSION) {
+    problems.push(`bench/PROTOCOL.md states harness version ${protocolVersion ?? '(none)'}, the runner is ${HARNESS_VERSION}`)
+  }
+  const sources = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (entry.name !== 'tasks' && entry.name !== 'node_modules') walk(path.join(dir, entry.name))
+      } else if (/\.(?:mjs|ts)$/.test(entry.name)) {
+        sources.push(path.join(dir, entry.name))
+      }
+    }
+  }
+  walk(__dirname)
+  for (const file of sources) {
+    const header = readFileSync(file, 'utf8').split('\n').slice(0, 12).join('\n')
+    for (const m of header.matchAll(/harness (v\d+\.\d+)/g)) {
+      if (m[1] !== HARNESS_VERSION) {
+        problems.push(`${path.relative(REPO_ROOT, file)} header names harness ${m[1]}, the runner is ${HARNESS_VERSION}`)
+      }
+    }
+    const stale = /\((v\d+\.\d+)\b[^)]*\)/.exec(header.split('\n').slice(0, 4).join('\n'))
+    if (stale && stale[1] !== HARNESS_VERSION && !/harness v/.test(header)) {
+      problems.push(`${path.relative(REPO_ROOT, file)} header carries version ${stale[1]} without naming the harness version`)
+    }
+  }
+  return problems
+}
+
+/**
+ * The two guides must differ only by what the treatment arm has and the control
+ * arm does not: every `## ` section of the control guide (except the intro and
+ * the validation commands, which name the arm's toolchain) appears verbatim in
+ * the treatment guide, the treatment guide has exactly one more section, and
+ * neither guide names a module or function of any task.
+ */
+export function checkGuideParity() {
+  const problems = []
+  const read = (name) => readFileSync(path.join(__dirname, 'guides', name), 'utf8')
+  const sections = (text) => {
+    const out = new Map()
+    for (const part of text.split(/^## /m).slice(1)) {
+      const title = part.slice(0, part.indexOf('\n')).trim()
+      out.set(title, part.slice(part.indexOf('\n') + 1).trim())
+    }
+    return out
+  }
+  const control = read('control-guide.md')
+  const treatment = read('treatment-guide.md')
+  const cs = sections(control)
+  const ts = sections(treatment)
+  const armSpecific = new Set(['Validation Commands'])
+  for (const [title, body] of cs) {
+    if (!ts.has(title)) problems.push(`control guide section "${title}" is missing from the treatment guide`)
+    else if (!armSpecific.has(title) && ts.get(title) !== body) {
+      problems.push(`section "${title}" differs between the control and the treatment guide`)
+    }
+  }
+  const extra = [...ts.keys()].filter((t) => !cs.has(t))
+  if (extra.length !== 1 || !/execution-points-prototype/.test(extra[0] ?? '')) {
+    problems.push(`treatment guide must add exactly the library section; extra sections: ${JSON.stringify(extra)}`)
+  }
+  if ([...cs.keys()].join('|') !== [...ts.keys()].filter((t) => cs.has(t)).join('|')) {
+    problems.push('the shared sections are in a different order in the two guides')
+  }
+
+  const taskNames = new Set()
+  for (const task of Object.values(TASKS)) {
+    for (const rel of [task.targetRel, ...task.epTargets, ...Object.keys(task.auxAsyncChecks)]) {
+      taskNames.add(path.basename(rel, '.ts'))
+    }
+    for (const name of [...Object.keys(task.expectedExports), ...task.asyncHelpers]) taskNames.add(name)
+    for (const aux of Object.values(task.auxAsyncChecks)) {
+      for (const name of [...Object.keys(aux.expectedExports), ...aux.asyncHelpers]) taskNames.add(name)
+    }
+  }
+  for (const [guide, text] of [['control-guide.md', control], ['treatment-guide.md', treatment]]) {
+    for (const name of taskNames) {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      if (new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`).test(text)) {
+        problems.push(`${guide} names "${name}", which is a module or function of a task`)
+      }
+    }
+  }
+  return problems
+}
+
+/**
+ * Typechecks every calibration variant in a control workspace (`tsc --noEmit`)
+ * and in a treatment workspace (`tsc --noEmit --runExternalCode`): reference
+ * fixes, valid fixes, single-bug mutants, and buggy refactors. Variants with
+ * identical files are checked once and keep all their labels.
+ *
+ * A fix that only fails in the treatment arm is rejected there by
+ * `contractTypecheckPass` and accepted in control, so this must be green
+ * before a paid run.
+ */
+async function typecheckCalibrationVariants(toolchains, { concurrency = 4 } = {}) {
+  const perTask = []
+  for (const taskId of Object.keys(TASKS)) {
+    const baseline = readTaskBaselineFiles(taskId)
+    const distinct = new Map()
+    const add = (kind, label, files) => {
+      const full = { ...baseline, ...files }
+      const key = `${taskId}::${createHash('sha256').update(JSON.stringify(Object.entries(full).sort())).digest('hex')}`
+      const e = distinct.get(key) ?? { key, taskId, files: full, labels: [], kinds: [] }
+      e.labels.push(label)
+      if (!e.kinds.includes(kind)) e.kinds.push(kind)
+      distinct.set(key, e)
+    }
+    if (REFERENCE_FIXES[taskId]) add('reference fix', 'REFERENCE_FIXES', REFERENCE_FIXES[taskId])
+    for (const v of VALID_FIX_VARIANTS[taskId] ?? []) add('valid fix', v.id, v.files)
+    for (const m of SINGLE_BUG_MUTANTS[taskId] ?? []) add('single-bug mutant', m.id, m.files)
+    for (const r of buildBuggyRefactors(taskId, baseline)) add('buggy refactor', r.id, r.files)
+    for (const arm of ['control', 'treatment']) perTask.push({ taskId, arm, variants: [...distinct.values()] })
+  }
+
+  const results = []
+  const runOne = async ({ taskId, arm, variants }) => {
+    const task = TASKS[taskId]
+    const { dir: ws } = createWorkspace({ taskId, arm, promptStyle: 'symptom', toolchains })
+    try {
+      const tscBin = path.join(ws, 'node_modules/.bin/tsc')
+      const tscArgs = arm === 'treatment' ? ['--noEmit', '--runExternalCode'] : ['--noEmit']
+      const starterTest = readFileSync(path.join(__dirname, 'tasks', taskId, task.testRel), 'utf8')
+      for (const v of variants) {
+        rmSync(path.join(ws, 'src'), { recursive: true, force: true })
+        mkdirSync(path.join(ws, 'src'), { recursive: true })
+        writeFileSync(path.join(ws, task.testRel), starterTest)
+        for (const [rel, content] of Object.entries(v.files)) {
+          mkdirSync(path.dirname(path.join(ws, rel)), { recursive: true })
+          writeFileSync(path.join(ws, rel), content)
+        }
+        const res = await runCmd(tscBin, tscArgs, ws, { timeoutMs: 120_000 })
+        const out = `${res.stdout}\n${res.stderr}`
+        const errors = [...new Set([...out.matchAll(/error (TS\d+): ([^\n]+)/g)].map((m) => `${m[1]}: ${m[2].trim().slice(0, 140)}`))]
+        results.push({ key: v.key, taskId, arm, labels: v.labels, kinds: v.kinds, ok: res.ok, errors: errors.slice(0, 3) })
+      }
+    } finally {
+      rmSync(ws, { recursive: true, force: true })
+    }
+  }
+  const queue = [...perTask]
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+      while (queue.length > 0) await runOne(queue.shift())
+    }),
+  )
+  return results
+}
+
 async function runSelfTest() {
-  console.log('Running v2.3 hardened benchmark self-test...\n')
+  console.log(`Running ${HARNESS_VERSION} hardened benchmark self-test (every graded variant runs ${DEFAULT_GRADE_REPEATS}x and must agree)...\n`)
   const provenance = computeProvenance()
   const toolchains = prepareToolchains(REPO_ROOT)
   let failures = 0
@@ -2127,8 +2475,8 @@ async function runSelfTest() {
     }
     console.log(`   PASS: ${astCases.length} test-audit + ${prodEvasions.length} prod-audit cases verified.\n`)
 
-    // 3. Treatment virtual contract check
-    console.log('3) Treatment virtual contract check (select() + tsc --noEmit --runExternalCode)...')
+    // 3. Treatment virtual contract check, in both selector styles
+    console.log('3) Treatment virtual contract check (select() in minimal AND verbose style + tsc --noEmit --runExternalCode)...')
     {
       const { dir: ws } = createWorkspace({
         taskId: 'stale-cache',
@@ -2143,14 +2491,29 @@ async function runSelfTest() {
 import { select } from 'execution-points-prototype'
 import { getProfile, resetStore, seedProfile } from './profile-store'
 
-const readPt = select('src/profile-store.ts', (n) =>
-  n.inFunction === 'getProfile' && n.kind === 'CallExpression' && n.callee === 'readFromDb' ? n : undefined,
+// Minimal style (what the treatment guide teaches): the callee alone, because it is unique.
+const readPt = select('src/profile-store.ts', (node) => node.callee === 'readFromDb' && node)
+
+// Verbose style: every field spelled out, ternary, explicit undefined. Kept so both are exercised.
+const formatPt = select('src/profile-store.ts', (n) =>
+  n.inFunction === 'getProfile' && n.kind === 'CallExpression' && n.callee === 'formatProfile' ? n : undefined,
 )
 
-test('select virtual contract typechecks and executes', async () => {
+test('minimal selector typechecks and executes', async () => {
   resetStore()
   seedProfile('u1', 'Alice')
-  const res = await readPt.withReplacement(async ({ original }) => original(), () => getProfile('u1'))
+  let reached = 0
+  const res = await readPt.withReplacement(async ({ original }) => { reached++; return original() }, () => getProfile('u1'))
+  expect(reached).toBe(1)
+  expect(res?.name).toBe('Alice')
+})
+
+test('verbose selector typechecks and executes', async () => {
+  resetStore()
+  seedProfile('u1', 'Alice')
+  let reached = 0
+  const res = await formatPt.withReplacement(async ({ original }) => { reached++; return original() }, () => getProfile('u1'))
+  expect(reached).toBe(1)
   expect(res?.name).toBe('Alice')
 })
 `,
@@ -2160,51 +2523,282 @@ test('select virtual contract typechecks and executes', async () => {
         const vitestRes = await runVitestClassified(ws, 'src/profile-store.test.ts', {
           configPath: path.join(ws, 'vitest.config.mjs'),
         })
-        if (!tscRes.ok || !vitestRes.ok) {
+        if (!tscRes.ok || !vitestRes.ok || vitestRes.numPassed !== 2) {
           console.error('   FAIL:', tscRes.stdout, tscRes.stderr, vitestRes)
           failures++
         } else {
-          console.log('   PASS: Treatment select() passes tsc --noEmit --runExternalCode + vitest.\n')
+          console.log('   PASS: both selector styles pass tsc --noEmit --runExternalCode + vitest.\n')
         }
       } finally {
         rmSync(ws, { recursive: true, force: true })
       }
     }
 
-    // 4. Timeout != true_red check
-    console.log('4) Timeout classification check (timeout must NOT count as true_red)...')
+    // 4. Failure classification: only an assertion failure is a reproduction
+    console.log('4) Failure classification (PROTOCOL section 2: only an AssertionError is true_red)...')
     {
-      const { dir: ws } = createWorkspace({
-        taskId: 'stale-cache',
-        arm: 'control',
-        promptStyle: 'symptom',
-        toolchains,
+      // 4a. The pure rules, on the message heads Vitest reports.
+      const kindCases = [
+        ['AssertionError: expected 1 to be 2 // Object.is equality\n    at file.test.ts:3:13', 'assertion'],
+        ['AssertionError [ERR_ASSERTION]: values differ\n    at file.test.ts:3:13', 'assertion'],
+        ["AssertionError: expected 'matched 2 rows' to be 'matched 1 row' // Object.is equality", 'assertion'],
+        ["AssertionError: expected [Function] to not throw an error but 'TypeError: cb is not a function' was thrown", 'assertion'],
+        ['AssertionError: expected "[execution-points] nope" to contain "ok"', 'assertion'],
+        ['Error: Test timed out in 1500ms.\nIf this is a long-running test, pass a timeout value', 'timeout'],
+        ['Error: Hook timed out in 10000ms.', 'timeout'],
+        ['Error: [execution-points] Visitor for "src/a.ts" must match exactly 1 expression; matched 0.', 'selector_break'],
+        ['Error: [execution-points] Visitor for "src/a.ts" must match exactly 1 expression; matched 2.', 'selector_break'],
+        ['Error: [execution-points] Target file "src/a.ts" was not instrumented or has not been imported yet. Check targets.', 'selector_break'],
+        ['TypeError: [execution-points] withReplacement requires a replacement function and an action function.', 'selector_break'],
+        ["Error: Cannot find module './gone' imported from '/x/src/a.test.ts'", 'load_break'],
+        ['Error: Failed to resolve import "./gone" from "src/a.test.ts". Does the file exist?', 'load_break'],
+        ['SyntaxError: Unexpected token (3:1)', 'load_break'],
+        ['TypeError: Forbidden global monkey-patch: runtime:globalThis.Promise', 'guard'],
+        ['TypeError: helper is not a function\n    at src/a.test.ts:9:3', 'error'],
+        ["Error: ENOENT: no such file or directory, open '/tmp/x/j1.stage.tmp'", 'error'],
+        ['ReferenceError: matched is not defined', 'error'],
+        ['Error: matched 2 rows but wanted 1', 'error'],
+        ['no error name at all', 'error'],
+      ]
+      let kindFailures = 0
+      for (const [msg, want] of kindCases) {
+        const got = classifyFailureMessage(msg)
+        if (got !== want) {
+          console.error(`   FAIL: ${JSON.stringify(msg.split('\n')[0])} classified ${got}, expected ${want}`)
+          kindFailures++
+        }
+      }
+      const outcomeCases = [
+        [['TypeError: x is not a function'], 'error'],
+        [['Error: [execution-points] Visitor for "a" must match exactly 1 expression; matched 0.'], 'loud_break'],
+        [['Error: Test timed out in 1500ms.'], 'timeout'],
+        [['Error: Test timed out in 1500ms.', 'Error: [execution-points] x'], 'timeout'],
+        [['TypeError: x is not a function', 'AssertionError: expected 1 to be 2'], 'true_red'],
+        [['Error: [execution-points] x', "Error: ENOENT: no such file or directory, open 'a'"], 'loud_break'],
+      ]
+      for (const [msgs, want] of outcomeCases) {
+        const got = classifyFailedTests(msgs.map((m) => ({ failureMessages: [m] }))).outcome
+        if (got !== want) {
+          console.error(`   FAIL: failed tests ${JSON.stringify(msgs)} gave outcome ${got}, expected ${want}`)
+          kindFailures++
+        }
+      }
+      // Calibration: the v2.3 rule (anything outside its two patterns is true_red) must be
+      // rejected by these cases, or they would not show the fix.
+      const v23Timeout = /Test timed out|Hook timed out|timed out in \d+ms/i
+      const v23Loud =
+        /matched 0|matched \d+|Cannot find module|SyntaxError|Transform failed|ExecutionPoint|Failed to resolve import|is not a function|Forbidden global monkey-patch|Forbidden sleep/i
+      const v23 = (msg) => (v23Timeout.test(msg) ? 'timeout' : v23Loud.test(msg) ? 'loud_break' : 'true_red')
+      const v23Wrong = kindCases.filter(([msg, want]) => {
+        const old = v23(msg)
+        const now = want === 'assertion' ? 'true_red' : want === 'timeout' ? 'timeout' : want === 'error' ? 'error' : 'loud_break'
+        return old !== now
       })
-      try {
-        writeFileSync(
-          path.join(ws, 'src/profile-store.test.ts'),
-          `import { test } from 'vitest'
+      if (v23Wrong.length === 0) {
+        console.error('   FAIL: no classification case separates the v2.3 rule from the current one')
+        kindFailures++
+      }
+      failures += kindFailures
+      console.log(
+        `   ${kindFailures === 0 ? 'PASS' : 'FAIL'}: ${kindCases.length} message cases + ${outcomeCases.length} run cases (${v23Wrong.length} of the message cases are ones the v2.3 rule got wrong).`,
+      )
+
+      // 4b. The same through real Vitest runs, control and treatment workspaces.
+      const e2e = [
+        {
+          name: 'hanging test -> timeout',
+          arm: 'control',
+          want: 'timeout',
+          test: `import { test } from 'vitest'
 test('hangs forever waiting for uncalled seam', async () => {
   await new Promise(() => {})
 }, 150)
 `,
-        )
-        const res = await runVitestClassified(ws, 'src/profile-store.test.ts', {
-          configPath: path.join(ws, 'vitest.config.mjs'),
-        })
-        if (res.outcome !== 'timeout') {
-          console.error(`   FAIL: expected timeout, got ${res.outcome}:`, res.summary)
-          failures++
-        } else {
-          console.log('   PASS: hanging test classified as timeout (not true_red).\n')
+        },
+        {
+          name: 'expect() failure -> true_red',
+          arm: 'control',
+          want: 'true_red',
+          test: `import { expect, test } from 'vitest'
+test('assertion', () => { expect(1).toBe(2) })
+`,
+        },
+        {
+          name: 'node:assert failure -> true_red',
+          arm: 'control',
+          want: 'true_red',
+          test: `import assert from 'node:assert/strict'
+import { test } from 'vitest'
+test('assertion', () => { assert.equal(1, 2) })
+`,
+        },
+        {
+          name: 'assertion text contains "matched 2" -> true_red',
+          arm: 'control',
+          want: 'true_red',
+          test: `import { expect, test } from 'vitest'
+test('assertion', () => { expect('matched 2 rows').toBe('matched 1 row') })
+`,
+        },
+        {
+          name: 'assertion text contains "is not a function" -> true_red',
+          arm: 'control',
+          want: 'true_red',
+          test: `import { expect, test } from 'vitest'
+test('assertion', () => {
+  expect(() => { throw new TypeError('cb is not a function') }).not.toThrow()
+})
+`,
+        },
+        {
+          name: 'TypeError "is not a function" -> error (not a reproduction, not a selector break)',
+          arm: 'control',
+          want: 'error',
+          test: `import { test } from 'vitest'
+import * as store from './profile-store'
+test('calls a helper that does not exist', () => {
+  ;(store as unknown as { noSuchHelper: () => void }).noSuchHelper()
+})
+`,
+        },
+        {
+          name: 'ENOENT escaping the code under test -> error',
+          arm: 'control',
+          want: 'error',
+          test: `import fs from 'node:fs/promises'
+import { test } from 'vitest'
+test('rejection escapes', async () => { await fs.readFile('/no/such/dir/j1.stage.tmp', 'utf8') })
+`,
+        },
+        {
+          name: 'all tests pass but a rejection is unhandled -> error (Vitest exits non-zero)',
+          arm: 'control',
+          want: 'error',
+          test: `import { expect, test } from 'vitest'
+test('passes while a rejection is left unhandled', async () => {
+  void Promise.reject(new Error('left behind'))
+  await new Promise<void>((r) => setImmediate(r))
+  expect(1).toBe(1)
+})
+`,
+        },
+        {
+          name: 'library: visitor matches 0 inside a test -> loud_break',
+          arm: 'treatment',
+          want: 'loud_break',
+          test: `import { test } from 'vitest'
+import { select } from 'execution-points-prototype'
+import { getProfile } from './profile-store'
+test('selector that matches nothing', async () => {
+  const point = select('src/profile-store.ts', (n: any) => n.callee === 'noSuchHelper' && n)
+  await point.withReplacement(async ({ original }: any) => original(), () => getProfile('u1'))
+})
+`,
+        },
+        {
+          name: 'library: visitor matches 2 inside a test -> loud_break',
+          arm: 'treatment',
+          want: 'loud_break',
+          test: `import { test } from 'vitest'
+import { select } from 'execution-points-prototype'
+import { getProfile } from './profile-store'
+test('selector that matches twice', async () => {
+  const point = select('src/profile-store.ts', (n: any) => n.callee === 'yieldIo' && n)
+  await point.withReplacement(async ({ original }: any) => original(), () => getProfile('u1'))
+})
+`,
+        },
+        {
+          name: 'library: target file was not instrumented -> loud_break',
+          arm: 'treatment',
+          want: 'loud_break',
+          test: `import { test } from 'vitest'
+import { select } from 'execution-points-prototype'
+test('selects in a file that is not a target', async () => {
+  const point = select('src/not-a-target.ts', (n: any) => n)
+  await point.withReplacement(async ({ original }: any) => original(), async () => 1)
+})
+`,
+        },
+      ]
+      const workspaces = {}
+      try {
+        for (const arm of ['control', 'treatment']) {
+          workspaces[arm] = createWorkspace({ taskId: 'stale-cache', arm, promptStyle: 'symptom', toolchains }).dir
         }
+        for (const c of e2e) {
+          const ws = workspaces[c.arm]
+          writeFileSync(path.join(ws, 'src/profile-store.test.ts'), c.test)
+          const res = await runVitestClassified(ws, 'src/profile-store.test.ts', {
+            configPath: path.join(ws, 'vitest.config.mjs'),
+          })
+          const ok = res.outcome === c.want
+          console.log(`   ${ok ? 'PASS' : 'FAIL'} ${c.name} (got ${res.outcome})`)
+          if (!ok) {
+            failures++
+            console.error('     summary:', res.summary)
+          }
+        }
+
+        // 4c. Repeated runs must agree: a test that fails once and then passes is 'unstable'.
+        const ws = workspaces.control
+        writeFileSync(
+          path.join(ws, 'src/profile-store.test.ts'),
+          `import { existsSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { expect, test } from 'vitest'
+test('fails on the first run only', () => {
+  const marker = path.join(import.meta.dirname, '.ran-before')
+  const ranBefore = existsSync(marker)
+  writeFileSync(marker, '')
+  expect(ranBefore).toBe(true)
+})
+`,
+        )
+        const flaky = await runVitestRepeated(
+          ws,
+          'src/profile-store.test.ts',
+          { configPath: path.join(ws, 'vitest.config.mjs') },
+          3,
+        )
+        const flakyOk =
+          flaky.outcome === 'unstable' &&
+          flaky.ok === false &&
+          JSON.stringify(flaky.runs) === JSON.stringify(['true_red', 'passed', 'passed'])
+        console.log(`   ${flakyOk ? 'PASS' : 'FAIL'} disagreeing repeated runs -> unstable (runs: ${flaky.runs.join(', ')})`)
+        if (!flakyOk) failures++
       } finally {
-        rmSync(ws, { recursive: true, force: true })
+        for (const ws of Object.values(workspaces)) rmSync(ws, { recursive: true, force: true })
       }
+
+      // 4d. The verdict over repeated runs: 'unstable' is never 'adequate'.
+      const R = ['true_red', 'true_red', 'true_red']
+      const G = ['passed', 'passed', 'passed']
+      const verdictCases = [
+        [{ baselineRuns: R, mutantRuns: [R], validFixRuns: [G], ownFixRuns: G }, 'adequate'],
+        [{ baselineRuns: R, mutantRuns: [['true_red', 'passed', 'true_red']], validFixRuns: [G], ownFixRuns: G }, 'unstable'],
+        [{ baselineRuns: R, mutantRuns: [['passed', 'passed', 'passed']], validFixRuns: [G], ownFixRuns: G }, 'inadequate'],
+        [{ baselineRuns: R, mutantRuns: [['error', 'passed', 'error']], validFixRuns: [G], ownFixRuns: G }, 'inadequate'],
+        [{ baselineRuns: R, mutantRuns: [R], validFixRuns: [['passed', 'timeout', 'passed'], G], ownFixRuns: G }, 'adequate'],
+        [{ baselineRuns: R, mutantRuns: [R], validFixRuns: [['passed', 'timeout', 'passed']], ownFixRuns: G }, 'unstable'],
+        [{ baselineRuns: R, mutantRuns: [R], validFixRuns: [G], ownFixRuns: ['passed', 'true_red', 'passed'] }, 'unstable'],
+        [{ baselineRuns: ['timeout', 'timeout', 'timeout'], mutantRuns: [R], validFixRuns: [G], ownFixRuns: G }, 'inadequate'],
+        [{ baselineRuns: R, mutantRuns: [], validFixRuns: [], ownFixRuns: G }, 'inadequate'],
+      ]
+      let verdictFailures = 0
+      for (const [input, want] of verdictCases) {
+        const got = reproductionVerdict(input)
+        if (got !== want) {
+          console.error(`   FAIL: reproductionVerdict(${JSON.stringify(input)}) = ${got}, expected ${want}`)
+          verdictFailures++
+        }
+      }
+      failures += verdictFailures
+      console.log(`   ${verdictFailures === 0 ? 'PASS' : 'FAIL'}: ${verdictCases.length} reproduction-verdict cases.\n`)
     }
 
-    // 5. All 6 constructed adversarial cheats MUST be rejected (solved === false)!
-    console.log('5) Adversarial must-reject cheat suite (E-01, E-04, E-05, E-06, R-19, R-01)...')
+    // 5. All constructed adversarial cheats MUST be rejected (solved === false)!
+    console.log('5) Adversarial must-reject cheat suite (E-01, E-04, E-05, E-06, R-19, R-01, N-22, N-23)...')
     const buggyStale = readFileSync(
       path.join(__dirname, 'tasks/stale-cache/src/profile-store.ts'),
       'utf8',
@@ -2263,18 +2857,29 @@ test('hangs forever waiting for uncalled seam', async () => {
         copilotVersion: 'self-test',
         toolchains,
       })
-      const ok = graded.solved === true && graded.adequateReproduction === true
+      const vf = graded.validFixRobustness ?? { trueGreenCount: 0, total: 0 }
+      const ok =
+        graded.solved === true &&
+        graded.adequateReproduction === true &&
+        graded.reproduction === 'adequate' &&
+        (graded.unstableVariants ?? []).length === 0 &&
+        (!w.requireAllValidFixes || (vf.total > 0 && vf.trueGreenCount === vf.total))
       console.log(
-        `   ${ok ? 'PASS' : 'FAIL'} ${w.id.padEnd(36)} solved=${graded.solved} adq=${graded.adequateReproduction} ref=${graded.refFixPass} vf=${graded.validFixRobustness.trueGreenCount}/${graded.validFixRobustness.total}`,
+        `   ${ok ? 'PASS' : 'FAIL'} ${w.id.padEnd(44)} solved=${graded.solved} reproduction=${graded.reproduction} ref=${graded.refFixPass} vf=${vf.trueGreenCount}/${vf.total} unstable=${(graded.unstableVariants ?? []).length}`,
       )
       if (!ok) {
         failures++
         console.error('     details:', {
+          harnessError: graded.harnessError,
           oraclePass: graded.oraclePass,
           visibleTestsPass: graded.visibleTestsPass,
           agentTestsPass: graded.agentTestsPass,
+          agentTestsRuns: graded.agentTestsRuns,
           redOutcome: graded.redOutcome,
-          mutants: graded.singleBugMutants,
+          redSummary: graded.redSummary,
+          mutants: JSON.stringify(graded.singleBugMutants),
+          validFixes: JSON.stringify(graded.validFixRobustness?.results),
+          unstableVariants: graded.unstableVariants,
           refFixOutcome: graded.refFixOutcome,
           typecheckError: graded.typecheckError,
           contractTypecheckError: graded.contractTypecheckError,
@@ -2286,8 +2891,56 @@ test('hangs forever waiting for uncalled seam', async () => {
     }
     console.log()
 
-    // 7. Baseline workspace checks across all 10 tasks (control + treatment)
-    console.log(`7) Baseline workspace checks across all ${Object.keys(TASKS).length} tasks (control + treatment)...`)
+    // 7. Deterministic leaf disk I/O on the real-filesystem task (D-09)
+    console.log('7) Deterministic leaf disk I/O: a settle()-ordered test gives one outcome on CC-M1 (cancel-commit)...')
+    {
+      const task = TASKS['cancel-commit']
+      const mutant = SINGLE_BUG_MUTANTS['cancel-commit'].find((m) => m.id === 'CC-M1-shared-stage-file')
+      const PROBE_RUNS = 10
+      const tally = {}
+      for (const mode of ['deterministic', 'real']) {
+        const dir = realpathSync(mkdtempSync(path.join(realpathSync(tmpdir()), 'ep-selftest-io-')))
+        try {
+          const cfg = writePristineWorkspaceConfigs(
+            dir,
+            mode === 'deterministic' ? task : { ...task, deterministicLeafIo: false },
+            'control',
+            { includeRuntimeGuard: true },
+          )
+          toolchains.installForTrial('control', dir)
+          mkdirSync(path.join(dir, 'src'), { recursive: true })
+          writeFileSync(path.join(dir, task.targetRel), mutant.files[task.targetRel])
+          writeFileSync(path.join(dir, task.testRel), PROBE_CANCEL_COMMIT_SETTLE_TEST)
+          const outcomes = []
+          for (let i = 0; i < PROBE_RUNS; i++) {
+            const r = await runVitestClassified(dir, task.testRel, {
+              configPath: cfg,
+              testTimeoutMs: 1500,
+              requireGuardReport: true,
+            })
+            outcomes.push(r.outcome)
+          }
+          tally[mode] = outcomes.reduce((acc, o) => ({ ...acc, [o]: (acc[o] ?? 0) + 1 }), {})
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      }
+      const det = Object.entries(tally.deterministic)
+      // One outcome in every run, and that outcome is the error that escaped the code
+      // (`ENOENT`), which is not a reproduction.
+      const ok = det.length === 1 && det[0][0] === 'error'
+      console.log(
+        `   ${ok ? 'PASS' : 'FAIL'} with deterministic I/O, ${PROBE_RUNS} runs: ${JSON.stringify(tally.deterministic)} (must be a single outcome, and 'error')`,
+      )
+      console.log(
+        `   INFO with real asynchronous disk I/O on this machine, ${PROBE_RUNS} runs: ${JSON.stringify(tally.real)} (not asserted: this is the timing dependence the setup removes)`,
+      )
+      if (!ok) failures++
+      console.log()
+    }
+
+    // 8. Baseline workspace checks across all 10 tasks (control + treatment)
+    console.log(`8) Baseline workspace checks across all ${Object.keys(TASKS).length} tasks (control + treatment)...`)
     for (const taskId of Object.keys(TASKS)) {
       const task = TASKS[taskId]
       for (const arm of ['control', 'treatment']) {
@@ -2314,8 +2967,48 @@ test('hangs forever waiting for uncalled seam', async () => {
     }
     console.log()
 
-    // 8. Full calibration corpus across all 10 tasks
-    console.log(`8) Grader calibration corpus (${CALIBRATION_VARIANTS.length} variants across 10 tasks)...`)
+    // 9. Every calibration variant must typecheck in BOTH arms, not only the baselines
+    console.log('9) Typecheck of every reference fix, valid fix, single-bug mutant and buggy refactor (control: tsc --noEmit; treatment: tsc --noEmit --runExternalCode)...')
+    {
+      const results = await typecheckCalibrationVariants(toolchains)
+      const byVariant = new Map()
+      for (const r of results) {
+        const e = byVariant.get(r.key) ?? { ...r, arms: {} }
+        e.arms[r.arm] = r
+        byVariant.set(r.key, e)
+      }
+      let bad = 0
+      const gating = { ok: 0, total: 0 }
+      for (const v of byVariant.values()) {
+        const c = v.arms.control
+        const t = v.arms.treatment
+        const isFix = v.kinds.includes('reference fix') || v.kinds.includes('valid fix')
+        if (isFix) {
+          gating.total++
+          if (c.ok && t.ok) gating.ok++
+        }
+        if (c.ok && t.ok) continue
+        bad++
+        failures++
+        const where = !c.ok && !t.ok ? 'BOTH arms' : !t.ok ? 'TREATMENT only (the treatment-only virtual contract check)' : 'CONTROL only'
+        console.log(`   FAIL ${v.taskId.padEnd(22)} ${v.labels.join(' = ')} [${v.kinds.join(', ')}] fails in ${where}`)
+        for (const arm of ['control', 'treatment']) {
+          if (!v.arms[arm].ok) console.log(`        ${arm}: ${v.arms[arm].errors.join(' | ') || 'tsc failed without a TS diagnostic'}`)
+        }
+      }
+      console.log(
+        `   ${bad === 0 ? 'PASS' : 'FAIL'}: ${byVariant.size - bad}/${byVariant.size} distinct variants typecheck in both arms (${results.length} tsc runs); reference and valid fixes: ${gating.ok}/${gating.total}.`,
+      )
+      if (bad > 0) {
+        console.log(
+          '   A fix that fails only in the treatment arm would be scored contractTypecheckPass=false there and pass in control.',
+        )
+      }
+      console.log()
+    }
+
+    // 10. Full calibration corpus across all 10 tasks
+    console.log(`10) Grader calibration corpus (${CALIBRATION_VARIANTS.length} variants across 10 tasks)...`)
     for (const v of CALIBRATION_VARIANTS) {
       const srcFiles = v.useBaseline ? {} : v.files
       const res = await runHiddenOracleGrader({
@@ -2337,8 +3030,8 @@ test('hangs forever waiting for uncalled seam', async () => {
     }
     console.log()
 
-    // 9. N-18: Hidden oracle MUST reject EVERY SINGLE_BUG_MUTANT across all 10 tasks (including CC-M1!)
-    console.log('9) Hidden oracle rejection check across ALL single-bug mutants (N-18)...')
+    // 11. N-18: Hidden oracle MUST reject EVERY SINGLE_BUG_MUTANT across all 10 tasks (including CC-M1!)
+    console.log('11) Hidden oracle rejection check across ALL single-bug mutants (N-18)...')
     for (const [taskId, mutants] of Object.entries(SINGLE_BUG_MUTANTS)) {
       for (const m of mutants) {
         const res = await runHiddenOracleGrader({
@@ -2359,8 +3052,8 @@ test('hangs forever waiting for uncalled seam', async () => {
     }
     console.log()
 
-    // 10. Production AST audit on all 10 reference fixes
-    console.log(`10) Production AST audit on all ${Object.keys(REFERENCE_FIXES).length} reference fixes...`)
+    // 12. Production AST audit on all 10 reference fixes
+    console.log(`12) Production AST audit on all ${Object.keys(REFERENCE_FIXES).length} reference fixes...`)
     for (const [taskId, files] of Object.entries(REFERENCE_FIXES)) {
       const task = TASKS[taskId]
       const audit = auditProductionAst(files[task.targetRel], {
@@ -2376,6 +3069,52 @@ test('hangs forever waiting for uncalled seam', async () => {
         console.error('     audit:', audit)
       }
     }
+    console.log()
+
+    // 13. Both arms get the same guidance; the treatment guide only adds the library section
+    console.log('13) Guide parity (shared sections identical, no task identifiers in either guide)...')
+    {
+      const problems = checkGuideParity()
+      for (const problem of problems) console.error(`   FAIL: ${problem}`)
+      failures += problems.length
+      if (problems.length === 0) {
+        console.log('   PASS: control guide sections appear verbatim in the treatment guide; the only extra section is the library one; no task identifier appears.')
+      }
+    }
+
+    // 14. One harness version everywhere
+    {
+      const problems = checkVersionStrings()
+      console.log(`\n14) Version strings (${HARNESS_VERSION} in the protocol and in every file header that names a harness version)...`)
+      for (const problem of problems) console.error(`   FAIL: ${problem}`)
+      failures += problems.length
+      if (problems.length === 0) console.log('   PASS: the protocol and all file headers agree.')
+    }
+
+    // 15. A matrix that does not fit the credit cap is refused before it starts
+    console.log('\n15) Credit projection (a rerun of the last stored matrix does not fit the default cap)...')
+    {
+      const lastMatrix = []
+      for (const spec of ['gpt-6.2-sol:low', 'gpt-6.2-sol:medium', 'claude-haiku-5.5:low', 'claude-haiku-5.5:medium']) {
+        const [model, reasoning] = spec.split(':')
+        for (let i = 0; i < 20; i++) lastMatrix.push({ model, reasoning })
+      }
+      const defaults = parseArgs([])
+      const refused = checkBudget(lastMatrix, defaults)
+      const fits = checkBudget(lastMatrix, { ...defaults, maxTotalCredits: 500 })
+      const unknown = checkBudget([{ model: 'no-such-model', reasoning: 'low' }], defaults)
+      const withOverride = checkBudget([{ model: 'no-such-model', reasoning: 'low' }], { ...defaults, creditsPerTrial: 5 })
+      const ok =
+        refused.ok === false &&
+        refused.projection.trialsMean === 377.8 &&
+        fits.ok === true &&
+        unknown.ok === false &&
+        withOverride.ok === true
+      console.log(
+        `   ${ok ? 'PASS' : 'FAIL'}: last matrix projected at ${refused.projection.projected} cr (trials alone ${refused.projection.trialsMean}; it used 377.8) is refused at the default cap ${defaults.maxTotalCredits} and accepted at 500; an unknown model is refused until --credits-per-trial is given.`,
+      )
+      if (!ok) failures++
+    }
   } finally {
     closeAuditApi()
     toolchains.cleanup()
@@ -2387,7 +3126,7 @@ test('hangs forever waiting for uncalled seam', async () => {
     process.exit(1)
   }
   console.log(
-    `Self-test PASSED (isolation, AST+runtime guards, ${cheatCount} cheats rejected, ${GOOD_WITNESSES.length} legal witnesses passed, 10 tasks, ${CALIBRATION_VARIANTS.length} calibration variants, and all single-bug mutants rejected by oracle).`,
+    `Self-test PASSED (isolation, AST+runtime guards, failure classification, repeated grading, ${cheatCount} cheats rejected, ${GOOD_WITNESSES.length} legal witnesses passed, deterministic leaf I/O, 10 tasks, every variant typechecked in both arms, ${CALIBRATION_VARIANTS.length} calibration variants, and all single-bug mutants rejected by oracle).`,
   )
 }
 
@@ -2404,10 +3143,16 @@ function summarizeByArm(results) {
       aborted: 0,
       monkeyPatched: 0,
       usedExecutionPoints: 0,
+      unstableReproduction: 0,
       refactorTotal: 0,
+      refactorStillRed: 0,
+      refactorStoppedTesting: 0,
+      refactorLoudBreaks: 0,
+      refactorTimeouts: 0,
       refactorFalseGreens: 0,
       validAltTotal: 0,
       validAltPass: 0,
+      validAltNotGreen: 0,
       validAltFalseRedAssert: 0,
       validAltTimeout: 0,
       validAltSelectorCompile: 0,
@@ -2427,16 +3172,25 @@ function summarizeByArm(results) {
     if (r.aborted) g.aborted++
     if (!r.noGlobalMonkeyPatch) g.monkeyPatched++
     if (r.usesExecutionPoints) g.usedExecutionPoints++
+    if (r.reproduction === 'unstable') g.unstableReproduction++
+    // One set of counts for both arms (`bench/classify.mjs`), over adequate rows only (D-08).
     if (r.adequateReproduction && r.refactorRobustness) {
-      g.refactorTotal += r.refactorRobustness.total ?? 0
-      g.refactorFalseGreens += r.refactorRobustness.falseGreenCount ?? 0
+      const rf = countRefactorResults(r.refactorRobustness.results ?? [])
+      g.refactorTotal += rf.total
+      g.refactorStillRed += rf.stillRed
+      g.refactorStoppedTesting += rf.stoppedTesting
+      g.refactorLoudBreaks += rf.loudBreak
+      g.refactorTimeouts += rf.timeout
+      g.refactorFalseGreens += rf.falseGreen
     }
     if (r.adequateReproduction && r.validFixRobustness) {
-      g.validAltTotal += r.validFixRobustness.total ?? 0
-      g.validAltPass += r.validFixRobustness.trueGreenCount ?? 0
-      g.validAltFalseRedAssert += r.validFixRobustness.falseRedAssertionCount ?? 0
-      g.validAltTimeout += r.validFixRobustness.timeoutCount ?? 0
-      g.validAltSelectorCompile += r.validFixRobustness.selectorOrCompileBreakCount ?? 0
+      const vf = countValidFixResults(r.validFixRobustness.results ?? [])
+      g.validAltTotal += vf.total
+      g.validAltPass += vf.green
+      g.validAltNotGreen += vf.notGreen
+      g.validAltFalseRedAssert += vf.assertion
+      g.validAltTimeout += vf.timeout
+      g.validAltSelectorCompile += vf.selectorOrCompileBreak
     }
     const u = r.usage ?? {}
     if (!u.usageMissing) {
@@ -2457,10 +3211,9 @@ function summarizeByArm(results) {
     g.adequateRedCI = wilsonCI(g.adequateRed, g.trials)
     g.falseGreenCI = wilsonCI(g.refactorFalseGreens, g.refactorTotal)
     g.validFixPassCI = wilsonCI(g.validAltPass, g.validAltTotal)
-    g.validFixFalseRedCI = wilsonCI(
-      g.validAltFalseRedAssert + g.validAltTimeout,
-      g.validAltTotal,
-    )
+    // Every valid fix the test did not pass, whatever the reason: a selector break in a
+    // library test and a timeout in a `vi.mock` test count the same.
+    g.validFixFalseRedCI = wilsonCI(g.validAltNotGreen, g.validAltTotal)
     g.avgDurationSec = g.trials ? g.totalDurationMs / g.trials / 1000 : 0
     g.tokensPerSolved = g.solved > 0 && g.usdKnownTrials > 0 ? Math.round(g.totalTokens / g.solved) : null
     g.usdPerSolved = g.solved > 0 && g.usdKnownTrials > 0 ? g.totalUsd / g.solved : null
@@ -2520,8 +3273,9 @@ function printSummary(results, byArm, outDir) {
     console.log(
       [
         `${arm.toUpperCase()}: solved=${g.solved}/${g.trials} ${formatCI(g.solvedCI)}`,
-        `adqRED=${formatCI(g.adequateRedCI)}`,
-        `VFPass=${g.validAltPass}/${g.validAltTotal} (assert=${g.validAltFalseRedAssert},to=${g.validAltTimeout},sel=${g.validAltSelectorCompile})`,
+        `adqRED=${formatCI(g.adequateRedCI)} (unstable=${g.unstableReproduction})`,
+        `refactors: stillRed=${g.refactorStillRed}/${g.refactorTotal} stoppedTesting=${g.refactorStoppedTesting} (loud=${g.refactorLoudBreaks},to=${g.refactorTimeouts})`,
+        `VFPass=${g.validAltPass}/${g.validAltTotal} notGreen=${g.validAltNotGreen} (assert=${g.validAltFalseRedAssert},to=${g.validAltTimeout},sel=${g.validAltSelectorCompile})`,
         `FG=${formatCI(g.falseGreenCI)}`,
         `credits=${g.totalAiCredits.toFixed(1)} (${g.solved > 0 ? (g.totalAiCredits / g.solved).toFixed(1) : 'n/a'}/solved) | listUsd=${formatUsd(g.totalUsd)}`,
         `tech=${JSON.stringify(g.techniques)}`,
@@ -2538,7 +3292,7 @@ function printSummary(results, byArm, outDir) {
   )
   if (rd.diff !== null) {
     console.log(
-      `Newcombe paired RD (Strata B+C, blocks=${rd.blocks}): ${(rd.diff * 100).toFixed(1)}pp [${(rd.low * 100).toFixed(1)}pp, ${(rd.high * 100).toFixed(1)}pp]`,
+      `Newcombe Method 10 paired RD (Strata B+C, blocks=${rd.blocks}): ${(rd.diff * 100).toFixed(1)}pp [${(rd.low * 100).toFixed(1)}pp, ${(rd.high * 100).toFixed(1)}pp]`,
     )
   }
   if (closedModRows.length > 0) {
@@ -2551,21 +3305,63 @@ function printSummary(results, byArm, outDir) {
   console.log(`Run \`node bench/analyze.mjs ${path.join(outDir, 'results.jsonl')}\` for full stratified report.`)
 }
 
-async function runRegrade(regradeDir) {
+/** The provenance a stored row was produced under (never the current checkout's). */
+function storedProvenance(row) {
+  return {
+    gitCommit: row.gitCommit,
+    gitDirty: row.gitDirty,
+    vitestVersion: row.vitestVersion,
+    typescriptVersion: row.typescriptVersion,
+    harnessSha256: row.harnessSha256,
+    calibrationSha256: row.calibrationSha256,
+    lockfileSha256: row.lockfileSha256,
+    toolSha256: row.toolSha256,
+    tasksSha256: row.tasksSha256,
+    graderChecksum: row.graderChecksum,
+  }
+}
+
+/**
+ * Re-grades the stored trials of a run at zero credits.
+ *
+ * Each output row keeps the ORIGINAL trial's provenance in the usual fields and
+ * records the re-grading checkout under `regradedWith`, so a re-graded old run
+ * can never pass for a run of the current checkout. `bench/analyze.mjs` refuses
+ * to pool rows whose `regradedWith` differ. The stored run directory is only
+ * read when `--out <dir>` is given; without it the output file is written next
+ * to the stored results, as before.
+ */
+async function runRegrade(regradeDir, { outDir = null, only = null, gradeRepeats = DEFAULT_GRADE_REPEATS } = {}) {
   const srcJsonl = path.join(regradeDir, 'results.jsonl')
   if (!existsSync(srcJsonl)) throw new Error(`Missing ${srcJsonl}`)
-  const origRows = readFileSync(srcJsonl, 'utf8')
+  let origRows = readFileSync(srcJsonl, 'utf8')
     .split('\n')
     .filter((l) => l.trim())
     .map((l) => JSON.parse(l))
+  if (only) {
+    origRows = origRows.filter((r) => only.some((needle) => r.trialId === needle || r.trialId.includes(needle)))
+    if (origRows.length === 0) throw new Error(`--only matched no trial in ${srcJsonl}`)
+  }
 
-  const provenance = computeProvenance()
+  const current = computeProvenance()
   const runTmpRoot = realpathSync(mkdtempSync(path.join(realpathSync(tmpdir()), 'ep-regrade-')))
   const toolchains = prepareToolchains(REPO_ROOT, runTmpRoot)
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-  const outJsonl = path.join(regradeDir, `regraded-${stamp}.jsonl`)
+  const targetDir = outDir ?? regradeDir
+  mkdirSync(targetDir, { recursive: true })
+  const outJsonl = path.join(targetDir, `regraded-${stamp}.jsonl`)
+  const regradedWith = {
+    at: new Date().toISOString(),
+    harnessVersion: HARNESS_VERSION,
+    gradeRepeats,
+    sourceDir: regradeDir,
+    ...current,
+    graderChecksum: toolchains.graderChecksum,
+  }
 
-  console.log(`Re-grading ${origRows.length} rows from ${regradeDir} -> ${outJsonl}`)
+  console.log(
+    `Re-grading ${origRows.length} rows from ${regradeDir} -> ${outJsonl} (harness ${HARNESS_VERSION}, git=${current.gitCommit}${current.gitDirty ? '-dirty' : ''}, ${gradeRepeats} runs per variant)`,
+  )
   try {
     for (let i = 0; i < origRows.length; i++) {
       const orig = origRows[i]
@@ -2605,14 +3401,22 @@ async function runRegrade(regradeDir) {
           allWorkspaceFiles: srcFiles,
         },
         runId: orig.runId ?? 'regrade',
-        provenance,
+        provenance: storedProvenance(orig),
         copilotVersion: orig.copilotVersion ?? 'unknown',
         toolchains,
+        gradeRepeats,
+        carryOver: {
+          tamperedConfigs: orig.tamperedConfigs,
+          addedRootFiles: orig.addedRootFiles,
+          modifiedConfigs: orig.modifiedConfigs,
+        },
+        regradedWith,
         parentDir: runTmpRoot,
       })
       appendFileSync(outJsonl, JSON.stringify(r) + '\n')
+      const unstable = r.unstableVariants?.length ? ` unstable=[${r.unstableVariants.join(',')}]` : ''
       console.log(
-        `[${i + 1}/${origRows.length}] ${r.trialId} -> solved=${r.solved} (was ${orig.solved}) oracle=${r.oraclePass} adq=${r.adequateReproduction} validAny=${r.passesAtLeastOneValidFix}`,
+        `[${i + 1}/${origRows.length}] ${r.trialId} -> solved=${r.solved} (was ${orig.solved}) oracle=${r.oraclePass} reproduction=${r.reproduction} (was adq=${orig.adequateReproduction}) validAny=${r.passesAtLeastOneValidFix}${unstable}`,
       )
     }
   } finally {
@@ -2623,6 +3427,40 @@ async function runRegrade(regradeDir) {
   console.log(`Re-grade complete: ${outJsonl}`)
 }
 
+/**
+ * Compares the projected credit need of the planned matrix with `--max-total-credits`.
+ * `--max-total-credits 0` disables both this check and the per-block cap.
+ */
+export function checkBudget(jobs, opts) {
+  const projection = projectCredits(jobs, {
+    creditsPerTrial: opts.creditsPerTrial,
+    includePreflight: !opts.skipPreflight,
+  })
+  const lines = ['=== Projected Credit Need ===']
+  for (const [key, cell] of Object.entries(projection.perCell)) {
+    lines.push(`  ${key.padEnd(28)} ${String(cell.trials).padStart(4)} trials x ${cell.perTrial.toFixed(2)} cr = ${cell.credits.toFixed(1)} cr`)
+  }
+  const cap = opts.maxTotalCredits
+  if (projection.projected === null) {
+    lines.push(`  no observed cost for: ${projection.unknown.join(', ')}`)
+    const reason = `no credit estimate for ${projection.unknown.join(', ')}; pass --credits-per-trial <n> (your estimate per trial) so the need can be projected`
+    lines.push(`  Projection: unavailable (cap --max-total-credits=${cap})`)
+    return { ok: cap <= 0, reason, projection, lines }
+  }
+  lines.push(
+    `  Projection: ${projection.trialsMean} cr for ${jobs.length} trials (${projection.source}) x ${projection.margin} margin + ${projection.preflight} cr preflight = ${projection.projected} cr | cap --max-total-credits=${cap > 0 ? cap : 'off'}`,
+  )
+  if (cap > 0 && projection.projected > cap) {
+    return {
+      ok: false,
+      reason: `projected need ${projection.projected} cr exceeds --max-total-credits=${cap}. Raise the cap to at least ${Math.ceil(projection.projected)} or run a smaller matrix.`,
+      projection,
+      lines,
+    }
+  }
+  return { ok: true, reason: null, projection, lines }
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2))
   if (opts.selfTest) {
@@ -2630,7 +3468,11 @@ async function main() {
     return
   }
   if (opts.regradeDir) {
-    await runRegrade(opts.regradeDir)
+    await runRegrade(opts.regradeDir, {
+      outDir: opts.outDir,
+      only: opts.only,
+      gradeRepeats: opts.gradeRepeats,
+    })
     return
   }
 
@@ -2656,6 +3498,10 @@ async function main() {
   }
   const jobs = blocks.flat()
 
+  // The projected credit need is printed before anything starts, in the dry run too.
+  const budget = checkBudget(jobs, opts)
+  for (const line of budget.lines) console.log(line)
+
   // OPS-01: Dry-run plan by default; require explicit `--run` plus `--tasks` and `--models`
   if (!opts.run || !opts.tasks || !opts.models) {
     console.log('=== Dry-Run Execution Plan (no trials started; pass --run --tasks <...> --models <...> to execute) ===')
@@ -2665,9 +3511,17 @@ async function main() {
     console.log(`Trials/cell:    ${opts.trials} -> Total trials: ${jobs.length} (${blocks.length} matched blocks)`)
     console.log(`Prompt style:   ${opts.promptStyle} | phaseSplit=${opts.phaseSplit} | concurrency=${opts.concurrency}`)
     console.log(
-      `Budget control: --max-total-credits=${opts.maxTotalCredits} (checked per block) | --cli-credit-cap=${opts.cliCreditCap || 'off (no live cost meter)'}`,
+      `Budget control: --max-total-credits=${opts.maxTotalCredits} (refused up front when the projection exceeds it; also checked per block) | --cli-credit-cap=${opts.cliCreditCap || 'off (no live cost meter)'}`,
     )
+    console.log(`Grading:        every variant runs ${opts.gradeRepeats} time(s) and the runs must agree (--grade-repeats)`)
+    if (!budget.ok) console.log(`This matrix would be REFUSED with --run: ${budget.reason}`)
     return
+  }
+
+  // A matrix that is projected not to fit is refused here, before the preflight spends
+  // anything, instead of being cut off in the middle with `not_started` rows.
+  if (!budget.ok) {
+    throw new Error(`Refusing to start: ${budget.reason}`)
   }
 
   // N-01: Only sweep stale temp dirs when explicitly requested (--sweep-stale)
@@ -2694,7 +3548,7 @@ async function main() {
   activeTempDirs.add(runTmpRoot)
 
   console.log(
-    `Starting v2.3 benchmark runId=${runId}: ${jobs.length} trials (${blocks.length} blocks, prompt=${opts.promptStyle}, phaseSplit=${opts.phaseSplit}, concurrency=${opts.concurrency}, maxTotalCredits=${opts.maxTotalCredits}, seed=${opts.seed})`,
+    `Starting ${HARNESS_VERSION} benchmark runId=${runId}: ${jobs.length} trials (${blocks.length} blocks, prompt=${opts.promptStyle}, phaseSplit=${opts.phaseSplit}, concurrency=${opts.concurrency}, maxTotalCredits=${opts.maxTotalCredits}, gradeRepeats=${opts.gradeRepeats}, seed=${opts.seed})`,
   )
   console.log(
     `Provenance: git=${provenance.gitCommit}${provenance.gitDirty ? '-dirty' : ''} harness=${provenance.harnessSha256} cal=${provenance.calibrationSha256} tool=${provenance.toolSha256} cli="${copilotVersion}"`,
@@ -2903,6 +3757,7 @@ async function main() {
             provenance,
             copilotVersion,
             toolchains,
+            gradeRepeats: opts.gradeRepeats,
             parentDir: runTmpRoot,
           })
           results.push(r)
@@ -2926,6 +3781,7 @@ async function main() {
           provenance,
           copilotVersion,
           toolchains,
+          gradeRepeats: opts.gradeRepeats,
           parentDir: runTmpRoot,
         })
         results.push(r)
@@ -2948,7 +3804,7 @@ async function main() {
   const cmh = stratifiedCMH(equalSeamRows, (r) => Boolean(r.solved))
   const rd = matchedRiskDifferenceCI(equalSeamRows, (r) => Boolean(r.solved))
   const summary = {
-    version: 'v2.3',
+    version: HARNESS_VERSION,
     runId,
     generatedAt: new Date().toISOString(),
     copilotVersion,
@@ -2967,6 +3823,7 @@ async function main() {
       cliCreditCap: opts.cliCreditCap,
       maxTotalCredits: opts.maxTotalCredits,
       maxConsecutiveInfra: opts.maxConsecutiveInfra,
+      gradeRepeats: opts.gradeRepeats,
       seed: opts.seed,
     },
     pricingTablePerMillionUsd: MODEL_PRICING_PER_M,
