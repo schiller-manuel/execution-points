@@ -403,8 +403,9 @@ export function generateFileRegistryModule(plan, { fromFile, api = getDefaultApi
     // Phase 1: result types, read from the unchanged targets.
     const files = []
     for (const entry of plan.files) {
+      // A global script, or a file TypeScript does not load at all, has no place in the registry.
       const sf = program.getSourceFile(entry.file)
-      if (!sf.externalModuleIndicator || !entry.nodes.length) continue
+      if (!sf?.externalModuleIndicator || !entry.nodes.length) continue
 
       // The plan counts a byte-order mark; the program's text does not have it.
       const mark = entry.source.length - withoutMark(entry.source).length

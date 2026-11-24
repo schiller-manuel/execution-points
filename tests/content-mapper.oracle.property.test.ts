@@ -1,60 +1,84 @@
 /**
- * This oracle owns `execution-points-prototype`'s TypeScript 7.1 JSON-RPC
- * content mapper (`src/content-mapper.mjs`), checked on the `Content-Length`
- * framed JSON-RPC responses emitted for `initialize`, `openProject`,
- * `transform`, and `closeProject`. It owns `src/content-mapper.mjs`.
+ * This oracle owns the TypeScript 7.1 content mapper for `points.ep`
+ * (`src/content-mapper.mjs`), checked on the `Content-Length` framed JSON-RPC
+ * responses to `initialize`, `openProject`, `transform`, and `closeProject`.
+ * It owns `src/content-mapper.mjs`.
  *
  * ```ts
- * rpc('initialize', { protocolVersion: 1 }) // → { protocolVersion: 1, positionEncoding: 'utf-16', diagnosticSource: 'execution-points' }
- * rpc('openProject', { projectHandle: 'p1', configFileName: '/app/tsconfig.json' }) // → { configIdentity, watchedFiles: ['/app/app.ts', '/app/tsconfig.json'] }
- * rpc('transform', { projectHandle: 'p1', fileName: '/app/points.ep', content: '{"targets":["app.ts"]}' }) // → { extension: '.ts', text: '...ExecutionPointFileRegistry...', diagnostics: [], mappings: [] }
- * rpc('transform', { projectHandle: 'p1', fileName: '/app/points.ep', content: '{bad' }) // → { extension: '.ts', diagnostics: [{ code: 90100, ... }], ... }
+ * rpc('transform', { fileName: '/app/points.ep', content: '{"targets":["src/app.ts"]}' })
+ * // → { extension: '.ts', text: registry of src/app.ts, diagnostics: [], mappings: [the file's nodes → "src/app.ts"] }
+ * rpc('transform', { fileName, content: '{"target":["src/app.ts"]}' })
+ * // → diagnostics at "target" (unknown key) and for the missing "targets" array
+ * rpc('transform', { fileName, content: '{"targets":["src/app.ts","src/typo.ts",42]}' })
+ * // → registry of src/app.ts, diagnostics at "src/typo.ts" and at 42
+ * rpc('openProject', { projectHandle, configFileName: '/app/tsconfig.json' })
+ * // → { configIdentity, watchedFiles: tsconfig, targets, and every project file the targets' types depend on }
+ * rpc('noSuchMethod', {}) // → error -32601
  * ```
  *
- * Why does editing and saving a watched target `.ts` file on disk after
- * `openProject` require `transform("points.ep")` to re-index the target file
- * even when `points.ep`'s own JSON text has not changed?
+ * `{"targets": "src/app.ts"}` is a JSON object, and it used to be read as
+ * eight one-letter targets, so the compiler watched `/` and nothing was said.
+ * A manifest is only useful when it is either followed exactly or refused
+ * at the text that is wrong.
  *
- * Three parts drive the content mapper: the **JSON-RPC framing transport**
- * (buffering `stdin` chunks across `Content-Length` headers, dispatching
- * methods, and returning `-32601` for unknown methods), the **manifest
- * validator** (`parseManifest` accepting empty/whitespace or JSON objects while
- * reporting diagnostic `90100` for invalid JSON and `90101` for non-object
- * JSON), and the **project scanner & transformer** (`scanProject`,
- * `openProject`, `transform`, and `closeProject` tracking watched files and
- * rebuilding the target plan whenever `points.ep` or any watched target source
- * on disk changes).
+ * Three parts carry the promise. The **manifest** is the JSON object in
+ * `points.ep`: a `targets` array of paths and globs and an optional
+ * `tsconfig`. The **watch set** is what `openProject` reports: the files whose
+ * change can change the registry, with a `configIdentity` that changes when
+ * any of them does. The **warm program** is the one TypeScript program an open
+ * project keeps and updates.
  *
- * For every `transform` request on a `.ep` manifest, empty or whitespace-only
- * content returns an empty `.ts` stub with zero diagnostics, invalid JSON
- * returns diagnostic `90100`, non-object JSON (arrays, null, or primitives)
- * returns diagnostic `90101`, and a valid manifest object returns the generated
- * `ExecutionPointFileRegistry` module with zero diagnostics (`src/content-mapper.mjs:25-44, 77-83`;
- * Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23: Law M1).
+ * For every manifest, either the registry reflects exactly the listed targets
+ * that exist, or a diagnostic names what is wrong (Decision by Manuel Schiller
+ * (GitHub schiller-manuel), 2026-11-24). Empty content is an empty registry
+ * without a diagnostic, invalid JSON is diagnostic 90100, and JSON that is not
+ * an object with a `targets` array is diagnostic 90101 (Decision by Manuel
+ * Schiller (GitHub schiller-manuel), 2026-11-23). Each further diagnostic
+ * stands at the offending key, value, or entry, and each registry file's
+ * nodes are mapped to the entry that lists the file, so an error in the
+ * registry is reported there (Decision by Manuel Schiller (GitHub
+ * schiller-manuel), 2026-11-24).
  *
- * For every JSON-RPC request sequence over `Content-Length` framing,
- * `initialize` echoes `protocolVersion` with UTF-16 encoding, `openProject`
- * returns deterministic `configIdentity` and sorted `watchedFiles` (covering
- * existing `tsconfig.json` and target files while excluding `points.ep`),
- * `transform` reflects both `points.ep` edits and on-disk target `.ts` file
- * edits, `closeProject` removes the project handle, and unknown methods return
- * JSON-RPC error `-32601` (`README.md:169-172`, `src/content-mapper.mjs:46-135`;
- * Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23: Law M2).
+ * For every open project, `watchedFiles` are the tsconfig, the listed
+ * targets, and every file of the project that the analysis read, without
+ * `points.ep`; `configIdentity` changes when one of them or the manifest
+ * changes; `transform` then returns what a mapper started afresh returns; and
+ * one TypeScript program serves the project until it closes (Decision by
+ * Manuel Schiller (GitHub schiller-manuel), 2026-11-24, with `README.md:167`).
+ * Requests arrive in `Content-Length` frames that may be split anywhere;
+ * unknown methods answer -32601 and a failing handler -32603
+ * (Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23).
  *
- * The model predicts the exact JSON-RPC result or error payload, diagnostic
- * codes, watched file list, and emitted target callee names for each request.
- * The driver feeds framed `Content-Length` buffers (including split chunks and
- * notification frames) to `process.stdin` and parses the framed responses from
- * `process.stdout`.
+ * The manifest histories are built from tokens, so the model knows where each
+ * key and entry stands without parsing: it expects a diagnostic exactly at
+ * each token the history marks as wrong, and the registry of exactly the
+ * files the history says an entry matches. The registry is read by compiling
+ * it (`tests/registry-harness.ts`), never from its text.
  *
- * Process exit cleanup on `stdin` `end` is lifecycle teardown outside single
- * request-response histories.
+ * The mapper is imported here, so its standard-input loop is not exercised:
+ * the oracle only checks that importing it attaches no listener. The wording
+ * of a diagnostic is checked for naming its subject, not word for word.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { API } from 'typescript/sync'
+import { afterAll, vi } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
+import { generateFileRegistryModule } from '../src/contracts.mjs'
 import { handleInputChunk } from '../src/content-mapper.mjs'
+import { buildTargetPlan } from '../src/discovery.mjs'
+import { type Plan, compileRegistry, createProject, removeProject, repoRoot } from './registry-harness'
+
+const api = new API({ cwd: repoRoot })
+afterAll(() => {
+  api.close()
+})
+
+type Observation = { checkpoint: string; value: unknown }
+
+// ---------------------------------------------------------------------------
+// The driver's side of the wire: frame a request, feed it, parse the reply
+// ---------------------------------------------------------------------------
 
 let nextRpcId = 1
 const streamState = { buffer: Buffer.alloc(0) }
@@ -72,280 +96,452 @@ function sendFramedPayloads(rawChunks: ReadonlyArray<Buffer>): Array<Record<stri
   for (;;) {
     const headerEnd = outBuf.indexOf('\r\n\r\n')
     if (headerEnd < 0) break
-    const match = /Content-Length:\s*(\d+)/i.exec(
-      outBuf.subarray(0, headerEnd).toString('ascii'),
-    )
+    const match = /Content-Length:\s*(\d+)/i.exec(outBuf.subarray(0, headerEnd).toString('ascii'))
     if (!match) break
     const msgEnd = headerEnd + 4 + Number(match[1])
     if (outBuf.length < msgEnd) break
-    const json = JSON.parse(outBuf.subarray(headerEnd + 4, msgEnd).toString('utf8'))
-    messages.push(json)
+    messages.push(JSON.parse(outBuf.subarray(headerEnd + 4, msgEnd).toString('utf8')))
     outBuf = outBuf.subarray(msgEnd)
   }
   return messages
 }
 
-function callRpc(method: string, params?: unknown, splitAt?: number) {
+function callRpc(method: string, params?: unknown, splitAt?: number): any {
   const id = nextRpcId++
   const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, method, params }), 'utf8')
-  const framed = Buffer.concat([
-    Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'),
-    body,
-  ])
-  const chunks =
-    splitAt !== undefined ? [framed.subarray(0, splitAt), framed.subarray(splitAt)] : [framed]
-  const responses = sendFramedPayloads(chunks)
-  return responses.find((r) => r.id === id) ?? null
+  const framed = Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'), body])
+  const chunks = splitAt !== undefined ? [framed.subarray(0, splitAt), framed.subarray(splitAt)] : [framed]
+  return sendFramedPayloads(chunks).find((response) => response.id === id) ?? null
 }
 
+/** The file keys of a registry, and the callee of each call node, as TypeScript reads the compiled text. */
+function readRegistry(root: string, text: string) {
+  const files = ['src/app.ts', 'src/extra.ts', 'src/lib/deep.ts']
+  const plan = buildTargetPlan({ root, targets: files, api }) as Plan
+  const { reading } = compileRegistry(api, root, text, plan)
+  return {
+    files: reading.files,
+    registryErrors: reading.registryErrors,
+    callees: [...new Set(Object.values(reading.nodes).map((node) => node.descriptor.callee))].sort(),
+    reading,
+    plan,
+  }
+}
+
+const relativeTo = (root: string, files: ReadonlyArray<string>) =>
+  files.map((file) => (file.startsWith(`${root}/`) ? file.slice(root.length + 1) : file)).sort()
+
+const judge =
+  (law: string, checkpoint: string) =>
+  (_history: unknown, observations: ReadonlyArray<Observation>, expected: unknown) => {
+    const crash = observations.find((entry) => entry.checkpoint === 'crash')
+    if (crash) return differs('crash', law, crash.value, 'no crash') ?? pass
+    return differs(checkpoint, law, observations.find((entry) => entry.checkpoint === checkpoint)?.value, expected) ?? pass
+  }
+
+const corrupt =
+  (checkpoint: string, change: (value: any) => unknown) =>
+  (trace: ReadonlyArray<Observation>) =>
+    trace.map((entry) =>
+      entry.checkpoint === checkpoint ? { ...entry, value: change(structuredClone(entry.value)) } : entry,
+    )
+
 // ---------------------------------------------------------------------------
-// Law M1: Manifest validation and diagnostics (empty, invalid JSON, non-object, valid)
+// Law M1 and Law 4: a manifest is followed exactly or refused where it is wrong
 // ---------------------------------------------------------------------------
 
-const MANIFEST_CASES = [
-  'empty-whitespace',
-  'invalid-json-syntax',
-  'non-object-array',
-  'non-object-null',
-  'valid-manifest-object',
-] as const
+/**
+ * A manifest as the tokens it is written from. A plain string is copied; a
+ * marked token is a key, a target entry, or a value the model has a rule for.
+ */
+type Token =
+  | string
+  | { key: string }
+  /** An entry of `targets`: its JSON text, whether it is a string, and the files it matches in the project. */
+  | { entry: string; isString: boolean; matches: ReadonlyArray<string>; pattern: boolean }
+  /** A value in the place of `targets` or `tsconfig` that is not what the key needs. */
+  | { wrong: string; subject: string }
 
-type ManifestCase = (typeof MANIFEST_CASES)[number]
+const key = (name: string): Token => ({ key: name })
+const path = (file: string, exists = true): Token => ({
+  entry: JSON.stringify(file),
+  isString: true,
+  matches: exists ? [file] : [],
+  pattern: false,
+})
+const glob = (pattern: string, ...matches: Array<string>): Token => ({
+  entry: JSON.stringify(pattern),
+  isString: true,
+  matches,
+  pattern: true,
+})
+const notAString = (json: string): Token => ({ entry: json, isString: false, matches: [], pattern: false })
+const wrong = (json: string, subject: string): Token => ({ wrong: json, subject })
+
+const textOf = (token: Token) =>
+  typeof token === 'string' ? token : 'key' in token ? JSON.stringify(token.key) : 'entry' in token ? token.entry : token.wrong
+
+/** Where each marked token stands in the manifest text. */
+const placed = (tokens: ReadonlyArray<Token>) => {
+  let offset = 0
+  return tokens.map((token) => {
+    const text = textOf(token)
+    const start = offset
+    offset += text.length
+    return { token, text, start }
+  })
+}
 
 interface ManifestHistory {
-  manifestCase: ManifestCase
+  name: string
+  states: ReadonlyArray<string>
+  tokens: ReadonlyArray<Token>
+  /** Content that is no JSON object: the whole of it is refused with this code. */
+  refused?: 90100 | 90101
+  /** The manifest has no `targets` key at all. */
+  missingTargets?: boolean
 }
 
-const enumeratedManifestHistories: ReadonlyArray<ManifestHistory> = MANIFEST_CASES.map(
-  (manifestCase) => ({ manifestCase }),
-)
+/** The project every manifest history runs in. */
+const MANIFEST_PROJECT = {
+  'src/app.ts': 'function sendQuote(): number { return 7 }\nexport function work() { return sendQuote() }\n',
+  'src/extra.ts': 'function extraCall(): boolean { return true }\nexport function extra() { return extraCall() }\n',
+  'src/lib/deep.ts': 'function deepCall(): string { return "d" }\nexport function deep() { return deepCall() }\n',
+  'other.tsconfig.json': JSON.stringify({ compilerOptions: { strict: true, noEmit: true }, include: ['src/**/*.ts'] }),
+}
 
-function manifestModel(history: ManifestHistory) {
-  switch (history.manifestCase) {
-    case 'empty-whitespace':
-      return {
-        extension: '.ts',
-        diagCodes: [],
-        diagSpansValid: true,
-        mappingsEmpty: true,
-        hasRegistryInterface: true,
-        hasTargetCallee: false,
-      }
-    case 'invalid-json-syntax':
-      return {
-        extension: '.ts',
-        diagCodes: [90100],
-        diagSpansValid: true,
-        mappingsEmpty: true,
-        hasRegistryInterface: false,
-        hasTargetCallee: false,
-      }
-    case 'non-object-array':
-    case 'non-object-null':
-      return {
-        extension: '.ts',
-        diagCodes: [90101],
-        diagSpansValid: true,
-        mappingsEmpty: true,
-        hasRegistryInterface: false,
-        hasTargetCallee: false,
-      }
-    case 'valid-manifest-object':
-      return {
-        extension: '.ts',
-        diagCodes: [],
-        diagSpansValid: true,
-        mappingsEmpty: true,
-        hasRegistryInterface: true,
-        hasTargetCallee: true,
-      }
+/** The project's own modules. Once a target exists, the analysis reads them all, so all are watched. */
+const MANIFEST_PROJECT_MODULES = ['src/app.ts', 'src/extra.ts', 'src/lib/deep.ts']
+
+const MANIFEST_HISTORIES: ReadonlyArray<ManifestHistory> = [
+  { name: 'empty-whitespace', states: ['followed-exactly'], tokens: ['   \n  '] },
+  { name: 'invalid-json-syntax', states: ['refused-as-a-whole'], tokens: ['{ "targets": ['], refused: 90100 },
+  { name: 'non-object-array', states: ['refused-as-a-whole'], tokens: ['["src/app.ts"]'], refused: 90101 },
+  { name: 'non-object-null', states: ['refused-as-a-whole'], tokens: ['null'], refused: 90101 },
+  { name: 'non-object-string', states: ['refused-as-a-whole'], tokens: ['"src/app.ts"'], refused: 90101 },
+  { name: 'non-object-number', states: ['refused-as-a-whole'], tokens: ['0'], refused: 90101 },
+  {
+    name: 'one-target',
+    states: ['followed-exactly'],
+    tokens: ['{', key('targets'), ':[', path('src/app.ts'), ']}'],
+  },
+  {
+    name: 'targets-and-tsconfig-after-leading-space',
+    states: ['followed-exactly'],
+    tokens: [
+      '\n  { ',
+      key('tsconfig'),
+      ': "other.tsconfig.json",\n    ',
+      key('targets'),
+      ': [\n      ',
+      path('src/extra.ts'),
+      ',\n      ',
+      path('src/app.ts'),
+      '\n    ]\n  }\n',
+    ],
+  },
+  {
+    name: 'glob-and-path-listing-one-file-twice',
+    states: ['followed-exactly', 'file-listed-twice'],
+    tokens: ['{', key('targets'), ': [', path('src/extra.ts'), ', ', glob('src/*.ts', 'src/app.ts', 'src/extra.ts'), ', ', path('src/lib/deep.ts'), ']}'],
+  },
+  {
+    name: 'glob-listing-several-files',
+    states: ['followed-exactly', 'entry-matching-several-files'],
+    tokens: ['{', key('targets'), ': [', glob('src/**/*.ts', 'src/app.ts', 'src/extra.ts', 'src/lib/deep.ts'), ']}'],
+  },
+  {
+    name: 'empty-targets-array',
+    states: ['followed-exactly'],
+    tokens: ['{', key('targets'), ': []}'],
+  },
+  {
+    name: 'typo-in-targets-key',
+    states: ['refused-at-a-key'],
+    tokens: ['{', key('target'), ': ["src/app.ts"]}'],
+    missingTargets: true,
+  },
+  {
+    name: 'typo-in-tsconfig-key',
+    states: ['refused-at-a-key'],
+    tokens: ['{', key('targets'), ': [', path('src/app.ts'), '], ', key('tsconfg'), ': "x.json"}'],
+  },
+  {
+    name: 'empty-object',
+    states: ['refused-for-missing-targets'],
+    tokens: ['{}'],
+    missingTargets: true,
+  },
+  {
+    name: 'targets-is-a-string',
+    states: ['refused-at-a-value'],
+    tokens: ['{', key('targets'), ': ', wrong('"src/app.ts"', '"targets" array'), '}'],
+  },
+  {
+    name: 'targets-is-an-object',
+    states: ['refused-at-a-value'],
+    tokens: ['{', key('targets'), ': ', wrong('{"0": "src/app.ts"}', '"targets" array'), '}'],
+  },
+  {
+    name: 'entries-that-are-not-strings',
+    states: ['refused-at-an-entry'],
+    tokens: ['{', key('targets'), ': [', notAString('42'), ', ', path('src/app.ts'), ', ', notAString('null'), ', ', notAString('["src/extra.ts"]'), ']}'],
+  },
+  {
+    name: 'target-that-does-not-exist',
+    states: ['refused-at-an-entry'],
+    tokens: ['{', key('targets'), ': [', path('src/app.ts'), ', ', path('src/typo-does-not-exist.ts', false), ']}'],
+  },
+  {
+    name: 'glob-that-matches-nothing',
+    states: ['refused-at-an-entry'],
+    tokens: ['{', key('targets'), ': [', glob('nowhere/*.ts'), ', ', path('src/extra.ts'), ']}'],
+  },
+  {
+    name: 'tsconfig-that-is-not-a-string',
+    states: ['refused-at-a-value'],
+    tokens: ['{', key('tsconfig'), ': ', wrong('42', 'tsconfig'), ', ', key('targets'), ': [', path('src/app.ts'), ']}'],
+  },
+  {
+    name: 'tsconfig-that-does-not-exist',
+    states: ['refused-at-a-value'],
+    tokens: ['{', key('tsconfig'), ': ', wrong('"nope.json"', 'nope.json'), ', ', key('targets'), ': [', path('src/app.ts'), ']}'],
+  },
+]
+
+/** The diagnostics the rules owe: where each stands and what its message must name. */
+function owedDiagnostics(history: ManifestHistory) {
+  const text = history.tokens.map(textOf).join('')
+  if (history.refused) return [{ at: text, names: history.refused === 90100 ? 'points.ep' : '"targets" array', code: history.refused }]
+  const owed: Array<{ at: string; names: string; start: number; code?: number }> = []
+  for (const { token, text: at, start } of placed(history.tokens)) {
+    if (typeof token === 'string') continue
+    if ('key' in token) {
+      if (token.key !== 'targets' && token.key !== 'tsconfig') owed.push({ at, names: token.key, start })
+    } else if ('wrong' in token) {
+      owed.push({ at, names: token.subject, start, ...(token.subject === '"targets" array' ? { code: 90101 } : {}) })
+    } else if (!token.isString || token.matches.length === 0) {
+      owed.push({ at, names: token.isString ? JSON.parse(token.entry) : token.entry, start })
+    }
   }
+  if (history.missingTargets) owed.push({ at: text, names: '"targets" array', start: -1, code: 90101 })
+  return owed.sort((a, b) => a.start - b.start).map(({ start: _start, ...rest }) => rest)
+}
+
+/** The entries that list at least one file no earlier entry lists, with those files. */
+function owedMappings(history: ManifestHistory) {
+  const seen = new Set<string>()
+  const owed: Array<{ original: string; files: Array<string> }> = []
+  for (const token of history.tokens) {
+    if (typeof token === 'string' || !('entry' in token)) continue
+    const fresh = token.matches.filter((file) => !seen.has(file))
+    for (const file of fresh) seen.add(file)
+    if (fresh.length) owed.push({ original: token.entry, files: [...fresh].sort() })
+  }
+  return owed
 }
 
 oracleProperty({
   id: 'content-mapper-manifest-validation',
-  owns: [
-    'src/content-mapper.mjs#parseManifest',
-    'src/content-mapper.mjs#transform',
-  ],
+  owns: ['src/content-mapper.mjs#parseManifest', 'src/content-mapper.mjs#transform', 'src/content-mapper.mjs#scanProject'],
   law: {
     statement:
-      'For every transform request on a .ep manifest, empty or whitespace content emits an empty registry with 0 diagnostics, invalid JSON emits diagnostic code 90100, non-object JSON (arrays, null, or primitives) emits diagnostic code 90101, and a valid manifest object emits the virtual .ts registry with 0 diagnostics.',
+      'For every manifest, either the registry reflects exactly the listed targets that exist, or a diagnostic names what is wrong: empty content is an empty registry with no diagnostic, invalid JSON is diagnostic 90100, JSON that is not an object with a "targets" array is diagnostic 90101, and an unknown key, a wrong value, an entry that is not a string, and an entry that matches no file each get a diagnostic at that text. Each registry file’s nodes are mapped to the entry that lists the file.',
     authority:
-      'src/content-mapper.mjs:25-44, 77-83 and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23: Law M1.',
+      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: for every manifest, either the registry reflects exactly the listed targets that exist, or a diagnostic names what is wrong; registry lines are mapped to something useful. Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23: Law M1 (90100 for invalid JSON, 90101 for JSON that is not an object with a "targets" array).',
     limits:
-      'Unknown top-level keys on a valid JSON object are ignored.',
+      'Twenty-one manifests over one project of three modules. A diagnostic’s message is checked for naming its subject, and only the codes 90100 and 90101 are fixed. The mapping is checked for the manifest text it points at and the files whose nodes it covers.',
   },
   histories: {
-    enumerated: enumeratedManifestHistories,
+    enumerated: MANIFEST_HISTORIES,
     states: [
-      'valid-or-empty-manifest',
-      'rejected-invalid-json-90100',
-      'rejected-non-object-90101',
+      'followed-exactly',
+      'entry-matching-several-files',
+      'file-listed-twice',
+      'refused-as-a-whole',
+      'refused-at-a-key',
+      'refused-at-a-value',
+      'refused-at-an-entry',
+      'refused-for-missing-targets',
     ],
   },
-  label: (h) => h.manifestCase,
-  model: (history) => manifestModel(history),
-  driver: (history, observe) => {
-    const tempDir = mkdtempSync(join(tmpdir(), 'ep-mapper-m1-'))
-    try {
-      const targetFile = join(tempDir, 'app.ts')
-      const manifestFile = join(tempDir, 'points.ep')
-      writeFileSync(
-        targetFile,
-        'function sendQuote(): number { return 7 }\nexport function work() { return sendQuote() }\n',
-      )
-
-      let content: string
-      switch (history.manifestCase) {
-        case 'empty-whitespace':
-          observe('reach', 'valid-or-empty-manifest')
-          content = '   \n  '
-          break
-        case 'invalid-json-syntax':
-          observe('reach', 'rejected-invalid-json-90100')
-          content = '{ "targets": ['
-          break
-        case 'non-object-array':
-          observe('reach', 'rejected-non-object-90101')
-          content = '["app.ts"]'
-          break
-        case 'non-object-null':
-          observe('reach', 'rejected-non-object-90101')
-          content = 'null'
-          break
-        case 'valid-manifest-object':
-          observe('reach', 'valid-or-empty-manifest')
-          content = JSON.stringify({ targets: ['app.ts'] })
-          break
-      }
-
-      const resp = callRpc('transform', {
-        projectHandle: 'unopened-handle',
-        fileName: manifestFile,
-        content,
-      }) as {
-        result?: {
-          extension: string
-          text: string
-          mappings: Array<unknown>
-          diagnostics: Array<{
-            code: number
-            start: number
-            length: number
-            messageText: string
-          }>
-        }
-      } | null
-
-      const res = resp?.result
-      const diags = res?.diagnostics ?? []
-      const diagSpansValid = diags.every(
-        (d) =>
-          d.start === 0 &&
-          d.length === content.length &&
-          (d.code === 90100
-            ? d.messageText.includes('points.ep')
-            : d.messageText.includes('"targets" array')),
-      )
-      observe('manifest', {
-        extension: res?.extension ?? 'missing',
-        diagCodes: diags.map((d) => d.code),
-        diagSpansValid,
-        mappingsEmpty: Array.isArray(res?.mappings) && res.mappings.length === 0,
-        hasRegistryInterface: Boolean(res?.text.includes('interface ExecutionPointFileRegistry')),
-        hasTargetCallee: Boolean(res?.text.includes('"sendQuote"')),
-      })
-    } catch (err) {
-      observe('manifest', { threw: err instanceof Error ? err.message : String(err) })
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true })
+  label: (history) => history.name,
+  // The registry holds the files that the string entries match, whatever else
+  // is wrong; content that is no object at all gets no registry. A listed
+  // path is watched even while it does not exist, so that creating it is seen.
+  model: (history) => {
+    const entries = history.tokens.filter(
+      (token): token is Extract<Token, { entry: string }> => typeof token !== 'string' && 'entry' in token && token.isString,
+    )
+    const owed = owedDiagnostics(history)
+    const files = [...new Set(entries.flatMap((entry) => entry.matches))].sort()
+    return {
+      extension: '.ts',
+      diagnostics: owed.map(({ at }) => at),
+      diagnosticsNameTheirSubject: owed.map(() => true),
+      fixedCodes: owed.map(({ code }) => code ?? 'free'),
+      declaresRegistry: !history.refused,
+      registryErrors: [],
+      files,
+      mappings: owedMappings(history),
+      watched: [
+        ...new Set([
+          'tsconfig.json',
+          ...(files.length ? MANIFEST_PROJECT_MODULES : []),
+          ...entries.flatMap((entry) => (entry.pattern ? entry.matches : [JSON.parse(entry.entry) as string])),
+          ...(history.tokens.some((token) => typeof token === 'string' && token.includes('"other.tsconfig.json"'))
+            ? ['other.tsconfig.json']
+            : []),
+        ]),
+      ].sort(),
     }
   },
-  check: (_history, observations, expected) => {
-    const entry = observations.find((o) => o.checkpoint === 'manifest')
-    if (!entry) return differs('manifest', 'manifest-validation', undefined, expected) ?? pass
-    return differs('manifest', 'manifest-validation', entry.value, expected) ?? pass
+  driver: (history, observe) => {
+    for (const state of history.states) observe('reach', state)
+    const owed = owedDiagnostics(history)
+    const content = history.tokens.map(textOf).join('')
+    const root = createProject({ ...MANIFEST_PROJECT, 'points.ep': content })
+    try {
+      const opened = callRpc('openProject', { projectHandle: `manifest-${history.name}`, configFileName: join(root, 'tsconfig.json') })
+      const response = callRpc('transform', {
+        projectHandle: `manifest-${history.name}`,
+        fileName: join(root, 'points.ep'),
+        content,
+      })
+      callRpc('closeProject', { projectHandle: `manifest-${history.name}` })
+      if (!response?.result || !opened?.result) {
+        observe('crash', JSON.stringify(response?.error ?? opened?.error ?? 'no response'))
+        return
+      }
+      const result = response.result as {
+        extension: string
+        text: string
+        diagnostics: Array<{ code: number; start: number; length: number; messageText: string }>
+        mappings: Array<[number, number, number, number, number, number?]>
+      }
+      const diagnostics = [...result.diagnostics].sort((a, b) => a.start - b.start || b.length - a.length)
+      const registry = readRegistry(root, result.text)
+      observe('manifest', {
+        extension: result.extension,
+        diagnostics: diagnostics.map((diagnostic) => content.slice(diagnostic.start, diagnostic.start + diagnostic.length)),
+        diagnosticsNameTheirSubject: diagnostics.map((diagnostic, index) =>
+          diagnostic.messageText.includes(owed[index]?.names ?? '\u0000'),
+        ),
+        fixedCodes: diagnostics.map((diagnostic, index) => (owed[index]?.code ? diagnostic.code : 'free')),
+        declaresRegistry: result.text.includes('interface ExecutionPointFileRegistry'),
+        registryErrors: registry.registryErrors,
+        files: registry.files,
+        // A segment is [virtualStart, virtualLength, originalStart, originalLength, kind, features].
+        mappings: result.mappings.map(([virtualStart, virtualLength, originalStart, originalLength]) => ({
+          original: content.slice(originalStart, originalStart + originalLength),
+          files: registry.plan.files
+            .filter((entry) =>
+              entry.nodes.some((node) =>
+                result.text.slice(virtualStart, virtualStart + virtualLength).includes(JSON.stringify(node.id)),
+              ),
+            )
+            .map((entry) => entry.relativeFile)
+            .sort(),
+        })),
+        watched: relativeTo(root, opened.result.watchedFiles),
+      })
+    } catch (error) {
+      observe('crash', error instanceof Error ? error.message : String(error))
+    } finally {
+      removeProject(root)
+    }
   },
+  check: judge('manifest-validation', 'manifest'),
   calibrations: [
     {
       name: 'missing-diagnostic-code',
       law: 'manifest-validation',
       history: { enumerated: 'invalid-json-syntax' },
-      corrupt: (trace) =>
-        trace.map((o) =>
-          o.checkpoint === 'manifest'
-            ? { ...o, value: { ...(o.value as object), diagCodes: [] } }
-            : o,
-        ),
+      corrupt: corrupt('manifest', (value) => ({ ...value, diagnostics: [], diagnosticsNameTheirSubject: [], fixedCodes: [] })),
+    },
+    {
+      name: 'a-typo-that-nobody-reports',
+      law: 'manifest-validation',
+      history: { enumerated: 'typo-in-tsconfig-key' },
+      corrupt: corrupt('manifest', (value) => ({ ...value, diagnostics: [], diagnosticsNameTheirSubject: [], fixedCodes: [] })),
+    },
+    {
+      name: 'a-missing-target-reported-at-the-whole-file',
+      law: 'manifest-validation',
+      history: { enumerated: 'target-that-does-not-exist' },
+      corrupt: corrupt('manifest', (value) => ({ ...value, diagnostics: ['{"targets": ["src/app.ts", "src/typo-does-not-exist.ts"]}'] })),
+    },
+    {
+      name: 'a-string-read-as-a-list-of-letters',
+      law: 'manifest-validation',
+      history: { enumerated: 'targets-is-a-string' },
+      corrupt: corrupt('manifest', (value) => ({ ...value, watched: [...value.watched, 's', 'r', 'c'].sort() })),
+    },
+    {
+      name: 'nodes-mapped-to-another-entry',
+      law: 'manifest-validation',
+      history: { enumerated: 'glob-and-path-listing-one-file-twice' },
+      corrupt: corrupt('manifest', (value) => ({ ...value, mappings: [...value.mappings].reverse() })),
     },
   ],
 })
 
 // ---------------------------------------------------------------------------
-// Law M2: Project lifecycle, watchedFiles, live target refresh, and JSON-RPC framing
+// Law M2: the watch set, refresh after an edit, one warm program, and framing
 // ---------------------------------------------------------------------------
 
 const LIFECYCLE_SCENARIOS = [
-  'open-transform-edit-target-and-retransform',
-  'open-transform-edit-manifest-and-close',
+  'open-transform-edit-and-retransform',
+  'imported-files-are-watched-and-refresh',
+  'custom-manifest-close-and-reopen',
   'split-chunks-and-unknown-method-error',
 ] as const
 
 type LifecycleScenario = (typeof LIFECYCLE_SCENARIOS)[number]
 
-interface LifecycleHistory {
-  scenario: LifecycleScenario
+/**
+ * Every TypeScript program the mapper builds, in order. `createSnapshot` is
+ * wrapped for each API instance but the oracle's own; the client caches the
+ * method on the instance at first use, so the wrapper is installed there too.
+ */
+const programsBuilt: Array<{ isDisposed: () => boolean }> = []
+const createSnapshotAccessor = Object.getOwnPropertyDescriptor(API.prototype, 'createSnapshot')!
+Object.defineProperty(API.prototype, 'createSnapshot', {
+  configurable: true,
+  get(this: API) {
+    const create = createSnapshotAccessor.get!.call(this)
+    if (this === api) return create
+    const counted = (...args: Array<unknown>) => {
+      const snapshot = create.apply(this, args)
+      programsBuilt.push(snapshot)
+      return snapshot
+    }
+    Object.defineProperty(this, 'createSnapshot', { configurable: true, value: counted })
+    return counted
+  },
+})
+afterAll(() => {
+  Object.defineProperty(API.prototype, 'createSnapshot', createSnapshotAccessor)
+})
+
+/** Run a sequence and hand it the programs the mapper built during it. */
+function countingPrograms<T>(run: (built: Array<{ isDisposed: () => boolean }>) => T): T {
+  programsBuilt.length = 0
+  return run(programsBuilt)
 }
 
-const enumeratedLifecycleHistories: ReadonlyArray<LifecycleHistory> = LIFECYCLE_SCENARIOS.map(
-  (scenario) => ({ scenario }),
-)
-
-function lifecycleModel(history: LifecycleHistory) {
-  switch (history.scenario) {
-    case 'open-transform-edit-target-and-retransform':
-      return {
-        jsonrpcVersion: '2.0',
-        initProtocolVersion: 1,
-        initEncoding: 'utf-16',
-        initSource: 'execution-points',
-        watchedFilesExactMatch: true,
-        identityChangedAfterEdit: true,
-        identityChangedAfterTsconfigEdit: true,
-        identityChangedAfterManifestEdit: true,
-        firstHasFirstCall: true,
-        secondHasSecondCall: true,
-        secondHasStaleFirstCall: false,
-      }
-    case 'open-transform-edit-manifest-and-close':
-      return {
-        customConfigWatchedExtra: true,
-        missingTsconfigExcluded: true,
-        firstHasFirstCall: true,
-        secondHasExtraCall: true,
-        closedResultEmpty: true,
-        afterCloseUsesFileDir: true,
-      }
-    case 'split-chunks-and-unknown-method-error':
-      return {
-        splitHeaderOk: true,
-        splitBodyOk: true,
-        unknownMethodJsonrpc: '2.0',
-        unknownMethodErrorCode: -32601,
-        unknownMethodMentionsName: true,
-        internalErrorJsonrpc: '2.0',
-        internalErrorCode: -32603,
-        internalErrorHasMessage: true,
-      }
-  }
+const IMPORT_PROJECT = {
+  'src/app.ts': `import { loadLimit } from './limits'\nexport function allowed(n: number, s: Shape) {\n  const limit = loadLimit()\n  return check(limit, s, n)\n}\nfunction check(...parts: unknown[]) { return parts }\n`,
+  'src/limits.ts': `import { deep } from './deep'\nexport function loadLimit() { return deep() }\n`,
+  'src/deep.ts': `export function deep(): number { return 5 }\n`,
+  'src/globals.d.ts': `interface Shape { x: number }\n`,
+  'points.ep': JSON.stringify({ targets: ['src/app.ts'] }),
 }
 
 oracleProperty({
   id: 'content-mapper-lifecycle-and-live-refresh',
   owns: [
     'src/content-mapper.mjs#scanProject',
-    'src/content-mapper.mjs#getSnapshotCache',
     'src/content-mapper.mjs#initialize',
     'src/content-mapper.mjs#openProject',
     'src/content-mapper.mjs#transform',
@@ -354,262 +550,306 @@ oracleProperty({
   ],
   law: {
     statement:
-      'For every initialize, openProject, transform, and closeProject sequence over Content-Length JSON-RPC framing, openProject returns sorted watchedFiles (including tsconfig.json and resolved targets while excluding points.ep), transform reflects on-disk edits to watched target .ts files as well as updated manifest content passed to transform, closeProject releases the project handle, and unknown methods return JSON-RPC error -32601.',
+      'For every initialize, openProject, transform, and closeProject sequence over Content-Length JSON-RPC framing, openProject returns sorted watchedFiles (tsconfig.json, the listed targets, and every project file the analysis read, without points.ep) and a configIdentity that changes when one of them or the manifest changes; transform returns the registry a mapper started afresh returns; one TypeScript program serves an open project until closeProject releases it; and unknown methods return JSON-RPC error -32601.',
     authority:
-      'README.md:169-172 ("Single .ep anchor (points.ep). tsconfig.json registers src/content-mapper.mjs for .ep files with dynamicConfig: true and watchedFiles covering only the configured target modules.") and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23: Law M2.',
+      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: after every sequence of edits to targets and to the files they import, the warm mapper’s registry equals a cold mapper’s registry, so the mapper watches those files too. README.md:167 ("A persistent typescript/sync snapshot ... updates incrementally via snapshot.update(...) on file saves"). Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23: Law M2.',
     limits:
-      'Malformed frames without a Content-Length header or JSON parse errors without an id are ignored; histories are bounded-exhaustive over three representative project lifecycle sequences.',
+      'Malformed frames without a Content-Length header or JSON parse errors without an id are ignored; histories are bounded-exhaustive over four lifecycle sequences. The standard-input loop of the mapper process is not driven; importing the mapper is checked for attaching no listener.',
   },
   histories: {
-    enumerated: enumeratedLifecycleHistories,
+    enumerated: LIFECYCLE_SCENARIOS.map((scenario) => ({ scenario })),
     states: [
       'refreshed-after-target-file-edit',
+      'refreshed-after-imported-file-edit',
       'refreshed-after-manifest-edit',
+      'reopened-after-close',
       'handled-framing-and-unknown-method',
     ],
   },
-  label: (h) => h.scenario,
-  model: (history) => lifecycleModel(history),
-  driver: (history, observe) => {
-    const tempDir = mkdtempSync(join(tmpdir(), 'ep-mapper-m2-'))
+  label: (history) => history.scenario,
+  model: (history: { scenario: LifecycleScenario }) => {
+    switch (history.scenario) {
+      case 'open-transform-edit-and-retransform':
+        return {
+          jsonrpcVersion: '2.0',
+          initProtocolVersion: 1,
+          initEncoding: 'utf-16',
+          initSource: 'execution-points',
+          // The manifest lists itself; it is the one file never watched.
+          watched: ['src/app.ts', 'src/extra.ts', 'tsconfig.json'],
+          identityIsStable: true,
+          identityChangedAfterTargetEdit: true,
+          identityChangedAfterTsconfigEdit: true,
+          identityChangedAfterManifestEdit: true,
+          calleesBeforeEdit: ['firstCall'],
+          calleesAfterEdit: ['secondCall'],
+          // One program, and a second one when the tsconfig's compiler options change.
+          programsBuilt: 2,
+        }
+      case 'imported-files-are-watched-and-refresh':
+        return {
+          watched: ['src/app.ts', 'src/deep.ts', 'src/globals.d.ts', 'src/limits.ts', 'tsconfig.json'],
+          identityChangedAfterImportedEdit: true,
+          identityChangedAfterAmbientEdit: true,
+          warmEqualsColdAfterEachEdit: [true, true],
+          registryErrors: [],
+          fitsAfterEdits: true,
+          programsBuilt: 1,
+        }
+      case 'custom-manifest-close-and-reopen':
+        return {
+          customManifestWatched: ['src/extra.ts'],
+          missingTsconfigExcluded: true,
+          calleesOfFirstManifest: ['firstCall'],
+          calleesOfSecondManifest: ['extraCall', 'firstCall'],
+          closedResultEmpty: true,
+          programReleasedOnClose: true,
+          calleesAfterClose: ['subCall'],
+          programsBuilt: 2,
+        }
+      case 'split-chunks-and-unknown-method-error':
+        return {
+          splitHeaderOk: true,
+          splitBodyOk: true,
+          unknownMethodJsonrpc: '2.0',
+          unknownMethodErrorCode: -32601,
+          unknownMethodMentionsName: true,
+          internalErrorJsonrpc: '2.0',
+          internalErrorCode: -32603,
+          internalErrorHasMessage: true,
+          standardInputListeners: 0,
+        }
+    }
+  },
+  driver: async (history, observe) => {
+    const write = (root: string, relative: string, text: string) => {
+      mkdirSync(dirname(join(root, relative)), { recursive: true })
+      writeFileSync(join(root, relative), text)
+    }
+    const callees = (root: string, text: string) => readRegistry(root, text).callees.filter((name) => typeof name === 'string')
+    const first = 'function firstCall(): number { return 1 }\nexport function work() { return firstCall() }\n'
+    const second = 'function secondCall(): string { return "updated" }\nexport function work() { return secondCall() }\n'
+    const extra = 'function extraCall(): boolean { return true }\nexport function extra() { return extraCall() }\n'
+
     try {
-      const tsconfigFile = join(tempDir, 'tsconfig.json')
-      const manifestFile = join(tempDir, 'points.ep')
-      const target1 = join(tempDir, 'app.ts')
-      const target2 = join(tempDir, 'extra.ts')
-
-      const manifest1 = JSON.stringify({ tsconfig: 'tsconfig.json', targets: ['app.ts'] })
-      writeFileSync(tsconfigFile, JSON.stringify({ compilerOptions: { strict: true } }))
-      writeFileSync(manifestFile, manifest1)
-      writeFileSync(
-        target1,
-        'function firstCall(): number { return 1 }\nexport function work() { return firstCall() }\n',
-      )
-      writeFileSync(
-        target2,
-        'function extraCall(): boolean { return true }\nexport function extra() { return extraCall() }\n',
-      )
-
-      if (history.scenario === 'open-transform-edit-target-and-retransform') {
+      if (history.scenario === 'open-transform-edit-and-retransform') {
         observe('reach', 'refreshed-after-target-file-edit')
-        // Include points.ep in targets so watched.delete(manifestFile) is exercised
-        writeFileSync(
-          manifestFile,
-          JSON.stringify({ tsconfig: 'tsconfig.json', targets: ['app.ts', 'points.ep'] }),
-        )
-        const initResp = callRpc('initialize', { protocolVersion: 1 }) as {
-          jsonrpc?: string
-          result?: {
-            protocolVersion: number
-            positionEncoding: string
-            diagnosticSource: string
-          }
-        }
-        const openResp1 = callRpc('openProject', {
-          projectHandle: 'proj-1',
-          configFileName: tsconfigFile,
-        }) as {
-          result?: { configIdentity: string; watchedFiles: Array<string> }
-        }
-
-        const firstTx = callRpc('transform', {
-          projectHandle: 'proj-1',
-          fileName: manifestFile,
-          content: JSON.stringify({ targets: ['app.ts'] }),
-        }) as { result?: { text: string } }
-
-        // Edit app.ts on disk without changing points.ep!
-        writeFileSync(
-          target1,
-          'function secondCall(): string { return "updated" }\nexport function work() { return secondCall() }\n',
-        )
-
-        const openResp2 = callRpc('openProject', {
-          projectHandle: 'proj-1',
-          configFileName: tsconfigFile,
-        }) as {
-          result?: { configIdentity: string; watchedFiles: Array<string> }
-        }
-
-        // Edit tsconfig.json on disk and check configIdentity changes
-        writeFileSync(tsconfigFile, JSON.stringify({ compilerOptions: { strict: true, noEmit: true } }))
-        const openResp3 = callRpc('openProject', {
-          projectHandle: 'proj-1',
-          configFileName: tsconfigFile,
-        }) as {
-          result?: { configIdentity: string; watchedFiles: Array<string> }
-        }
-
-        // Edit points.ep on disk and check configIdentity changes
-        writeFileSync(manifestFile, JSON.stringify({ tsconfig: 'tsconfig.json', targets: ['app.ts'] }))
-        const openResp4 = callRpc('openProject', {
-          projectHandle: 'proj-1',
-          configFileName: tsconfigFile,
-        }) as {
-          result?: { configIdentity: string; watchedFiles: Array<string> }
-        }
-
-        const secondTx = callRpc('transform', {
-          projectHandle: 'proj-1',
-          fileName: manifestFile,
-          content: JSON.stringify({ targets: ['app.ts'] }),
-        }) as { result?: { text: string } }
-
-        callRpc('closeProject', { projectHandle: 'proj-1' })
-
-        const watched = openResp1?.result?.watchedFiles ?? []
-        const expectedWatched = [target1, tsconfigFile].sort()
-        observe('lifecycle', {
-          jsonrpcVersion: initResp?.jsonrpc,
-          initProtocolVersion: initResp?.result?.protocolVersion,
-          initEncoding: initResp?.result?.positionEncoding,
-          initSource: initResp?.result?.diagnosticSource,
-          watchedFilesExactMatch:
-            JSON.stringify(watched) === JSON.stringify(expectedWatched),
-          identityChangedAfterEdit:
-            Boolean(openResp1?.result?.configIdentity) &&
-            openResp1?.result?.configIdentity !== openResp2?.result?.configIdentity,
-          identityChangedAfterTsconfigEdit:
-            openResp2?.result?.configIdentity !== openResp3?.result?.configIdentity,
-          identityChangedAfterManifestEdit:
-            openResp3?.result?.configIdentity !== openResp4?.result?.configIdentity,
-          firstHasFirstCall: Boolean(firstTx?.result?.text.includes('"firstCall"')),
-          secondHasSecondCall: Boolean(secondTx?.result?.text.includes('"secondCall"')),
-          secondHasStaleFirstCall: Boolean(secondTx?.result?.text.includes('"firstCall"')),
-        })
-        return
-      }
-
-      if (history.scenario === 'open-transform-edit-manifest-and-close') {
         observe('reach', 'refreshed-after-manifest-edit')
-        const customEp = join(tempDir, 'custom.ep')
-        writeFileSync(customEp, JSON.stringify({ targets: ['extra.ts'] }))
-        const missingTsconfig = join(tempDir, 'nonexistent-tsconfig.json')
-        const customOpen = callRpc('openProject', {
-          projectHandle: 'proj-2',
-          configFileName: missingTsconfig,
-          options: { configFile: 'custom.ep' },
-        }) as { result?: { watchedFiles: Array<string> } }
-
-        const firstTx = callRpc('transform', {
-          projectHandle: 'proj-2',
-          fileName: manifestFile,
-          content: manifest1,
-        }) as { result?: { text: string } }
-
-        const manifest2 = JSON.stringify({
-          tsconfig: 'tsconfig.json',
-          targets: ['app.ts', 'extra.ts'],
-        })
-        const secondTx = callRpc('transform', {
-          projectHandle: 'proj-2',
-          fileName: manifestFile,
-          content: manifest2,
-        }) as { result?: { text: string } }
-
-        const closeResp = callRpc('closeProject', { projectHandle: 'proj-2' }) as {
-          result?: Record<string, unknown>
-        }
-
-        // After closeProject('proj-2'), transforming with 'proj-2' falls back to path.dirname(fileName)
-        const subDir = mkdtempSync(join(tmpdir(), 'ep-mapper-closed-'))
+        const manifest = JSON.stringify({ tsconfig: 'tsconfig.json', targets: ['src/app.ts', 'points.ep'] })
+        const root = createProject({ 'src/app.ts': first, 'src/extra.ts': extra, 'points.ep': manifest })
         try {
-          writeFileSync(
-            join(subDir, 'sub.ts'),
-            'function subCall(): number { return 1 }\nexport function s() { return subCall() }\n',
-          )
-          const afterCloseTx = callRpc('transform', {
-            projectHandle: 'proj-2',
-            fileName: join(subDir, 'points.ep'),
-            content: JSON.stringify({ targets: ['sub.ts'] }),
-          }) as { result?: { text: string } }
-
-          const customWatched = customOpen?.result?.watchedFiles ?? []
-          observe('lifecycle', {
-            customConfigWatchedExtra: customWatched.includes(target2),
-            missingTsconfigExcluded: !customWatched.includes(missingTsconfig),
-            firstHasFirstCall: Boolean(firstTx?.result?.text.includes('"firstCall"')),
-            secondHasExtraCall: Boolean(secondTx?.result?.text.includes('"extraCall"')),
-            closedResultEmpty:
-              closeResp?.result !== undefined && Object.keys(closeResp.result).length === 0,
-            afterCloseUsesFileDir: Boolean(afterCloseTx?.result?.text.includes('"subCall"')),
+          countingPrograms((built) => {
+            const open = () => callRpc('openProject', { projectHandle: 'proj-1', configFileName: join(root, 'tsconfig.json') }).result
+            const transform = () =>
+              callRpc('transform', { projectHandle: 'proj-1', fileName: join(root, 'points.ep'), content: manifest }).result
+            const init = callRpc('initialize', { protocolVersion: 1 })
+            const opened = open()
+            const again = open()
+            const calleesBeforeEdit = callees(root, transform().text)
+            write(root, 'src/app.ts', second)
+            const afterTarget = open()
+            const tsconfig = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf8'))
+            write(root, 'tsconfig.json', JSON.stringify({ ...tsconfig, compilerOptions: { ...tsconfig.compilerOptions, noUnusedLocals: true } }))
+            const afterTsconfig = open()
+            write(root, 'points.ep', JSON.stringify({ targets: ['src/app.ts', 'points.ep'] }))
+            const afterManifest = open()
+            const after = transform()
+            callRpc('closeProject', { projectHandle: 'proj-1' })
+            observe('lifecycle', {
+              jsonrpcVersion: init.jsonrpc,
+              initProtocolVersion: init.result.protocolVersion,
+              initEncoding: init.result.positionEncoding,
+              initSource: init.result.diagnosticSource,
+              watched: relativeTo(root, opened.watchedFiles),
+              identityIsStable: opened.configIdentity.length > 0 && opened.configIdentity === again.configIdentity,
+              identityChangedAfterTargetEdit: again.configIdentity !== afterTarget.configIdentity,
+              identityChangedAfterTsconfigEdit: afterTarget.configIdentity !== afterTsconfig.configIdentity,
+              identityChangedAfterManifestEdit: afterTsconfig.configIdentity !== afterManifest.configIdentity,
+              calleesBeforeEdit,
+              calleesAfterEdit: callees(root, after.text),
+              programsBuilt: built.length,
+            })
           })
         } finally {
-          rmSync(subDir, { recursive: true, force: true })
+          removeProject(root)
         }
         return
       }
 
-      // split-chunks-and-unknown-method-error
+      if (history.scenario === 'imported-files-are-watched-and-refresh') {
+        observe('reach', 'refreshed-after-imported-file-edit')
+        const root = createProject(IMPORT_PROJECT)
+        try {
+          countingPrograms((built) => {
+            const open = () => callRpc('openProject', { projectHandle: 'proj-imports', configFileName: join(root, 'tsconfig.json') }).result
+            const transform = () =>
+              callRpc('transform', { projectHandle: 'proj-imports', fileName: join(root, 'points.ep'), content: IMPORT_PROJECT['points.ep'] })
+                .result.text as string
+            // What a mapper started afresh returns: the registry generated with no warm program.
+            const cold = () => {
+              const plan = buildTargetPlan({ root, targets: ['src/app.ts'], api }) as Plan
+              return { plan, text: generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api }).text }
+            }
+            const opened = open()
+            transform()
+            write(root, 'src/deep.ts', `export function deep(): string { return '5' }\n`)
+            const afterImported = open()
+            const warmAfterImported = transform()
+            const coldAfterImported = cold().text
+            write(root, 'src/globals.d.ts', `interface Shape { x: string; y: boolean }\n`)
+            const afterAmbient = open()
+            const warmAfterAmbient = transform()
+            const fresh = cold()
+            callRpc('closeProject', { projectHandle: 'proj-imports' })
+            const { reading } = compileRegistry(api, root, warmAfterAmbient, fresh.plan)
+            observe('lifecycle', {
+              watched: relativeTo(root, opened.watchedFiles),
+              identityChangedAfterImportedEdit: opened.configIdentity !== afterImported.configIdentity,
+              identityChangedAfterAmbientEdit: afterImported.configIdentity !== afterAmbient.configIdentity,
+              warmEqualsColdAfterEachEdit: [warmAfterImported === coldAfterImported, warmAfterAmbient === fresh.text],
+              registryErrors: reading.registryErrors,
+              fitsAfterEdits: Object.values(reading.nodes).every(
+                (node) =>
+                  node.unportable === null &&
+                  [node.result, ...Object.values(node.locals)].every((fit) => fit === 'same' || fit === 'equivalent'),
+              ),
+              programsBuilt: built.length,
+            })
+          })
+        } finally {
+          removeProject(root)
+        }
+        return
+      }
+
+      if (history.scenario === 'custom-manifest-close-and-reopen') {
+        observe('reach', 'refreshed-after-manifest-edit')
+        observe('reach', 'reopened-after-close')
+        const manifestOne = JSON.stringify({ tsconfig: 'tsconfig.json', targets: ['src/app.ts'] })
+        const manifestTwo = JSON.stringify({ tsconfig: 'tsconfig.json', targets: ['src/app.ts', 'src/extra.ts'] })
+        const root = createProject({
+          'src/app.ts': first,
+          'src/extra.ts': extra,
+          'points.ep': manifestOne,
+          'custom.ep': JSON.stringify({ targets: ['src/extra.ts'] }),
+        })
+        const elsewhere = createProject({
+          'sub.ts': 'function subCall(): number { return 1 }\nexport function s() { return subCall() }\n',
+        })
+        try {
+          countingPrograms((built) => {
+            // A tsconfig that does not exist is not watched; a custom manifest names its own targets.
+            const custom = callRpc('openProject', {
+              projectHandle: 'proj-2',
+              configFileName: join(root, 'nonexistent-tsconfig.json'),
+              options: { configFile: 'custom.ep' },
+            }).result
+            const customProgram = built[0]
+            callRpc('closeProject', { projectHandle: 'proj-2' })
+            const programReleasedOnClose = Boolean(customProgram?.isDisposed())
+            built.length = 0
+
+            callRpc('openProject', { projectHandle: 'proj-2', configFileName: join(root, 'tsconfig.json') })
+            const transform = (content: string) =>
+              callRpc('transform', { projectHandle: 'proj-2', fileName: join(root, 'points.ep'), content }).result.text as string
+            const firstText = transform(manifestOne)
+            const secondText = transform(manifestTwo)
+            const closed = callRpc('closeProject', { projectHandle: 'proj-2' })
+            callRpc('openProject', { projectHandle: 'proj-2', configFileName: join(root, 'tsconfig.json') })
+            const programsBuilt = built.length
+            callRpc('closeProject', { projectHandle: 'proj-2' })
+
+            // With no open project, the manifest's own directory is the project root.
+            const afterClose = callRpc('transform', {
+              projectHandle: 'proj-2',
+              fileName: join(elsewhere, 'points.ep'),
+              content: JSON.stringify({ targets: ['sub.ts'] }),
+            }).result.text as string
+            const subPlan = buildTargetPlan({ root: elsewhere, targets: ['sub.ts'], api }) as Plan
+            observe('lifecycle', {
+              customManifestWatched: relativeTo(root, custom.watchedFiles),
+              missingTsconfigExcluded: !custom.watchedFiles.includes(join(root, 'nonexistent-tsconfig.json')),
+              calleesOfFirstManifest: callees(root, firstText),
+              calleesOfSecondManifest: callees(root, secondText),
+              closedResultEmpty: closed.result !== undefined && Object.keys(closed.result).length === 0,
+              programReleasedOnClose,
+              calleesAfterClose: Object.values(compileRegistry(api, elsewhere, afterClose, subPlan).reading.nodes).map(
+                (node) => node.descriptor.callee,
+              ),
+              programsBuilt,
+            })
+          })
+        } finally {
+          removeProject(root)
+          removeProject(elsewhere)
+        }
+        return
+      }
+
       observe('reach', 'handled-framing-and-unknown-method')
-      // Send a bad header, an invalid JSON frame, and a notification (no `id`)
-      const badHeader = Buffer.from('X-Ignore: 1\r\n\r\n', 'ascii')
-      const badJson = Buffer.from('Content-Length: 3\r\n\r\n{x}', 'ascii')
-      const notifBody = Buffer.from(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }), 'utf8')
-      const notifFrame = Buffer.concat([
-        Buffer.from(`Content-Length: ${notifBody.length}\r\n\r\n`, 'ascii'),
-        notifFrameBody(notifBody),
+      // What a fresh import of the mapper adds to standard input.
+      const listeners = () => process.stdin.listenerCount('data') + process.stdin.listenerCount('end')
+      const listenersBeforeImport = listeners()
+      vi.resetModules()
+      await import('../src/content-mapper.mjs')
+      const listenersAfterImport = listeners()
+      // A header without a length, a frame that is not JSON, and a notification get no reply.
+      const notification = Buffer.from(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }), 'utf8')
+      sendFramedPayloads([
+        Buffer.from('X-Ignore: 1\r\n\r\n', 'ascii'),
+        Buffer.from('Content-Length: 3\r\n\r\n{x}', 'ascii'),
+        Buffer.concat([Buffer.from(`Content-Length: ${notification.length}\r\n\r\n`, 'ascii'), notification]),
       ])
-      sendFramedPayloads([badHeader, badJson, notifFrame])
-
-      const splitHeader = callRpc('initialize', { protocolVersion: 2 }, 8) as {
-        result?: { protocolVersion: number }
-      }
-      const splitBody = callRpc('initialize', { protocolVersion: 3 }, 35) as {
-        result?: { protocolVersion: number }
-      }
-      const unknownResp = callRpc('noSuchMethod', {}) as {
-        jsonrpc?: string
-        error?: { code: number; message: string }
-      }
-      const internalErrResp = callRpc('transform', null) as {
-        jsonrpc?: string
-        error?: { code: number; message: string }
-      }
-
+      const splitHeader = callRpc('initialize', { protocolVersion: 2 }, 8)
+      const splitBody = callRpc('initialize', { protocolVersion: 3 }, 35)
+      const unknown = callRpc('noSuchMethod', {})
+      const internal = callRpc('transform', null)
       observe('lifecycle', {
         splitHeaderOk: splitHeader?.result?.protocolVersion === 2,
         splitBodyOk: splitBody?.result?.protocolVersion === 3,
-        unknownMethodJsonrpc: unknownResp?.jsonrpc,
-        unknownMethodErrorCode: unknownResp?.error?.code ?? 0,
-        unknownMethodMentionsName: Boolean(unknownResp?.error?.message.includes('noSuchMethod')),
-        internalErrorJsonrpc: internalErrResp?.jsonrpc,
-        internalErrorCode: internalErrResp?.error?.code ?? 0,
-        internalErrorHasMessage: Boolean(internalErrResp?.error?.message && internalErrResp.error.message.length > 0),
+        unknownMethodJsonrpc: unknown?.jsonrpc,
+        unknownMethodErrorCode: unknown?.error?.code ?? 0,
+        unknownMethodMentionsName: Boolean(unknown?.error?.message.includes('noSuchMethod')),
+        internalErrorJsonrpc: internal?.jsonrpc,
+        internalErrorCode: internal?.error?.code ?? 0,
+        internalErrorHasMessage: Boolean(internal?.error?.message),
+        standardInputListeners: listenersAfterImport - listenersBeforeImport,
       })
-    } catch (err) {
-      observe('lifecycle', { threw: err instanceof Error ? err.message : String(err) })
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true })
+    } catch (error) {
+      observe('crash', error instanceof Error ? error.message : String(error))
     }
   },
-  check: (_history, observations, expected) => {
-    const entry = observations.find((o) => o.checkpoint === 'lifecycle')
-    if (!entry) return differs('lifecycle', 'lifecycle-and-live-refresh', undefined, expected) ?? pass
-    return differs('lifecycle', 'lifecycle-and-live-refresh', entry.value, expected) ?? pass
-  },
+  check: judge('lifecycle-and-live-refresh', 'lifecycle'),
   calibrations: [
     {
       name: 'stale-target-plan-on-retransform',
       law: 'lifecycle-and-live-refresh',
-      history: { enumerated: 'open-transform-edit-target-and-retransform' },
-      corrupt: (trace) =>
-        trace.map((o) =>
-          o.checkpoint === 'lifecycle'
-            ? {
-                ...o,
-                value: {
-                  ...(o.value as object),
-                  secondHasSecondCall: false,
-                  secondHasStaleFirstCall: true,
-                },
-              }
-            : o,
-        ),
+      history: { enumerated: 'open-transform-edit-and-retransform' },
+      corrupt: corrupt('lifecycle', (value) => ({ ...value, calleesAfterEdit: ['firstCall'] })),
+    },
+    {
+      name: 'an-imported-file-that-nobody-watches',
+      law: 'lifecycle-and-live-refresh',
+      history: { enumerated: 'imported-files-are-watched-and-refresh' },
+      corrupt: corrupt('lifecycle', (value) => ({ ...value, watched: ['src/app.ts', 'tsconfig.json'] })),
+    },
+    {
+      name: 'old-types-after-an-imported-file-changed',
+      law: 'lifecycle-and-live-refresh',
+      history: { enumerated: 'imported-files-are-watched-and-refresh' },
+      corrupt: corrupt('lifecycle', (value) => ({ ...value, warmEqualsColdAfterEachEdit: [false, true] })),
+    },
+    {
+      name: 'a-new-program-for-every-request',
+      law: 'lifecycle-and-live-refresh',
+      history: { enumerated: 'imported-files-are-watched-and-refresh' },
+      corrupt: corrupt('lifecycle', (value) => ({ ...value, programsBuilt: 9 })),
+    },
+    {
+      name: 'listeners-attached-by-an-import',
+      law: 'lifecycle-and-live-refresh',
+      history: { enumerated: 'split-chunks-and-unknown-method-error' },
+      corrupt: corrupt('lifecycle', (value) => ({ ...value, standardInputListeners: 2 })),
     },
   ],
 })
-
-function notifFrameBody(b: Buffer) {
-  return b
-}
