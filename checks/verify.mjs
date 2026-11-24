@@ -44,8 +44,10 @@ function analyze(overrides = new Map()) {
   let snapshot
   try {
     const plan = buildTargetPlan({ ...config, overrides, api })
-    const virtualRegistryFile = join(root, '__execution_points_registry.d.ts')
-    const { text: registryText } = generateFileRegistryModule(plan, { fromFile: virtualRegistryFile, api, overrides })
+    // The registry is compiled as `.ts` where the content mapper's output is compiled, beside points.ep,
+    // so that an error inside the registry itself is one of the diagnostics below (skipLibCheck hides a .d.ts).
+    const virtualRegistryFile = join(root, 'points.ep.ts')
+    const { text: registryText } = generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api, overrides })
     const tsCfg = existsSync(plan.tsconfig) ? api.parseConfigFile(plan.tsconfig) : undefined
     const compilerOptions = {
       strict: true,
@@ -315,7 +317,7 @@ await verifyLsp()
 // 3. Negative type-safety checks
 const valid = analyze()
 assert.equal(valid.ok, true, `Valid example failed:\n${describeDiagnostics(valid.diagnostics)}`)
-passed('valid select() and fromFile() examples typecheck through the file schema')
+passed('valid select() examples typecheck through the file schema, and the registry itself has no errors')
 
 await rejectsTestSource(
   'a replacement with the wrong result type is rejected',

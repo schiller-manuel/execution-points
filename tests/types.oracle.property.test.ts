@@ -54,31 +54,28 @@
  * (GitHub schiller-manuel), 2026-11-24).
  *
  * The model predicts whether each constructed TypeScript snippet compiles
- * cleanly or produces the expected diagnostic code/substring. The driver builds
- * an in-memory TypeScript 7.1 program containing the real `src/runtime.d.ts`,
- * the generated `ExecutionPointFileRegistry` (or omits it for empty-registry
- * checks), and the snippet, then records semantic diagnostics.
+ * cleanly or produces the expected diagnostic code/substring. The driver
+ * compiles a project that holds the target, the real `src/runtime.d.ts`, the
+ * snippet, and the generated `ExecutionPointFileRegistry` as `.ts` beside the
+ * target (or without it for empty-registry checks). It records the snippet's
+ * diagnostics and, separately, every diagnostic inside the registry itself:
+ * each law owes none (Decision by Manuel Schiller (GitHub schiller-manuel),
+ * 2026-11-24).
  *
  * LSP completion ordering is verified separately in `checks/verify.mjs`; this
  * oracle checks semantic type-checking contracts across `src/runtime.d.ts`.
  */
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { API, ModuleKind, ModuleResolutionKind } from 'typescript/sync'
-import { createFileSystemLayer } from 'typescript/fs'
-import { ScriptTarget } from 'typescript/ast'
+import { API } from 'typescript/sync'
 import { afterAll } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { generateFileRegistryModule } from '../src/contracts.mjs'
-import { buildTargetPlan } from '../src/discovery.mjs'
+import { createProject, generateAndCompile, removeProject, repoRoot } from './registry-harness'
 
-const root = process.cwd()
-const sharedApi = new API({ cwd: root })
+const sharedApi = new API({ cwd: repoRoot })
 afterAll(() => {
   sharedApi.close()
 })
 
-const TARGET_REL = 'examples/type-oracle-target.ts'
+const TARGET_REL = 'src/target.ts'
 const TARGET_SOURCE = `
 function send(id: string): number { return id.length }
 function logSync(msg: string): void { void msg }
@@ -102,71 +99,28 @@ export function genericWork<U>(val: U) {
 }
 `
 
+/**
+ * Compile a test snippet in a project whose registry production generated.
+ * The registry is compiled as `.ts` beside the target, as the content mapper's
+ * output is, so an error inside it is seen: `registryErrors` holds them.
+ */
 function checkSnippet(snippet: string, { emptyRegistry = false } = {}) {
-  const runtimeDts = readFileSync(join(root, 'src/runtime.d.ts'), 'utf8')
-  const pkgJson = JSON.stringify({
-    name: 'execution-points-prototype',
-    type: 'module',
-    exports: { '.': { types: './src/runtime.d.ts', default: './src/runtime.mjs' } },
-  })
-  const absTarget = join(root, TARGET_REL)
-  const absTest = join(root, 'examples/type-oracle-snippet.test.ts')
-  const absRegistry = join(root, '__type_oracle_registry.d.ts')
-
-  const files = new Map<string, string>([
-    [join(root, 'node_modules/execution-points-prototype/package.json'), pkgJson],
-    [join(root, 'node_modules/execution-points-prototype/src/runtime.d.ts'), runtimeDts],
-    [absTarget, TARGET_SOURCE],
-    [absTest, snippet],
-  ])
-
-  const rootFiles = [absTarget, absTest]
-
-  if (!emptyRegistry) {
-    const overrides = new Map([[absTarget, TARGET_SOURCE]])
-    const plan = buildTargetPlan({ root, targets: [TARGET_REL], overrides, api: sharedApi })
-    const { text: registryText } = generateFileRegistryModule(plan, {
-      fromFile: absRegistry,
-      api: sharedApi,
-      overrides,
-    })
-    files.set(absRegistry, registryText)
-    rootFiles.push(absRegistry)
-  }
-
-  const snapshot = sharedApi.createSnapshot({
-    fileSystem: createFileSystemLayer([...files]),
-    createPrograms: [
-      {
-        rootFiles,
-        compilerOptions: {
-          strict: true,
-          target: ScriptTarget.ES2022,
-          module: ModuleKind.ESNext,
-          moduleResolution: ModuleResolutionKind.Bundler,
-          noEmit: true,
-          skipLibCheck: true,
-        },
-      },
-    ],
-  })
-
+  const root = createProject({ [TARGET_REL]: TARGET_SOURCE })
   try {
-    const prog = snapshot.operation.createdPrograms[0]
-    const diags = [...prog.getSemanticDiagnostics(), ...prog.getSyntacticDiagnostics()]
-      .filter((d) => d.category === 1 && d.fileName?.endsWith('type-oracle-snippet.test.ts'))
-      .map((d) => ({
-        code: d.code,
-        text: [d.text ?? '', ...(d.messageChain ?? []).map((c) => c.text)].join(' '),
-      }))
+    const { reading, extraErrors } = generateAndCompile(sharedApi, root, [TARGET_REL], {
+      extraFiles: { 'test/snippet.test.ts': snippet },
+      withoutRegistry: emptyRegistry,
+    })
+    const diags = extraErrors['test/snippet.test.ts']!
     return {
       ok: diags.length === 0,
       count: diags.length,
       codes: diags.map((d) => d.code),
       allText: diags.map((d) => `TS${d.code}: ${d.text}`).join('\n'),
+      registryErrors: [...reading.registryErrors, ...reading.projectErrors],
     }
   } finally {
-    snapshot.dispose()
+    removeProject(root)
   }
 }
 
@@ -190,17 +144,17 @@ function t1Model(c: T1Case) {
   switch (c) {
     case 'minimal-callee-with-and-shortcircuit':
     case 'minimal-operator-without-kind':
-      return { ok: true, hasExpectedMarker: true }
+      return { ok: true, hasExpectedMarker: true, registryErrors: [] }
     case 'typo-callee-ts2367':
-      return { ok: false, hasExpectedMarker: true }
+      return { ok: false, hasExpectedMarker: true, registryErrors: [] }
     case 'zero-match-selection-error':
-      return { ok: false, hasExpectedMarker: true }
+      return { ok: false, hasExpectedMarker: true, registryErrors: [] }
     case 'multi-match-surfaces-matched-ids':
-      return { ok: false, hasExpectedMarker: true }
+      return { ok: false, hasExpectedMarker: true, registryErrors: [] }
     case 'unportable-generic-counts-in-multi-match':
-      return { ok: false, hasExpectedMarker: true }
+      return { ok: false, hasExpectedMarker: true, registryErrors: [] }
     case 'unportable-generic-direct-selection-error':
-      return { ok: false, hasExpectedMarker: true }
+      return { ok: false, hasExpectedMarker: true, registryErrors: [] }
   }
 }
 
@@ -212,7 +166,7 @@ oracleProperty({
       'For every target module, select(file, visitor) accepts minimal callee/operator narrowing with && short-circuit returns without requiring kind, rejects callee typos with TS2367, lists __matched node IDs on multiple matches, and keeps unportable generic nodes in the compile-time match count while rejecting direct selection with an explicit error.',
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: disjoint callee/operator discriminators, false|null visitor returns, __matched IDs, and unportable-node parity.',
-    limits: 'Checked via TypeScript 7.1 semantic diagnostics on examples/type-oracle-target.ts.',
+    limits: 'Checked via TypeScript 7.1 semantic diagnostics on one target module.',
   },
   histories: {
     enumerated: T1_CASES.map((c) => ({ c })),
@@ -290,6 +244,7 @@ p.withReplacement(({ original }) => original(), () => 0)`
     observe('t1', {
       ok: res.ok,
       hasExpectedMarker: markerCheck(res.allText, res.codes),
+      registryErrors: res.registryErrors,
     })
   },
   check: (_h, obs, expected) => {
@@ -303,7 +258,18 @@ p.withReplacement(({ original }) => original(), () => 0)`
       law: 'minimal-select-and-parity',
       history: { enumerated: 'minimal-callee-with-and-shortcircuit' },
       corrupt: (trace) =>
-        trace.map((o) => (o.checkpoint === 't1' ? { ...o, value: { ok: false, hasExpectedMarker: true } } : o)),
+        trace.map((o) => (o.checkpoint === 't1' ? { ...o, value: { ok: false, hasExpectedMarker: true, registryErrors: [] } } : o)),
+    },
+    {
+      name: 'a-registry-that-does-not-compile',
+      law: 'minimal-select-and-parity',
+      history: { enumerated: 'minimal-operator-without-kind' },
+      corrupt: (trace) =>
+        trace.map((o) =>
+          o.checkpoint === 't1'
+            ? { ...o, value: { ...(o.value as object), registryErrors: ["TS2304: Cannot find name 'Stats'."] } }
+            : o,
+        ),
     },
   ],
 })
@@ -332,16 +298,17 @@ oracleProperty({
     mentionsRunExternalCode: true,
     hasNeverPropertyCascade: false,
     diagnosticCountAtMostOne: true,
+    registryErrors: [],
   }),
   driver: (history, observe) => {
     observe('reach', `empty-registry-${history.variant}`)
     const code =
       history.variant === 'visitor-with-capture'
         ? `import { select } from 'execution-points-prototype'
-const p = select('examples/type-oracle-target.ts', (n) => n.kind === 'CallExpression' && n.callee === 'send' && n.capture('chosen'))
+const p = select('src/target.ts', (n) => n.kind === 'CallExpression' && n.callee === 'send' && n.capture('chosen'))
 p.withReplacement(({ locals, original }) => { void locals.chosen; return original() }, () => 0)`
         : `import { select } from 'execution-points-prototype'
-const p = select('examples/type-oracle-target.ts', (n) => n.callee === 'send' && n).capture('chosen')
+const p = select('src/target.ts', (n) => n.callee === 'send' && n).capture('chosen')
 p.withReplacement(({ locals, original }) => { void locals.chosen; return original() }, () => 0)`
     const res = checkSnippet(code, { emptyRegistry: true })
     observe('t2', {
@@ -349,6 +316,7 @@ p.withReplacement(({ locals, original }) => { void locals.chosen; return origina
       mentionsRunExternalCode: res.allText.includes('--runExternalCode') && res.allText.includes('points.ep'),
       hasNeverPropertyCascade: res.allText.includes("does not exist on type 'never'"),
       diagnosticCountAtMostOne: res.count === 1,
+      registryErrors: res.registryErrors,
     })
   },
   check: (_h, obs, expected) => {
@@ -364,7 +332,7 @@ p.withReplacement(({ locals, original }) => { void locals.chosen; return origina
       corrupt: (trace) =>
         trace.map((o) =>
           o.checkpoint === 't2'
-            ? { ...o, value: { ok: false, mentionsRunExternalCode: false, hasNeverPropertyCascade: true, diagnosticCountAtMostOne: false } }
+            ? { ...o, value: { ok: false, mentionsRunExternalCode: false, hasNeverPropertyCascade: true, diagnosticCountAtMostOne: false, registryErrors: [] } }
             : o,
         ),
     },
@@ -393,7 +361,7 @@ oracleProperty({
       'For every .capture(...keys) call on a visitor node or selected point, zero arguments types locals as {} (rejecting uncaptured local reads), valid keys expose typed readonly locals, chained .capture() replaces prior keys, and unknown keys fail compile time.',
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: fix 0-arg capture soundness with = never default.',
-    limits: 'Checked on examples/type-oracle-target.ts send() call.',
+    limits: 'Checked on the send() call of one target module.',
   },
   histories: {
     enumerated: T3_CASES.map((c) => ({ c })),
@@ -408,6 +376,7 @@ oracleProperty({
   label: (h) => h.c,
   model: (h) => ({
     ok: h.c === 'valid-capture-narrows-locals',
+    registryErrors: [],
   }),
   driver: (history, observe) => {
     const header = `import { select } from 'execution-points-prototype'\n`
@@ -446,7 +415,7 @@ void p`
         break
     }
     const res = checkSnippet(code)
-    observe('t3', { ok: res.ok })
+    observe('t3', { ok: res.ok, registryErrors: res.registryErrors })
   },
   check: (_h, obs, expected) => {
     const e = obs.find((o) => o.checkpoint === 't3')
@@ -459,7 +428,7 @@ void p`
       law: 'capture-soundness',
       history: { enumerated: 'empty-capture-on-node-rejects-local-read' },
       corrupt: (trace) =>
-        trace.map((o) => (o.checkpoint === 't3' ? { ...o, value: { ok: true } } : o)),
+        trace.map((o) => (o.checkpoint === 't3' ? { ...o, value: { ok: true, registryErrors: [] } } : o)),
     },
   ],
 })
@@ -499,7 +468,7 @@ oracleProperty({
     ],
   },
   label: (h) => h.c,
-  model: (h) => ({ ok: h.c !== 'async-on-sync-void-rejected' }),
+  model: (h) => ({ ok: h.c !== 'async-on-sync-void-rejected', registryErrors: [] }),
   driver: (history, observe) => {
     const header = `import { select } from 'execution-points-prototype'\n`
     let code = ''
@@ -536,7 +505,7 @@ p.withReplacement(async () => 123, () => 0)`
         break
     }
     const res = checkSnippet(code)
-    observe('t4', { ok: res.ok })
+    observe('t4', { ok: res.ok, registryErrors: res.registryErrors })
   },
   check: (_h, obs, expected) => {
     const e = obs.find((o) => o.checkpoint === 't4')
@@ -549,7 +518,7 @@ p.withReplacement(async () => 123, () => 0)`
       law: 'handler-result-safety',
       history: { enumerated: 'async-on-sync-void-rejected' },
       corrupt: (trace) =>
-        trace.map((o) => (o.checkpoint === 't4' ? { ...o, value: { ok: true } } : o)),
+        trace.map((o) => (o.checkpoint === 't4' ? { ...o, value: { ok: true, registryErrors: [] } } : o)),
     },
   ],
 })
