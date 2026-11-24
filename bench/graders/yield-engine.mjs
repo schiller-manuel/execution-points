@@ -1,5 +1,5 @@
 /**
- * Grader-owned deterministic async interleaving engine (harness v2.4; the engine itself
+ * Grader-owned deterministic async interleaving engine (harness v2.5; the engine itself
  * is unchanged since v2.2 — eager2 + leaf I/O).
  *
  * Fixes N-11, N-14, N-15, N-16, N-17, N-19, N-20:

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Controlled A/B benchmark runner (harness v2.4; see `HARNESS_VERSION` and
+ * Controlled A/B benchmark runner (harness v2.5; see `HARNESS_VERSION` and
  * `bench/PROTOCOL.md`) for evaluating whether `execution-points` helps coding
  * agents (via GitHub Copilot CLI) debug and fix hard asynchronous concurrency bugs.
  *
@@ -51,7 +51,18 @@ import {
   auditTestAst,
   auditTestTree,
   closeAuditApi,
+  POINT_CONSUMERS,
+  POINT_OPERATIONS,
+  POINT_OTHER_MEMBERS,
+  readLibrarySurface,
 } from './ast-audit.mjs'
+import { ADOPTION_FILE_CASES, ADOPTION_TREE_CASES } from './calibration/adoption-cases.mjs'
+import {
+  E2E_CLASSIFICATION_CASES,
+  ERROR_KIND_CASES,
+  RUN_OUTCOME_CASES,
+  UNDECIDED_KIND_CASES,
+} from './calibration/classification-cases.mjs'
 import {
   buildBuggyRefactors,
   CALIBRATION_VARIANTS,
@@ -63,11 +74,14 @@ import {
   buildMustRejectCheats,
   GOOD_WITNESSES,
   PROBE_CANCEL_COMMIT_SETTLE_TEST,
+  WITNESS_STALE_CACHE_TREATMENT_TEST,
 } from './calibration/witnesses.mjs'
 import {
   agreeOnOutcome,
+  classifyError,
   classifyFailedTests,
-  classifyFailureMessage,
+  formatError,
+  UNDECIDED_GRADINGS,
   countRefactorResults,
   countValidFixResults,
   refactorOutcome,
@@ -88,9 +102,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(__dirname, '..')
 const RUNTIME_GUARD_PATH = path.join(__dirname, 'runtime-guard.setup.mjs')
 const DETERMINISTIC_IO_PATH = path.join(__dirname, 'deterministic-io.setup.mjs')
+// Vitest reporter that writes each failed test's errors with their `name` and causes (D-19).
+const FAILURE_REPORTER_PATH = path.join(__dirname, 'failure-reporter.mjs')
 
 /** One version string for the harness, the protocol, and every file header. */
-export const HARNESS_VERSION = 'v2.4'
+export const HARNESS_VERSION = 'v2.5'
 
 /** How often every graded variant is run; all runs must agree (see `agreeOnOutcome`). */
 export const DEFAULT_GRADE_REPEATS = 3
@@ -417,6 +433,7 @@ export function computeProvenance() {
       path.join(__dirname, 'runtime-guard.setup.mjs'),
       path.join(__dirname, 'deterministic-io.setup.mjs'),
       path.join(__dirname, 'classify.mjs'),
+      path.join(__dirname, 'failure-reporter.mjs'),
       path.join(__dirname, 'pricing.mjs'),
       path.join(__dirname, 'stats.mjs'),
       path.join(__dirname, 'analyze.mjs'),
@@ -761,6 +778,7 @@ export async function runVitestClassified(
 ) {
   const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`
   const jsonPath = path.join(dir, `.vitest-report-${token}.json`)
+  const failuresPath = path.join(dir, `.vitest-failures-${token}.json`)
   // N-23: Per-worker report directory so sibling test files can NEVER erase another worker's sleep record!
   const guardReportDir = path.join(dir, `.guard-reports-${token}`)
   mkdirSync(guardReportDir, { recursive: true })
@@ -778,11 +796,13 @@ export async function runVitestClassified(
       `--testTimeout=${testTimeoutMs}`,
       '--reporter=json',
       `--outputFile=${jsonPath}`,
+      `--reporter=${FAILURE_REPORTER_PATH}`,
     ],
     dir,
     {
       timeoutMs: 90_000,
       extraEnv: {
+        BENCH_FAILURE_REPORT: failuresPath,
         BENCH_GUARD_REPORT_DIR: guardReportDir,
         BENCH_GUARD_SRC_ROOT: path.join(dir, 'src'),
         BENCH_GUARD_ALLOWED_TIMER_FILES: allowedFiles,
@@ -800,6 +820,14 @@ export async function runVitestClassified(
     report = null
   } finally {
     rmSync(jsonPath, { force: true })
+  }
+  let failureReport = null
+  try {
+    if (existsSync(failuresPath)) failureReport = JSON.parse(readFileSync(failuresPath, 'utf8'))
+  } catch {
+    failureReport = null
+  } finally {
+    rmSync(failuresPath, { force: true })
   }
   try {
     if (existsSync(guardReportDir)) {
@@ -908,13 +936,18 @@ export async function runVitestClassified(
   }
 
   // PROTOCOL section 2: only an assertion failure reproduces a bug (`bench/classify.mjs`).
-  const { outcome, kinds } = classifyFailedTests(failedAssertions)
-  const firstOfOutcome =
-    outcome === 'true_red'
-      ? failedAssertions
-          .flatMap((a) => a.failureMessages ?? [])
-          .find((m) => classifyFailureMessage(m) === 'assertion')
-      : undefined
+  // The type of each error comes from the harness's own reporter, never from the text of the
+  // JSON report (D-19). Both reporters see the same run, so they must name the same failures.
+  const failedTests = failureReport?.failedTests
+  if (!Array.isArray(failedTests) || failedTests.length !== failedAssertions.length) {
+    throw new Error(
+      `The failure report of this Vitest run is ${Array.isArray(failedTests) ? `inconsistent (${failedTests.length} failed tests, the JSON report has ${failedAssertions.length})` : 'missing'}; a failure cannot be graded from the printed text. ${(res.stderr || '').slice(0, 300)}`,
+    )
+  }
+  const { outcome, kinds } = classifyFailedTests(failedTests)
+  const errors = failedTests.flatMap((t) => t.errors).map((error) => ({ kind: classifyError(error), ...error }))
+  const kindOfOutcome = { true_red: ['assertion'], timeout: ['timeout'], loud_break: ['selector_break', 'load_break', 'guard'] }[outcome]
+  const shown = [...errors.filter((e) => kindOfOutcome?.includes(e.kind)), ...errors.filter((e) => !kindOfOutcome?.includes(e.kind))]
 
   return {
     ok: false,
@@ -923,7 +956,20 @@ export async function runVitestClassified(
     numFailed: failedAssertions.length,
     guardViolations,
     failureKinds: kinds,
-    summary: (firstOfOutcome ?? failedAssertions[0]?.failureMessages?.[0] ?? res.stderr ?? '').slice(0, 400),
+    // What the trial row keeps: each error's kind, name and causes, the deciding ones first.
+    errors: shown.slice(0, MAX_RECORDED_ERRORS).map(compactError),
+    summary: (shown[0] ? formatError(shown[0]) : (res.stderr ?? '')).slice(0, 400),
+  }
+}
+
+const MAX_RECORDED_ERRORS = 4
+const clipText = (text, n) => (text.length > n ? `${text.slice(0, n)}…` : text)
+function compactError({ kind, name, message, causes }) {
+  return {
+    kind,
+    name,
+    message: clipText(String(message ?? '').split('\n')[0], 200),
+    causes: (causes ?? []).map((c) => ({ name: c.name, message: clipText(String(c.message ?? '').split('\n')[0], 120) })),
   }
 }
 
@@ -951,6 +997,7 @@ export async function runVitestRepeated(dir, testRel, runOpts, repeats = DEFAULT
       realSleeps: [...new Set(runs.flatMap((r) => r.guardViolations?.realSleeps ?? []))],
       guardMissing: runs.some((r) => r.guardViolations?.guardMissing),
     },
+    errors: runs.find((r) => r.outcome !== 'passed')?.errors,
     summary: stable
       ? runs[0].summary
       : `unstable across ${runs.length} runs [${outcomes.join(', ')}]: ${(runs.find((r) => r.outcome !== 'passed')?.summary ?? '').slice(0, 300)}`,
@@ -1177,6 +1224,7 @@ export async function evaluateAgentTests({
         runs: r.runs,
         detected: r.outcome === 'true_red',
         summary: r.outcome === 'true_red' ? undefined : r.summary,
+        errors: r.outcome === 'true_red' ? undefined : r.errors,
       })
     }
     const allMutantsDetected = mutantResults.every((m) => m.detected)
@@ -1191,6 +1239,7 @@ export async function evaluateAgentTests({
         outcome: refactorOutcome(r.outcome),
         runs: r.runs,
         summary: r.summary,
+        errors: r.outcome === 'true_red' ? undefined : r.errors,
       })
     }
 
@@ -1204,6 +1253,7 @@ export async function evaluateAgentTests({
         outcome: validFixOutcome(r.outcome),
         runs: r.runs,
         summary: r.outcome === 'passed' ? undefined : r.summary,
+        errors: r.errors,
       })
     }
 
@@ -1220,6 +1270,7 @@ export async function evaluateAgentTests({
       redOutcome: redResult.outcome,
       redRuns: redResult.runs,
       redSummary: redResult.summary,
+      redErrors: redResult.errors,
       refFixPass,
       refFixOutcome,
       passesAtLeastOneValidFix,
@@ -2134,6 +2185,8 @@ export async function gradeTrialPhase({
       redOutcome: testEval.redOutcome,
       redRuns: testEval.redRuns,
       redSummary: testEval.redReproducesBug ? undefined : testEval.redSummary,
+      redErrors: testEval.redReproducesBug ? undefined : testEval.redErrors,
+      agentTestsErrors: agentTestRun.errors,
       reproduction,
       unstableVariants,
       refFixPass: testEval.refFixPass,
@@ -2156,6 +2209,8 @@ export async function gradeTrialPhase({
       modifiedConfigs: carryOver ? (carryOver.modifiedConfigs ?? []) : modifiedConfigs,
       technique,
       usesExecutionPoints: testAudit.usesExecutionPoints,
+      // D-18: which operations of the library the tests use (empty without the library).
+      libraryOperations: testAudit.libraryOperations ?? [],
       usesViMock: testAudit.usesModuleMock,
       refactorRobustness: testEval.refactorRobustness,
       validFixRobustness: testEval.validFixRobustness,
@@ -2401,13 +2456,207 @@ async function typecheckCalibrationVariants(toolchains, { concurrency = 4, paren
   return results
 }
 
+// ── Self-test cases added in v2.5 ──────────────────────────────────────────
+// Each check takes the implementation it checks as an argument, so the same case can be run
+// against the implementation of another checkout (that is how each was shown to fail on v2.4).
+
+/**
+ * D-18: which tests use the library, and by which operation. `auditFile` and `auditTree` are
+ * `auditTestAst` and `auditTestTree` of `bench/ast-audit.mjs`.
+ */
+export function checkAdoptionCases({ auditFile = auditTestAst, auditTree = auditTestTree } = {}) {
+  const verdict = (c, r) => {
+    const operations = JSON.stringify(r.libraryOperations ?? null)
+    return {
+      name: c.name,
+      ok:
+        r.usesExecutionPoints === c.uses &&
+        (r.technique === 'execution-points') === c.uses &&
+        operations === JSON.stringify(c.operations),
+      detail: `usesExecutionPoints=${r.usesExecutionPoints} technique=${r.technique} libraryOperations=${operations}`,
+    }
+  }
+  return [
+    ...ADOPTION_FILE_CASES.map((c) => verdict(c, auditFile(c.code, 'src/inventory.test.ts'))),
+    ...ADOPTION_TREE_CASES.map((c) => verdict(c, auditTree(c.files))),
+    verdict(
+      { name: 'the stale-cache treatment witness of this harness', uses: true, operations: ['pause'] },
+      auditFile(WITNESS_STALE_CACHE_TREATMENT_TEST, 'src/profile-store.test.ts'),
+    ),
+  ]
+}
+
+/**
+ * The operations the auditor knows must be the ones a point has in the declarations the
+ * treatment toolchain ships. Returns what differs.
+ */
+export function checkLibrarySurface(toolchains) {
+  const manifest = JSON.parse(readFileSync(path.join(toolchains.libraryDir, 'package.json'), 'utf8'))
+  const types = manifest.exports?.['.']?.types
+  if (!types) return ['the package names no declarations for its main entry']
+  const surface = readLibrarySurface(readFileSync(path.join(toolchains.libraryDir, types), 'utf8'))
+  const known = [...POINT_OPERATIONS, ...POINT_OTHER_MEMBERS].sort()
+  const problems = []
+  const unknown = surface.members.filter((m) => !known.includes(m))
+  const gone = known.filter((m) => !surface.members.includes(m))
+  if (unknown.length) problems.push(`a point has members the auditor does not know: ${unknown.join(', ')} (add each to POINT_OPERATIONS or POINT_OTHER_MEMBERS in bench/ast-audit.mjs)`)
+  if (gone.length) problems.push(`the auditor knows members a point no longer has: ${gone.join(', ')}`)
+  if (JSON.stringify(surface.consumers) !== JSON.stringify([...POINT_CONSUMERS].sort())) {
+    problems.push(`the package's functions that take points are ${JSON.stringify(surface.consumers)}, the auditor knows ${JSON.stringify(POINT_CONSUMERS)}`)
+  }
+  return problems
+}
+
+/** Every file under `dir` with its size, modification time and content hash; `(absent)` without it. */
+export function snapshotTree(dir) {
+  if (!existsSync(dir)) return '(absent)'
+  const lines = []
+  const walk = (current) => {
+    for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else {
+        const st = statSync(full, { bigint: true })
+        const sha = createHash('sha256').update(readFileSync(full)).digest('hex').slice(0, 16)
+        lines.push(`${path.relative(dir, full)}\t${st.size}\t${st.mtimeNs}\t${sha}`)
+      }
+    }
+  }
+  walk(dir)
+  return lines.join('\n')
+}
+
+/**
+ * Preparing the toolchains must leave the checkout's `dist/` as it was: the same files, the
+ * same bytes, the same modification times. `prepare` is `() => prepareToolchains(...)`.
+ */
+export function checkCheckoutDistUntouched(repoRoot, prepare) {
+  const dist = path.join(repoRoot, 'dist')
+  const before = snapshotTree(dist)
+  const toolchains = prepare()
+  const after = snapshotTree(dist)
+  const describe = (snapshot) => (snapshot === '(absent)' ? 'absent' : `${snapshot.split('\n').length} files`)
+  return {
+    toolchains,
+    ok: before === after,
+    detail:
+      before === after
+        ? `dist/ of the checkout is ${describe(before)}, before and after`
+        : `dist/ of the checkout was ${describe(before)} before and is ${describe(after)} after, with ${
+            after === '(absent)' || before === '(absent)'
+              ? 'everything'
+              : `${after.split('\n').filter((line) => !before.split('\n').includes(line)).length} files`
+          } written`,
+  }
+}
+
+/**
+ * The treatment guide prints a command that lists what a test can select. This runs exactly
+ * that command, with `<file>` filled in, in a treatment workspace, the way an agent's shell
+ * does, with npm kept offline: it must resolve from the workspace's own `node_modules/.bin`.
+ */
+export async function checkGuideListCommand({ toolchains, makeWorkspace = createWorkspace, parentDir = realpathSync(tmpdir()) }) {
+  const guide = readFileSync(path.join(__dirname, 'guides/treatment-guide.md'), 'utf8')
+  const printed = /`(npx [^`]*<file>[^`]*)`/.exec(guide)?.[1]
+  if (!printed) return { ok: false, command: null, detail: 'the treatment guide prints no `npx … <file>` command' }
+  const target = TASKS['stale-cache'].epTargets[0]
+  const command = printed.replace('<file>', target)
+  const { dir: ws } = makeWorkspace({ taskId: 'stale-cache', arm: 'treatment', promptStyle: 'symptom', toolchains, parentDir })
+  const npmCache = mkdtempSync(path.join(parentDir, 'ep-npm-cache-'))
+  try {
+    const res = await runCmd('/bin/sh', ['-c', command], ws, {
+      timeoutMs: 60_000,
+      // Offline: npm may only use what is installed. An empty cache of its own, so that it
+      // neither reads nor writes the user's.
+      extraEnv: { npm_config_offline: 'true', npm_config_update_notifier: 'false', npm_config_cache: npmCache },
+    })
+    const lines = res.stdout.split('\n').filter((line) => line.trim())
+    const ok = res.ok && lines.length > 0 && lines.every((line) => line.startsWith(`${target}:`))
+    return {
+      ok,
+      command,
+      detail: ok
+        ? `printed ${lines.length} selectable expressions of ${target}`
+        : `exit ${res.code}: ${(res.stderr || res.stdout).trim().split('\n').slice(0, 2).join(' | ').slice(0, 260)}`,
+    }
+  } finally {
+    rmSync(ws, { recursive: true, force: true })
+    rmSync(npmCache, { recursive: true, force: true })
+  }
+}
+
+/**
+ * D-16 and D-19 on single errors: `kindOf(error, stackHead)` is the classifier under test.
+ * `stackHead` is what Vitest prints as the first line of that error's stack.
+ */
+export function checkErrorKindCases(kindOf = (error) => classifyError(error)) {
+  return [
+    ...ERROR_KIND_CASES.map(([error, want, stackHead]) => ({ error, want, stackHead, undecided: undefined })),
+    ...UNDECIDED_KIND_CASES.map((c) => ({ error: c.error, want: c.today, stackHead: `${c.error.name}: ${c.error.message}`, undecided: c.undecided })),
+  ].map(({ error, want, stackHead, undecided }) => {
+    const got = kindOf(error, stackHead)
+    return { name: formatError(error).slice(0, 110), ok: got === want, undecided, detail: `classified ${got}, expected ${want}` }
+  })
+}
+
+/**
+ * The same through real Vitest runs in a control and a treatment workspace. `classifyRun` is
+ * `runVitestClassified`.
+ */
+export async function checkClassificationRuns({
+  toolchains,
+  makeWorkspace = createWorkspace,
+  classifyRun = runVitestClassified,
+  parentDir = realpathSync(tmpdir()),
+}) {
+  const workspaces = {}
+  const results = []
+  try {
+    for (const arm of ['control', 'treatment']) {
+      workspaces[arm] = makeWorkspace({ taskId: 'stale-cache', arm, promptStyle: 'symptom', toolchains, parentDir }).dir
+    }
+    for (const c of E2E_CLASSIFICATION_CASES) {
+      const ws = workspaces[c.arm]
+      writeFileSync(path.join(ws, 'src/profile-store.test.ts'), c.test)
+      let res
+      try {
+        res = await classifyRun(ws, 'src/profile-store.test.ts', { configPath: path.join(ws, 'vitest.config.mjs') })
+      } catch (err) {
+        res = { outcome: `threw (${String(err.message).slice(0, 80)})` }
+      }
+      const describe = (e) => `${e.kind}:${e.name}[${(e.causes ?? []).map((cause) => cause.name ?? cause).join('<')}]`
+      const recorded = (res.errors ?? []).map(describe)
+      const wanted = c.wantError ? describe(c.wantError) : null
+      results.push({
+        name: c.name,
+        undecided: c.undecided,
+        ok: res.outcome === c.want && (!wanted || recorded.includes(wanted)),
+        detail: `got ${res.outcome}${wanted ? `, recorded ${recorded.join(' ') || 'no error'}, expected ${wanted}` : ''}`,
+        summary: res.summary,
+      })
+    }
+  } finally {
+    for (const ws of Object.values(workspaces)) rmSync(ws, { recursive: true, force: true })
+  }
+  return results
+}
+
 async function runSelfTest() {
+  // The final line gives the number of check lines that printed PASS.
+  let passedChecks = 0
+  const print = console.log
+  console.log = (...args) => {
+    if (typeof args[0] === 'string' && /^\s*PASS\b/.test(args[0])) passedChecks++
+    print(...args)
+  }
   console.log(`Running ${HARNESS_VERSION} hardened benchmark self-test (every graded variant runs ${DEFAULT_GRADE_REPEATS}x and must agree)...\n`)
   const provenance = computeProvenance()
   // One owned temp root for everything this self-test creates, so a later `--sweep-stale`
   // of any bench process can tell it is in use (or, after a kill, that its owner is gone).
   const selfTestRoot = createOwnedTempRoot('ep-selftest-')
-  const toolchains = prepareToolchains(REPO_ROOT, selfTestRoot)
+  // Preparing the toolchains builds the library. It must not write the checkout's `dist/`.
+  const distCheck = checkCheckoutDistUntouched(REPO_ROOT, () => prepareToolchains(REPO_ROOT, selfTestRoot))
+  const toolchains = distCheck.toolchains
   let failures = 0
   let cheatCount = 0 // G-8: hoist out of try block so final summary never throws ReferenceError!
 
@@ -2427,7 +2676,14 @@ async function runSelfTest() {
     if (existsSync(path.join(toolchains.controlNm, 'fast-check'))) {
       throw new Error('Trial toolchain should not contain fast-check')
     }
-    console.log(`   PASS: zero symlink/shim leaks (grader sha256=${toolchains.graderChecksum.slice(0, 12)}).\n`)
+    for (const command of toolchains.libraryCommands) {
+      if (existsSync(path.join(toolchains.controlNm, '.bin', command))) {
+        throw new Error(`Control toolchain should not have the library's command "${command}"`)
+      }
+    }
+    console.log(`   PASS: zero symlink/shim leaks (grader sha256=${toolchains.graderChecksum.slice(0, 12)}).`)
+    console.log(`   ${distCheck.ok ? 'PASS' : 'FAIL'}: building the library leaves the checkout alone (${distCheck.detail}).\n`)
+    if (!distCheck.ok) failures++
 
     // 2. Hardened AST auditor calibration (including A-01 evasions!)
     console.log('2) Hardened AST auditor calibration (including A-01 evasions)...')
@@ -2493,7 +2749,26 @@ async function runSelfTest() {
         failures++
       }
     }
-    console.log(`   PASS: ${astCases.length} test-audit + ${prodEvasions.length} prod-audit cases verified.\n`)
+    console.log(`   PASS: ${astCases.length} test-audit + ${prodEvasions.length} prod-audit cases verified.`)
+
+    // 2b. D-18: a test uses the library when it imports and calls select() and puts a point
+    // to use, by any operation the library has; which operation is recorded.
+    {
+      const adoption = checkAdoptionCases()
+      for (const c of adoption.filter((c) => !c.ok)) {
+        console.error(`   FAIL: library use, ${c.name} -> ${c.detail}`)
+        failures++
+      }
+      const surface = checkLibrarySurface(toolchains)
+      for (const problem of surface) {
+        console.error(`   FAIL: ${problem}`)
+        failures++
+      }
+      const bad = adoption.filter((c) => !c.ok).length + surface.length
+      console.log(
+        `   ${bad === 0 ? 'PASS' : 'FAIL'}: ${adoption.length} library-use cases (operations: ${POINT_OPERATIONS.join(', ')}; ${POINT_CONSUMERS.join(', ')}), and these are the operations of a point in the shipped declarations.\n`,
+      )
+    }
 
     // 3. Treatment virtual contract check, in both selector styles
     console.log('3) Treatment virtual contract check (select() in minimal AND verbose style + tsc --noEmit --runExternalCode)...')
@@ -2548,219 +2823,89 @@ test('verbose selector typechecks and executes', async () => {
           console.error('   FAIL:', tscRes.stdout, tscRes.stderr, vitestRes)
           failures++
         } else {
-          console.log('   PASS: both selector styles pass tsc --noEmit --runExternalCode + vitest.\n')
+          console.log('   PASS: both selector styles pass tsc --noEmit --runExternalCode + vitest.')
         }
       } finally {
         rmSync(ws, { recursive: true, force: true })
       }
+      // 3b. The command the treatment guide prints must work in a treatment workspace, offline.
+      const list = await checkGuideListCommand({ toolchains, parentDir: selfTestRoot })
+      console.log(`   ${list.ok ? 'PASS' : 'FAIL'}: the guide's command \`${list.command}\` in a treatment workspace, npm offline: ${list.detail}.\n`)
+      if (!list.ok) failures++
     }
 
     // 4. Failure classification: only an assertion failure is a reproduction
     console.log('4) Failure classification (PROTOCOL section 2: only an AssertionError is true_red)...')
     {
-      // 4a. The pure rules, on the message heads Vitest reports.
-      const kindCases = [
-        ['AssertionError: expected 1 to be 2 // Object.is equality\n    at file.test.ts:3:13', 'assertion'],
-        ['AssertionError [ERR_ASSERTION]: values differ\n    at file.test.ts:3:13', 'assertion'],
-        ["AssertionError: expected 'matched 2 rows' to be 'matched 1 row' // Object.is equality", 'assertion'],
-        ["AssertionError: expected [Function] to not throw an error but 'TypeError: cb is not a function' was thrown", 'assertion'],
-        ['AssertionError: expected "[execution-points] nope" to contain "ok"', 'assertion'],
-        ['Error: Test timed out in 1500ms.\nIf this is a long-running test, pass a timeout value', 'timeout'],
-        ['Error: Hook timed out in 10000ms.', 'timeout'],
-        ['Error: [execution-points] Visitor for "src/a.ts" must match exactly 1 expression; matched 0.', 'selector_break'],
-        ['Error: [execution-points] Visitor for "src/a.ts" must match exactly 1 expression; matched 2.', 'selector_break'],
-        ['Error: [execution-points] Target file "src/a.ts" was not instrumented or has not been imported yet. Check targets.', 'selector_break'],
-        ['Error: [execution-points] The replacement for "src/a.ts#f:CallExpression:g:0" ran 0 times; expected at least once.', 'selector_break'],
-        ['TypeError: [execution-points] `times` must be a whole number, 0 or more, or \'any\'.', 'selector_break'],
-        ["Error: Cannot find module './gone' imported from '/x/src/a.test.ts'", 'load_break'],
-        ['Error: Failed to resolve import "./gone" from "src/a.test.ts". Does the file exist?', 'load_break'],
-        ['SyntaxError: Unexpected token (3:1)', 'load_break'],
-        ['TypeError: Forbidden global monkey-patch: runtime:globalThis.Promise', 'guard'],
-        ['TypeError: helper is not a function\n    at src/a.test.ts:9:3', 'error'],
-        ["Error: ENOENT: no such file or directory, open '/tmp/x/j1.stage.tmp'", 'error'],
-        ['ReferenceError: matched is not defined', 'error'],
-        ['Error: matched 2 rows but wanted 1', 'error'],
-        ['no error name at all', 'error'],
-      ]
+      // 4a. The pure rules, on errors as the failure reporter describes them (D-19).
+      const kindResults = checkErrorKindCases()
       let kindFailures = 0
-      for (const [msg, want] of kindCases) {
-        const got = classifyFailureMessage(msg)
+      for (const c of kindResults.filter((c) => !c.ok)) {
+        console.error(`   FAIL: ${c.name} ${c.detail}`)
+        kindFailures++
+      }
+      for (const [tests, want] of RUN_OUTCOME_CASES) {
+        const got = classifyFailedTests(tests.map((errors) => ({ errors }))).outcome
         if (got !== want) {
-          console.error(`   FAIL: ${JSON.stringify(msg.split('\n')[0])} classified ${got}, expected ${want}`)
+          console.error(`   FAIL: failed tests ${JSON.stringify(tests.map((errors) => errors.map(formatError)))} gave outcome ${got}, expected ${want}`)
           kindFailures++
         }
       }
-      const outcomeCases = [
-        [['TypeError: x is not a function'], 'error'],
-        [['Error: [execution-points] Visitor for "a" must match exactly 1 expression; matched 0.'], 'loud_break'],
-        [['Error: Test timed out in 1500ms.'], 'timeout'],
-        [['Error: Test timed out in 1500ms.', 'Error: [execution-points] x'], 'timeout'],
-        [['TypeError: x is not a function', 'AssertionError: expected 1 to be 2'], 'true_red'],
-        [['Error: [execution-points] x', "Error: ENOENT: no such file or directory, open 'a'"], 'loud_break'],
-      ]
-      for (const [msgs, want] of outcomeCases) {
-        const got = classifyFailedTests(msgs.map((m) => ({ failureMessages: [m] }))).outcome
-        if (got !== want) {
-          console.error(`   FAIL: failed tests ${JSON.stringify(msgs)} gave outcome ${got}, expected ${want}`)
-          kindFailures++
-        }
+      // Calibration: the cases must reject the two rules they replaced, or they would not
+      // show the fixes. v2.4 read the type from the first line of the stack; v2.3 took
+      // anything outside two text patterns as true_red.
+      const v24Head = /^\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)(?:\s*\[[^\]\n]*\])?:\s?([\s\S]*)$/
+      const v24 = (stackHead) => {
+        const m = v24Head.exec(stackHead)
+        const name = m ? m[1] : null
+        const message = (m ? m[2] : stackHead).trim()
+        if (name !== null && /(?:^|\.)\w*AssertionError$/.test(name)) return 'assertion'
+        if (/^(?:Test|Hook) timed out in \d+ms/.test(message)) return 'timeout'
+        if (message.startsWith('[execution-points]')) return 'selector_break'
+        if (/^Forbidden (?:global monkey-patch|sleep)\b/.test(message)) return 'guard'
+        if (name === 'SyntaxError' || /^(?:Cannot find (?:module|package)\b|Failed to resolve import\b|Failed to load url\b|Transform failed\b|The requested module .* does not provide an export named\b)/.test(message)) return 'load_break'
+        return 'error'
       }
-      // Calibration: the v2.3 rule (anything outside its two patterns is true_red) must be
-      // rejected by these cases, or they would not show the fix.
+      const v24Wrong = ERROR_KIND_CASES.filter(([, want, stackHead]) => v24(stackHead) !== want)
       const v23Timeout = /Test timed out|Hook timed out|timed out in \d+ms/i
       const v23Loud =
         /matched 0|matched \d+|Cannot find module|SyntaxError|Transform failed|ExecutionPoint|Failed to resolve import|is not a function|Forbidden global monkey-patch|Forbidden sleep/i
       const v23 = (msg) => (v23Timeout.test(msg) ? 'timeout' : v23Loud.test(msg) ? 'loud_break' : 'true_red')
-      const v23Wrong = kindCases.filter(([msg, want]) => {
-        const old = v23(msg)
+      const v23Wrong = ERROR_KIND_CASES.filter(([, want, stackHead]) => {
         const now = want === 'assertion' ? 'true_red' : want === 'timeout' ? 'timeout' : want === 'error' ? 'error' : 'loud_break'
-        return old !== now
+        return v23(stackHead) !== now
       })
-      if (v23Wrong.length === 0) {
-        console.error('   FAIL: no classification case separates the v2.3 rule from the current one')
+      if (v24Wrong.length === 0 || v23Wrong.length === 0) {
+        console.error('   FAIL: no classification case separates an earlier rule from the current one')
         kindFailures++
+      }
+      // The two gradings that are not decided are stated by cases, one rule each.
+      for (const [rule, kind] of Object.entries(UNDECIDED_GRADINGS)) {
+        const stated = UNDECIDED_KIND_CASES.filter((c) => c.undecided === rule)
+        if (stated.length === 0 || stated.some((c) => c.today !== kind)) {
+          console.error(`   FAIL: UNDECIDED_GRADINGS.${rule} is '${kind}', and the cases that state it say ${JSON.stringify(stated.map((c) => c.today))}`)
+          kindFailures++
+        }
       }
       failures += kindFailures
       console.log(
-        `   ${kindFailures === 0 ? 'PASS' : 'FAIL'}: ${kindCases.length} message cases + ${outcomeCases.length} run cases (${v23Wrong.length} of the message cases are ones the v2.3 rule got wrong).`,
+        `   ${kindFailures === 0 ? 'PASS' : 'FAIL'}: ${kindResults.length} error cases + ${RUN_OUTCOME_CASES.length} run cases (the v2.4 rule, which read the first line of the stack, got ${v24Wrong.length} of them wrong; the v2.3 rule ${v23Wrong.length}).`,
+      )
+      console.log(
+        `   Not decided, graded as today: ${Object.entries(UNDECIDED_GRADINGS).map(([rule, kind]) => `${rule} -> ${kind}`).join('; ')}.`,
       )
 
       // 4b. The same through real Vitest runs, control and treatment workspaces.
-      const e2e = [
-        {
-          name: 'hanging test -> timeout',
-          arm: 'control',
-          want: 'timeout',
-          test: `import { test } from 'vitest'
-test('hangs forever waiting for uncalled seam', async () => {
-  await new Promise(() => {})
-}, 150)
-`,
-        },
-        {
-          name: 'expect() failure -> true_red',
-          arm: 'control',
-          want: 'true_red',
-          test: `import { expect, test } from 'vitest'
-test('assertion', () => { expect(1).toBe(2) })
-`,
-        },
-        {
-          name: 'node:assert failure -> true_red',
-          arm: 'control',
-          want: 'true_red',
-          test: `import assert from 'node:assert/strict'
-import { test } from 'vitest'
-test('assertion', () => { assert.equal(1, 2) })
-`,
-        },
-        {
-          name: 'assertion text contains "matched 2" -> true_red',
-          arm: 'control',
-          want: 'true_red',
-          test: `import { expect, test } from 'vitest'
-test('assertion', () => { expect('matched 2 rows').toBe('matched 1 row') })
-`,
-        },
-        {
-          name: 'assertion text contains "is not a function" -> true_red',
-          arm: 'control',
-          want: 'true_red',
-          test: `import { expect, test } from 'vitest'
-test('assertion', () => {
-  expect(() => { throw new TypeError('cb is not a function') }).not.toThrow()
-})
-`,
-        },
-        {
-          name: 'TypeError "is not a function" -> error (not a reproduction, not a selector break)',
-          arm: 'control',
-          want: 'error',
-          test: `import { test } from 'vitest'
-import * as store from './profile-store'
-test('calls a helper that does not exist', () => {
-  ;(store as unknown as { noSuchHelper: () => void }).noSuchHelper()
-})
-`,
-        },
-        {
-          name: 'ENOENT escaping the code under test -> error',
-          arm: 'control',
-          want: 'error',
-          test: `import fs from 'node:fs/promises'
-import { test } from 'vitest'
-test('rejection escapes', async () => { await fs.readFile('/no/such/dir/j1.stage.tmp', 'utf8') })
-`,
-        },
-        {
-          name: 'all tests pass but a rejection is unhandled -> error (Vitest exits non-zero)',
-          arm: 'control',
-          want: 'error',
-          test: `import { expect, test } from 'vitest'
-test('passes while a rejection is left unhandled', async () => {
-  void Promise.reject(new Error('left behind'))
-  await new Promise<void>((r) => setImmediate(r))
-  expect(1).toBe(1)
-})
-`,
-        },
-        {
-          name: 'library: visitor matches 0 inside a test -> loud_break',
-          arm: 'treatment',
-          want: 'loud_break',
-          test: `import { test } from 'vitest'
-import { select } from 'execution-points-prototype'
-import { getProfile } from './profile-store'
-test('selector that matches nothing', async () => {
-  const point = select('src/profile-store.ts', (n: any) => n.callee === 'noSuchHelper' && n)
-  await point.withReplacement(async ({ original }: any) => original(), () => getProfile('u1'))
-})
-`,
-        },
-        {
-          name: 'library: visitor matches 2 inside a test -> loud_break',
-          arm: 'treatment',
-          want: 'loud_break',
-          test: `import { test } from 'vitest'
-import { select } from 'execution-points-prototype'
-import { getProfile } from './profile-store'
-test('selector that matches twice', async () => {
-  const point = select('src/profile-store.ts', (n: any) => n.callee === 'yieldIo' && n)
-  await point.withReplacement(async ({ original }: any) => original(), () => getProfile('u1'))
-})
-`,
-        },
-        {
-          name: 'library: target file was not instrumented -> loud_break',
-          arm: 'treatment',
-          want: 'loud_break',
-          test: `import { test } from 'vitest'
-import { select } from 'execution-points-prototype'
-test('selects in a file that is not a target', async () => {
-  const point = select('src/not-a-target.ts', (n: any) => n)
-  await point.withReplacement(async ({ original }: any) => original(), async () => 1)
-})
-`,
-        },
-      ]
       const workspaces = {}
       try {
-        for (const arm of ['control', 'treatment']) {
-          workspaces[arm] = createWorkspace({ taskId: 'stale-cache', arm, promptStyle: 'symptom', toolchains, parentDir: selfTestRoot }).dir
-        }
-        for (const c of e2e) {
-          const ws = workspaces[c.arm]
-          writeFileSync(path.join(ws, 'src/profile-store.test.ts'), c.test)
-          const res = await runVitestClassified(ws, 'src/profile-store.test.ts', {
-            configPath: path.join(ws, 'vitest.config.mjs'),
-          })
-          const ok = res.outcome === c.want
-          console.log(`   ${ok ? 'PASS' : 'FAIL'} ${c.name} (got ${res.outcome})`)
-          if (!ok) {
+        for (const c of await checkClassificationRuns({ toolchains, parentDir: selfTestRoot })) {
+          console.log(`   ${c.ok ? 'PASS' : 'FAIL'} ${c.name} (${c.detail})${c.undecided ? ' [not decided]' : ''}`)
+          if (!c.ok) {
             failures++
-            console.error('     summary:', res.summary)
+            console.error('     summary:', c.summary)
           }
         }
+        workspaces.control = createWorkspace({ taskId: 'stale-cache', arm: 'control', promptStyle: 'symptom', toolchains, parentDir: selfTestRoot }).dir
 
         // 4c. Repeated runs must agree: a test that fails once and then passes is 'unstable'.
         const ws = workspaces.control
@@ -3180,12 +3325,13 @@ test('fails on the first run only', () => {
   }
 
   console.log()
+  console.log = print
   if (failures > 0) {
-    console.error(`Self-test FAILED (${failures} failures).`)
+    console.error(`Self-test FAILED (${failures} failures; ${passedChecks} check lines passed).`)
     process.exit(1)
   }
   console.log(
-    `Self-test PASSED (isolation, AST+runtime guards, failure classification, repeated grading, ${cheatCount} cheats rejected, ${GOOD_WITNESSES.length} legal witnesses passed, deterministic leaf I/O, 10 tasks, every variant typechecked in both arms, ${CALIBRATION_VARIANTS.length} calibration variants, and all single-bug mutants rejected by oracle).`,
+    `Self-test PASSED: ${passedChecks} check lines passed, 0 failed (isolation, the checkout's dist/ left alone, AST+runtime guards, library use by operation, the guide's list command, failure classification by error type, repeated grading, ${cheatCount} cheats rejected, ${GOOD_WITNESSES.length} legal witnesses passed, deterministic leaf I/O, 10 tasks, every variant typechecked in both arms, ${CALIBRATION_VARIANTS.length} calibration variants, and all single-bug mutants rejected by oracle).`,
   )
 }
 

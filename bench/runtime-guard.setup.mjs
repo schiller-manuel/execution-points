@@ -1,5 +1,5 @@
 /**
- * Runtime integrity guard injected via Vitest `setupFiles` during grading (harness v2.4;
+ * Runtime integrity guard injected via Vitest `setupFiles` during grading (harness v2.5;
  * the guard itself is unchanged since v2.2).
  *
  * Closes E-01, E-05, A-01, N-22, N-23, N-24:

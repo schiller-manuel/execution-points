@@ -8,16 +8,20 @@ import { REPO, WORK } from './lib.mjs'
 export { REPO }
 
 // A consumer gets what the package ships: `dist`. Built once per probe run, so it is never older
-// than the sources.
-let built = false
+// than the sources, and built into the probe's own directory: the checkout's `dist/` is not
+// written, because a type check or a gap check may be reading it at that moment.
+let built
 function buildLibrary() {
-  if (built) return
-  const result = spawnSync(process.execPath, [join(REPO, 'node_modules/tsdown/dist/run.mjs'), '--logLevel', 'error'], {
-    cwd: REPO,
-    encoding: 'utf8',
-  })
+  if (built) return built
+  const out = join(realpathSync(mkdtempSync(join(WORK, 'dist-'))), 'dist')
+  const result = spawnSync(
+    process.execPath,
+    [join(REPO, 'node_modules/tsdown/dist/run.mjs'), '--logLevel', 'error', '--out-dir', out],
+    { cwd: REPO, encoding: 'utf8' },
+  )
   if (result.status !== 0) throw new Error(`The library did not build:\n${result.stdout}${result.stderr}`)
-  built = true
+  built = out
+  return built
 }
 
 export function consumer(files, { targets = ['src/**/*.ts'] } = {}) {
@@ -30,10 +34,9 @@ export function consumer(files, { targets = ['src/**/*.ts'] } = {}) {
   }
   const pkg = join(nm, 'execution-points-prototype')
   mkdirSync(pkg)
-  buildLibrary()
   cpSync(join(REPO, 'package.json'), join(pkg, 'package.json'))
   cpSync(join(REPO, 'points.schema.json'), join(pkg, 'points.schema.json'))
-  cpSync(join(REPO, 'dist'), join(pkg, 'dist'), { recursive: true })
+  cpSync(buildLibrary(), join(pkg, 'dist'), { recursive: true })
 
   const base = {
     'package.json': JSON.stringify({ name: 'consumer', private: true, type: 'module' }),
