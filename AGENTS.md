@@ -27,16 +27,28 @@ and runnable, and continue discussing unresolved API choices with the user.
   expressions. A function decides once per call whether to run its original
   statements.
 - A replacement that never runs must be loud.
+- The sources are TypeScript, built with `tsdown` into `dist/`. What the
+  compiler rejects is not checked again at run time: no `typeof` checks on
+  arguments. Checks that depend on run-time state stay (a selector that
+  matches 0 or 2 expressions, a capture name the expression does not offer, a
+  schedule that does not fit the run).
+- Schedule exploration is a primitive to compose: `interleavings(points)` is a
+  generator of orders, and the caller runs and checks each one itself.
 
 ## Validation
 
 Run from the repository root:
 
 ```sh
+pnpm build
 pnpm check
 pnpm test
 pnpm verify
 ```
+
+`pnpm build` writes `dist/`. Tests and the gap check run against `src/`, but
+the type oracle compiles its fixtures against the built declarations, so build
+before running either.
 
 The virtual compiler check is separate from Vitest. Passing runtime tests alone
 does not establish that replacement callbacks are type-correct. Do not claim
@@ -117,6 +129,6 @@ optimization project.
   `node_modules/@tanstack/oracles/skills/oracles-evaluate-review/SKILL.md` in
   full.
 - Lint: not available here (typescript-eslint does not support TypeScript 7.1 yet; its TypeScript peer range ends before 7).
-- Oracle files: `tests/**/*oracle*.test.ts`. Gap check: `pnpm exec oracle-gaps --package . --source src/runtime.mjs,src/discovery.mjs,src/plugin.mjs,src/contracts.mjs,src/content-mapper.mjs --seed 42`.
+- Oracle files: `tests/**/*oracle*.test.ts`. Gap check: `pnpm build && pnpm exec oracle-gaps --package . --source src/runtime.ts,src/discovery.mjs,src/plugin.mjs,src/contracts.mjs,src/content-mapper.mjs --seed 42`.
 
 <!-- END @tanstack/oracles -->

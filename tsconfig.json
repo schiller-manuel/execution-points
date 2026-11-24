@@ -1,14 +1,22 @@
 {
   "compilerOptions": {
     "strict": true,
-    "target": "ES2022",
+    "target": "ES2024",
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "noEmit": true,
     "skipLibCheck": true,
     "types": [
       "node"
-    ]
+    ],
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "paths": {
+      "execution-points-prototype": [
+        "./src/runtime.ts"
+      ]
+    }
   },
   "contentMappers": [
     {
@@ -19,10 +27,10 @@
     }
   ],
   "include": [
+    "src/**/*.ts",
     "examples/**/*.ts",
     "tests/runtime*.ts",
     "tests/loose-select.ts",
-    "src/runtime.d.ts",
     "points.ep"
   ]
 }

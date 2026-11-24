@@ -7,7 +7,7 @@
  * hand-registered file can have: any file name, a node with the descriptor's fields, and a point
  * whose handler says what it expects.
  */
-import { select as registrySelect } from '../src/runtime.mjs'
+import { select as registrySelect } from '../src/runtime.ts'
 
 export interface LooseNode {
   readonly id: string

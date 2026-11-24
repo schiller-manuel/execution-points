@@ -1,9 +1,9 @@
 /**
  * This oracle owns `execution-points-prototype`'s TypeScript type-level
- * contracts in `src/runtime.d.ts` paired with `generateFileRegistryModule`,
+ * contracts in the runtime's published declarations (`dist/runtime.d.mts`, built from `src/runtime.ts`) paired with `generateFileRegistryModule`,
  * checked on the semantic diagnostics produced by TypeScript 7.1 when checking
- * test snippets against the real `src/runtime.d.ts` and emitted registry. It
- * owns `src/runtime.d.ts`.
+ * test snippets against the real declarations and emitted registry. It
+ * owns `dist/runtime.d.mts`, so build before running it.
  *
  * ```ts
  * select('app.ts', (n) => n.callee === 'send' && n) // → compiles with exact Result without needing kind or inFunction
@@ -55,12 +55,12 @@
  *
  * The model predicts whether each constructed TypeScript snippet compiles
  * cleanly or produces the expected diagnostic code/substring. The driver builds
- * an in-memory TypeScript 7.1 program containing the real `src/runtime.d.ts`,
+ * an in-memory TypeScript 7.1 program containing the real `dist/runtime.d.mts`,
  * the generated `ExecutionPointFileRegistry` (or omits it for empty-registry
  * checks), and the snippet, then records semantic diagnostics.
  *
  * LSP completion ordering is verified separately in `checks/verify.mjs`; this
- * oracle checks semantic type-checking contracts across `src/runtime.d.ts`.
+ * oracle checks semantic type-checking contracts across `dist/runtime.d.mts`.
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -103,11 +103,11 @@ export function genericWork<U>(val: U) {
 `
 
 function checkSnippet(snippet: string, { emptyRegistry = false } = {}) {
-  const runtimeDts = readFileSync(join(root, 'src/runtime.d.ts'), 'utf8')
+  const runtimeDts = readFileSync(join(root, 'dist/runtime.d.mts'), 'utf8')
   const pkgJson = JSON.stringify({
     name: 'execution-points-prototype',
     type: 'module',
-    exports: { '.': { types: './src/runtime.d.ts', default: './src/runtime.mjs' } },
+    exports: { '.': { types: './dist/runtime.d.mts', default: './dist/runtime.mjs' } },
   })
   const absTarget = join(root, TARGET_REL)
   const absTest = join(root, 'examples/type-oracle-snippet.test.ts')
@@ -115,7 +115,7 @@ function checkSnippet(snippet: string, { emptyRegistry = false } = {}) {
 
   const files = new Map<string, string>([
     [join(root, 'node_modules/execution-points-prototype/package.json'), pkgJson],
-    [join(root, 'node_modules/execution-points-prototype/src/runtime.d.ts'), runtimeDts],
+    [join(root, 'node_modules/execution-points-prototype/dist/runtime.d.mts'), runtimeDts],
     [absTarget, TARGET_SOURCE],
     [absTest, snippet],
   ])
@@ -206,7 +206,7 @@ function t1Model(c: T1Case) {
 
 oracleProperty({
   id: 'types-minimal-select-and-parity',
-  owns: ['src/runtime.d.ts', 'src/contracts.mjs#renderFileModule'],
+  owns: ['dist/runtime.d.mts', 'src/contracts.mjs#renderFileModule'],
   law: {
     statement:
       'For every target module, select(file, visitor) accepts minimal callee/operator narrowing with && short-circuit returns without requiring kind, rejects callee typos with TS2367, lists __matched node IDs on multiple matches, and keeps unportable generic nodes in the compile-time match count while rejecting direct selection with an explicit error.',
@@ -314,7 +314,7 @@ p.withReplacement(({ original }) => original(), () => 0)`
 
 oracleProperty({
   id: 'types-empty-registry-diagnostic',
-  owns: ['src/runtime.d.ts'],
+  owns: ['dist/runtime.d.mts'],
   law: {
     statement:
       'For every select call checked when ExecutionPointFileRegistry is empty, TypeScript reports an explicit diagnostic explaining --runExternalCode and points.ep without cascading never-property errors.',
@@ -387,7 +387,7 @@ type T3Case = (typeof T3_CASES)[number]
 
 oracleProperty({
   id: 'types-capture-soundness',
-  owns: ['src/runtime.d.ts'],
+  owns: ['dist/runtime.d.mts'],
   law: {
     statement:
       'For every .capture(...keys) call on a visitor node or selected point, zero arguments types locals as {} (rejecting uncaptured local reads), valid keys expose typed readonly locals, chained .capture() replaces prior keys, and unknown keys fail compile time.',
@@ -480,7 +480,7 @@ type T4Case = (typeof T4_CASES)[number]
 
 oracleProperty({
   id: 'types-handler-result-safety',
-  owns: ['src/runtime.d.ts'],
+  owns: ['dist/runtime.d.mts'],
   law: {
     statement:
       'For every point.withReplacement(handler, action) call, an async handler returning a Promise is rejected on a synchronous void expression, while synchronous void, return original(), any results, and async handlers on Promise<void> expressions are accepted.',

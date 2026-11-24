@@ -12,6 +12,7 @@ Requires Node.js 24 or later and pnpm.
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm build
 pnpm check
 pnpm test
 pnpm verify
@@ -19,6 +20,7 @@ pnpm verify
 
 | Command | Purpose |
 | --- | --- |
+| `pnpm build` | Build the TypeScript sources into `dist/` with `tsdown`: JavaScript and declarations. Tests run against `src/`; a project that installs the package gets `dist/`. |
 | `pnpm check` | Run regular `tsc --noEmit --runExternalCode` using the TypeScript 7.1 content mapper (`points.ep`). |
 | `pnpm test` | Run the instrumented Vitest examples. |
 | `pnpm verify` | Verify real `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and that no generated files are written. |
@@ -331,9 +333,9 @@ TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfi
 | `src/contracts.mjs` | Extract result types and narrowed locals via warm incremental snapshots and emit virtual `ExecutionPointFileRegistry`. |
 | `src/content-mapper.mjs` | TypeScript 7.1 STDIO JSON-RPC content mapper server. |
 | `src/plugin.mjs` | Instrument configured target modules, keeping each function's original statements beside its wrapped form, and register node metadata through Vite (test files are untouched). |
-| `src/runtime.mjs` | `select()`, `registerFile()` with the per-function flags that instrumented code reads, `invoke()`, async-local scopes, and `interleavings()`. |
-| `src/runtime.d.ts` | `ExecutionPointFileRegistry`, narrowing visitor `select()`, and the `Point`, `Replacement`, `Pause`, and `Interleaving` types. |
-| `src/vitest.mjs` | Vitest setup module: after each test, fail it when a replacement did not run as often as the test said. |
+| `src/runtime.ts` | The runtime and its types: `ExecutionPointFileRegistry`, the narrowing visitor `select()`, `Point`, `Replacement`, `Pause`, `interleavings()`; and, for instrumented code, `registerFile()` with the per-function flags and `invoke()`. |
+| `src/vitest.ts` | Vitest setup module: after each test, fail it when a replacement did not run as often as the test said. |
+| `tsdown.config.ts`, `tsconfig.build.json` | The build: one output file per source file in `dist/`, with declarations. |
 | `examples/` | Runnable applications and Vitest examples. |
 | `checks/verify.mjs` | End-to-end `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and no-write verification. |
 | `probes/` | Small scripts that call the unchanged code and print what it does; `FINDINGS.md` names the probe behind each finding. |

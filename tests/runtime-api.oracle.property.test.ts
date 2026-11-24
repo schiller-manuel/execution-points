@@ -5,7 +5,7 @@
  * restored, that `pause` holds an evaluation and says so, and that a capture
  * the expression cannot see is refused. It is checked on what `withReplacement`,
  * `replace`, `pause`, the shorthands, `point.calls`, and `verifyReplacements`
- * return and throw. It owns `src/runtime.mjs`.
+ * return and throw. It owns `src/runtime.ts`.
  *
  * ```ts
  * point.withReplacement(handler, action) // → throws when handler never ran inside a synchronous action
@@ -92,7 +92,7 @@ import { AsyncResource } from 'node:async_hooks'
 import fc from 'fast-check'
 import { afterEach } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { invoke, registerFile, select, verifyReplacements } from '../src/runtime.mjs'
+import { invoke, registerFile, select, verifyReplacements } from '../src/runtime.ts'
 
 // The drivers leave replacements behind on purpose (asynchronous scopes, unused ones). The
 // library's own check after each test is not what these laws are about, so it finds nothing.
@@ -180,8 +180,7 @@ function reckoning<T>(describe: (error: unknown) => T) {
   }
 }
 
-/** An argument of the wrong kind is refused by the library itself, in its own words. */
-const OUR_TYPE_ERROR = { name: 'TypeError', saidByTheLibrary: true }
+/** What an unexpected error is, for a trace: its kind, and whether the library said it. */
 const whose = (error: unknown) => ({
   name: (error as Error).name,
   saidByTheLibrary: String((error as Error).message).startsWith('[execution-points]'),
@@ -252,7 +251,7 @@ function countModel(history: CountHistory) {
 
 oracleProperty({
   id: 'runtime-replacement-count',
-  owns: ['src/runtime.mjs#createPointHandle', 'src/runtime.mjs#invoke', 'src/runtime.mjs#verifyReplacements'],
+  owns: ['src/runtime.ts#createPointHandle', 'src/runtime.ts#invoke', 'src/runtime.ts#verifyReplacements'],
   law: {
     statement:
       'For every scoped replacement and every number of evaluations inside its action, the handler runs for exactly the evaluations `on` names (all of them when absent), each run sees its evaluation number as `call`, and the run count must satisfy `times` (at least once when absent, exactly that often when a number, anything when "any"): a synchronous action that violates it makes withReplacement throw, and an asynchronous action gets its own promise back while the violation makes the next verifyReplacements() throw.',
@@ -447,19 +446,18 @@ function everywhereModel(history: EverywhereHistory) {
     afterReckoning: ORIGINAL,
     // Restoring twice, or after the reckoning, does nothing.
     restoredAgain: all.map(() => 'ignored'),
-    handlerThatIsNotAFunction: OUR_TYPE_ERROR,
   }
 }
 
 oracleProperty({
   id: 'runtime-replace-everywhere',
-  owns: ['src/runtime.mjs#createPointHandle', 'src/runtime.mjs#invoke', 'src/runtime.mjs#verifyReplacements'],
+  owns: ['src/runtime.ts#createPointHandle', 'src/runtime.ts#invoke', 'src/runtime.ts#verifyReplacements'],
   law: {
     statement:
       'For every sequence of replace, restore, and evaluation, an evaluation outside any scope takes the newest replacement still installed for the expression, in whatever async context it runs; inside a scoped replacement for the same expression the scoped one wins; restoring a replacement that never ran throws; and verifyReplacements() restores and checks whatever is left.',
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: build `using r = point.replace(handler)`, active for the whole worker until the block ends and verified on dispose; it is also the scope a test against a running server needs.',
-    limits: 'Up to eight steps over one expression; "elsewhere" is an async context created before the first replacement.',
+    limits: 'Up to eight steps over one expression; "elsewhere" is an async context created before the first replacement. Arguments of the wrong kind are for the compiler to reject (decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the sources are TypeScript, and what the compiler rejects is not checked again at run time); the runtime promises nothing for them.',
   },
   histories: {
     arbitrary: everywhereArbitrary,
@@ -563,19 +561,12 @@ oracleProperty({
           return said(error, id)
         }
       })
-      let handlerThatIsNotAFunction: unknown = 'accepted'
-      try {
-        point.replace('not a function' as never)
-      } catch (error) {
-        handlerThatIsNotAFunction = whose(error)
-      }
       observe('everywhere', {
         steps: observed,
         atReckoning,
         callsOfEach,
         afterReckoning,
         restoredAgain,
-        handlerThatIsNotAFunction,
       })
     } catch (err) {
       observe('everywhere', { threw: err instanceof Error ? err.message : String(err) })
@@ -696,20 +687,19 @@ function pauseModel(history: PauseHistory) {
     calls: arrivals,
     atReckoning: { problems, listsEachProblem: null },
     unhandledRejections: 0,
-    runWithoutAFunction: OUR_TYPE_ERROR,
   }
 }
 
 oracleProperty({
   id: 'runtime-pause',
-  owns: ['src/runtime.mjs#createPointHandle', 'src/runtime.mjs#invoke', 'src/runtime.mjs#verifyReplacements'],
+  owns: ['src/runtime.ts#createPointHandle', 'src/runtime.ts#invoke', 'src/runtime.ts#verifyReplacements'],
   law: {
     statement:
       'For every pause, each evaluation that arrives before release() waits and then continues with the original expression, later ones pass straight through, `reached` resolves with the first arrival\'s locals, and it rejects as soon as the action finishes without an arrival, with the action\'s own error as the cause when it failed; a miss that no one awaited, and a pause still holding when the test ends, make verifyReplacements() throw.',
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: build a built-in pause whose `reached` rejects as soon as the action finishes without reaching the point; a replacement that never runs must be loud.',
     limits:
-      'An action that evaluates the expression zero to two times, awaiting each or starting all at once; the expression evaluates to a promise; waits are bounded by microtask turns, so a promise that never settles is observed as pending.',
+      'An action that evaluates the expression zero to two times, awaiting each or starting all at once; the expression evaluates to a promise; waits are bounded by microtask turns, so a promise that never settles is observed as pending. Arguments of the wrong kind are for the compiler to reject (decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the sources are TypeScript, and what the compiler rejects is not checked again at run time); the runtime promises nothing for them.',
   },
   histories: {
     enumerated: enumeratedPauseHistories,
@@ -837,12 +827,6 @@ oracleProperty({
       const atReckoning = reckoning(describe)
       if (stuck) await finish()
 
-      let runWithoutAFunction: unknown = 'accepted'
-      try {
-        gate.run(undefined as never)
-      } catch (error) {
-        runWithoutAFunction = whose(error)
-      }
       // An unhandled rejection is announced after the microtasks of this turn.
       await new Promise((resolve) => setImmediate(resolve))
       observe('pause', {
@@ -852,7 +836,6 @@ oracleProperty({
         calls: gate.calls,
         atReckoning,
         unhandledRejections,
-        runWithoutAFunction,
       })
     } catch (err) {
       observe('pause', { threw: err instanceof Error ? err.message : String(err) })
@@ -926,7 +909,7 @@ function optionsModel(history: OptionsHistory) {
 
 oracleProperty({
   id: 'runtime-replacement-options',
-  owns: ['src/runtime.mjs#createPointHandle'],
+  owns: ['src/runtime.ts#createPointHandle'],
   law: {
     statement:
       'For every `times` and `on` given to withReplacement or replace, installing throws a TypeError unless `times` is absent, "any", or a whole number of 0 or more, and `on` is absent, a whole number of 1 or more, or a list of such numbers.',
@@ -1009,7 +992,7 @@ function shorthandModel(history: ShorthandHistory) {
 
 oracleProperty({
   id: 'runtime-shorthands',
-  owns: ['src/runtime.mjs#createPointHandle', 'src/runtime.mjs#invoke'],
+  owns: ['src/runtime.ts#createPointHandle', 'src/runtime.ts#invoke'],
   law: {
     statement:
       'For every shorthand, returns, throws, resolves, and rejects install a replacement that applies in every async context and gives the evaluation exactly that value, that error, or a promise of it, until it is restored; restoring one that never ran throws.',
@@ -1119,7 +1102,7 @@ function captureModel(history: CaptureHistory) {
 
 oracleProperty({
   id: 'runtime-capture-names',
-  owns: ['src/runtime.mjs#invoke', 'src/runtime.mjs#verifyReplacements'],
+  owns: ['src/runtime.ts#invoke', 'src/runtime.ts#verifyReplacements'],
   law: {
     statement:
       'For every list of capture names, an evaluation whose replacement asks for a name that is not a local of the expression throws an error that names it and lists the locals there are, and the next verifyReplacements() throws it again; otherwise locals holds exactly the asked names.',
@@ -1244,7 +1227,7 @@ function visitorModel(history: VisitorHistory) {
 
 oracleProperty({
   id: 'runtime-visitor-return',
-  owns: ['src/runtime.mjs#select'],
+  owns: ['src/runtime.ts#select'],
   law: {
     statement:
       'For every value a visitor returns for a node, select takes the node only when the value is that node or what its own capture(...) returned; anything else selects nothing, and when it was a truthy value the "matched 0" error says that the visitor returned something that is not the node.',

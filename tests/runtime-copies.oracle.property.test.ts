@@ -4,7 +4,7 @@
  * selected through another, and a replacement installed through one applies
  * to instrumented code that calls a third. It is checked on what `select`,
  * `withReplacement`, and `invoke` of different copies return. It owns
- * `src/runtime.mjs`.
+ * `src/runtime.ts`.
  *
  * ```ts
  * copyA.registerFile('app.ts', nodes)
@@ -28,7 +28,7 @@
  * invoking) to copies of the runtime loaded in one worker, a file registered
  * through the first is found by the second, its flags are the same object in
  * every copy, and a replacement installed through the second applies to an
- * `invoke` of the third inside the scope and not outside it (`src/runtime.mjs`,
+ * `invoke` of the third inside the scope and not outside it (`src/runtime.ts`,
  * "All copies in the same Node worker must share the same async-local store
  * and file index"; Decision by Manuel Schiller (GitHub schiller-manuel),
  * 2026-11-24: accept all laws).
@@ -57,12 +57,12 @@ afterEach(async () => {
 
 const COPIES = [0, 1, 2] as const
 
-type Runtime = typeof import('../src/runtime.mjs')
+type Runtime = typeof import('../src/runtime.ts')
 // Each specifier is its own module to Vite, so each evaluates the runtime's source again.
 const loaders: ReadonlyArray<() => Promise<Runtime>> = [
-  () => import('../src/runtime.mjs?copy=0') as Promise<Runtime>,
-  () => import('../src/runtime.mjs?copy=1') as Promise<Runtime>,
-  () => import('../src/runtime.mjs?copy=2') as Promise<Runtime>,
+  () => import('../src/runtime.ts?copy=0') as Promise<Runtime>,
+  () => import('../src/runtime.ts?copy=1') as Promise<Runtime>,
+  () => import('../src/runtime.ts?copy=2') as Promise<Runtime>,
 ]
 
 interface CopiesHistory {
@@ -87,12 +87,12 @@ let copiesRuns = 0
 
 oracleProperty({
   id: 'runtime-copies-share-one-registry',
-  owns: ['src/runtime.mjs'],
+  owns: ['src/runtime.ts'],
   law: {
     statement:
       'For every assignment of the three roles (registering, selecting, and invoking) to copies of the runtime loaded in one worker, a file registered through the first is found by the second, its flags are the same object in every copy, and a replacement installed through the second applies to an invoke of the third inside the scope and not outside it.',
     authority:
-      'src/runtime.mjs ("Vite can load this module through more than one module graph. All copies in the same Node worker must share the same async-local store and file index.") and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: accept all laws.',
+      'src/runtime.ts ("Vite can load this module through more than one module graph. All copies in the same Node worker must share the same async-local store and file index.") and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: accept all laws.',
     limits: 'Three copies in one worker, distinguished by a query string on the module specifier.',
   },
   histories: {

@@ -26,7 +26,7 @@ Made on 2026-11-24 by Manuel Schiller:
 - All eight potential laws are accepted, every finding is to be fixed, and every feature idea is to be built with oracle coverage. Status is tracked in "Work in progress" below.
 - F7: a replacement that never runs must be loud. All four API options are built; for an asynchronous action the returned promise stays the action's own and the test fails at its end through a Vitest hook. Done; see F7.
 - An implicit `any` is an error: `strict` is on, and the type check is being widened to the oracle test files (F17). There is no separate check for an `any` that a library declaration hands over; `checks/no-any.mjs`, which I had added for that, is removed again at your request.
-- The library moves to TypeScript sources built with `tsdown`, and argument checks that the compiler already makes are dropped from the runtime. Queued behind the two delegated branches, which edit the `.mjs` files.
+- The library moves to TypeScript sources built with `tsdown`, and argument checks that the compiler already makes are dropped from the runtime. Done for the runtime (`src/runtime.ts`, `src/vitest.ts`, build into `dist/`); the other four modules follow when the two delegated branches, which edit them, are merged. The rule applied: what the compiler rejects is not checked again at run time; what depends on run-time state stays. Removed: the `typeof` checks on `visitor`, `handler`, `action`, and on the points and action of `interleavings`. Kept: everything about selections, capture names, schedules and replacements that never ran, and the value check on `times` and `on`, because the compiler accepts any number there.
 - Schedule exploration is a primitive to compose, not a function that takes the checks: `interleavings(points)` is a generator of orders, and the caller runs the scenario and checks it in the loop body. Rebuilt that way; the first form with `run`, `check`, `setup` and `limit` options is gone.
 
 Still open:
@@ -51,7 +51,7 @@ Still open:
 | F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command | queued behind the fast path, which edits the same files |
 | Schedule exploration: `interleavings(points)` as a generator of orders, with `schedule`, `choose`, and the `InterleavingFailure` error | done |
 | Type-check the oracle test files (F17) | done for the four runtime oracle files, which are now in `include`; 52 errors remain in the other five, queued behind the merges, which edit those files |
-| Move `src/*.mjs` to TypeScript built with `tsdown`; drop run-time argument checks the compiler makes | queued behind the merges |
+| Move to TypeScript built with `tsdown`; drop run-time argument checks the compiler makes | done for the runtime; `discovery`, `plugin`, `contracts` and `content-mapper` are queued behind the merges |
 | Selector fields (F4), `new` and `await` as selectable kinds, pass-through for unportable types | queued behind the merges |
 
 ---
@@ -700,6 +700,7 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 - 2026-11-24: schedule exploration built (`interleavings`, feature idea 9): every order, `limit`, `schedule`, `choose`; it throws `InterleavingFailure` with the order, the replay schedule and what failed. New oracle `runtime-interleavings`, example `examples/profile.test.ts`, README section, probe `p26`. New F17: an `any` that `strict` lets through and the untyped oracle test files; `checks/no-any.mjs` added to `pnpm check`.
 - 2026-11-24: `interleavings` rebuilt as a primitive after the maintainer's decision: a generator of orders (`order.run(action)`, `order.schedule`, `order.released`) with the caller's own loop and checks. Oracle, example, README section and probe `p26` rewritten for it. A negative or fractional schedule entry is now refused; the first form took `-1` as "the last waiting evaluation". Benchmark harness v2.4 merged.
 - 2026-11-24: the four runtime oracle files are type-checked (`include` widened, `tests/loose-select.ts`, `src/runtime.d.mts`). `checks/no-any.mjs` removed again at the maintainer's request. Decision recorded: TypeScript sources built with `tsdown`.
+- 2026-11-24: the runtime is TypeScript (`src/runtime.ts` holds the implementation and the types that were in `runtime.d.ts`), built with `tsdown` into `dist/`. Three laws changed on the maintainer's decision: runtime Law 4, the replace-everywhere and pause laws of the new API, and `interleavings` no longer promise a `TypeError` for an argument of the wrong kind. The type oracle now compiles against the built declarations.
 
 ## Incidents
 

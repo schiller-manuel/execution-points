@@ -9,13 +9,23 @@
   },
   "exports": {
     ".": {
-      "types": "./src/runtime.d.ts",
-      "default": "./src/runtime.mjs"
+      "types": "./dist/runtime.d.mts",
+      "default": "./dist/runtime.mjs"
     },
-    "./runtime": "./src/runtime.mjs",
+    "./runtime": {
+      "types": "./dist/runtime.d.mts",
+      "default": "./dist/runtime.mjs"
+    },
     "./vite": "./src/plugin.mjs",
-    "./vitest": "./src/vitest.mjs"
+    "./vitest": "./dist/vitest.mjs"
   },
+  "files": [
+    "dist",
+    "src/plugin.mjs",
+    "src/discovery.mjs",
+    "src/contracts.mjs",
+    "src/content-mapper.mjs"
+  ],
   "typescript": {
     "contentMapper": {
       "exec": [
@@ -26,20 +36,30 @@
     }
   },
   "scripts": {
+    "build": "tsdown",
     "check": "tsc --noEmit --runExternalCode",
-    "test": "vitest run",
-    "test:oracles": "vitest run tests/",
+    "test": "tsdown && vitest run",
+    "test:oracles": "tsdown && vitest run tests/",
     "verify": "node checks/verify.mjs"
   },
   "dependencies": {
     "magic-string": "1.4.5",
     "typescript": "7.1.0-dev.20261121.1"
   },
+  "peerDependencies": {
+    "vitest": ">=3"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@tanstack/eslint-plugin-oracles": "https://pkg.pr.new/TanStack/oracles/@tanstack/eslint-plugin-oracles@6d05f05",
     "@tanstack/oracles": "https://pkg.pr.new/TanStack/oracles/@tanstack/oracles@6d05f05",
     "@types/node": "^24.0.0",
     "fast-check": "^4.10.3",
+    "tsdown": "^0.23.7",
     "vite": "8.3.8",
     "vitest": "5.1.1"
   }

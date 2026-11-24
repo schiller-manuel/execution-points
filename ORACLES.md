@@ -96,3 +96,17 @@ A running log. Each entry says what I was doing, what happened, and what would h
 
 **Would have helped:** accepting a class name as "all of its members", or naming `#Class.constructor` in the skill and in the refusal.
 
+### `owns` has no way to name types
+
+**Doing:** moving the runtime from `runtime.mjs` plus a hand-written `runtime.d.ts` to one `runtime.ts`.
+
+**What happened:** the type oracle owned `src/runtime.d.ts`, a file with nothing to mutate. With the types inside `runtime.ts`, there is nothing it can name: an entry is a file, a function, or module-level data, and a type is none of them. Owning the file would run the type oracle's 31 compile-heavy tests against every one of about 900 runtime mutants, none of which it can notice. I let it own the built declarations instead (`dist/runtime.d.mts`), which is at least exactly what it compiles its fixtures against, and which makes the gap check refuse to start when the build has not run.
+
+**Would have helped:** an `owns` entry for a type or an interface (no mutants, but stated coverage), or a documented way to say "this oracle is evidence for declarations only".
+
+### A variable initialized for the type checker's sake is a gap
+
+**Doing:** the same conversion.
+
+**What happened:** `let heldAtEnd` became `let heldAtEnd = false` to give it a type. The value is always assigned before it is read, so the mutant `false → true` survived as `not-observed`. Correct of the tool, and a useful catch: the fix was `let heldAtEnd: boolean | undefined`, not a history. Noted here because the directive for `not-observed` points at the oracle, and the cheaper answer was that production had gained dead code.
+

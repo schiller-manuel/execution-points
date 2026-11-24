@@ -69,7 +69,7 @@
  * instrumented code whose header placement, identifier names, registered
  * metadata, and runtime interception results match the target expressions. The
  * driver runs `executionPoints` hooks against temporary project directories and
- * executes the instrumented JavaScript against `src/runtime.mjs`. For the cost
+ * executes the instrumented JavaScript against `src/runtime.ts`. For the cost
  * law it hands the instrumented code a counting `invoke` and file flags whose
  * reads are counted, and it follows every copy of an expression in the
  * emitted code back through the source map.
@@ -85,7 +85,7 @@ import { pathToFileURL } from 'node:url'
 import { afterEach } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
 import { executionPoints } from '../src/plugin.mjs'
-import { invoke, registerFile, select, verifyReplacements } from '../src/runtime.mjs'
+import { invoke, registerFile, select, verifyReplacements } from '../src/runtime.ts'
 
 // The drivers leave replacements behind on purpose (asynchronous scopes, unused ones). The
 // library's own check after each test is not what these laws are about, so it finds nothing.

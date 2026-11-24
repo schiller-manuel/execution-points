@@ -27,9 +27,9 @@ export function typecheck({ root, text, targets }, snippet) {
   const files = new Map([
     [join(root, 'node_modules/execution-points-prototype/package.json'), JSON.stringify({
       name: 'execution-points-prototype', type: 'module',
-      exports: { '.': { types: './src/runtime.d.ts', default: './src/runtime.mjs' } },
+      exports: { '.': { types: './dist/runtime.d.mts', default: './dist/runtime.mjs' } },
     })],
-    [join(root, 'node_modules/execution-points-prototype/src/runtime.d.ts'), readFileSync(`${REPO}/src/runtime.d.ts`, 'utf8')],
+    [join(root, 'node_modules/execution-points-prototype/dist/runtime.d.mts'), readFileSync(`${REPO}/dist/runtime.d.mts`, 'utf8')],
     [join(root, '__registry.ts'), text],
   ])
   const rootFiles = [...targets.map((t) => join(root, t)), join(root, '__registry.ts')]

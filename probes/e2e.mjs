@@ -7,6 +7,19 @@ import { REPO, WORK } from './lib.mjs'
 
 export { REPO }
 
+// A consumer gets what the package ships: the built runtime in `dist`, next to the modules that
+// are not built yet. Built once per probe run, so it is never older than the sources.
+let built = false
+function buildLibrary() {
+  if (built) return
+  const result = spawnSync(process.execPath, [join(REPO, 'node_modules/tsdown/dist/run.mjs'), '--logLevel', 'error'], {
+    cwd: REPO,
+    encoding: 'utf8',
+  })
+  if (result.status !== 0) throw new Error(`The library did not build:\n${result.stdout}${result.stderr}`)
+  built = true
+}
+
 export function consumer(files, { targets = ['src/**/*.ts'] } = {}) {
   const root = realpathSync(mkdtempSync(join(WORK, 'e2e-')))
   const nm = join(root, 'node_modules')
@@ -17,8 +30,10 @@ export function consumer(files, { targets = ['src/**/*.ts'] } = {}) {
   }
   const pkg = join(nm, 'execution-points-prototype')
   mkdirSync(pkg)
+  buildLibrary()
   cpSync(join(REPO, 'package.json'), join(pkg, 'package.json'))
   cpSync(join(REPO, 'src'), join(pkg, 'src'), { recursive: true })
+  cpSync(join(REPO, 'dist'), join(pkg, 'dist'), { recursive: true })
 
   const base = {
     'package.json': JSON.stringify({ name: 'consumer', private: true, type: 'module' }),

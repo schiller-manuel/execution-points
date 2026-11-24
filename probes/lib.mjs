@@ -9,7 +9,7 @@ export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const WORK = realpathSync(mkdtempSync(join(tmpdir(), 'ep-probe-')))
 
 export const { executionPoints } = await import(`${REPO}/src/plugin.mjs`)
-export const runtime = await import(`${REPO}/src/runtime.mjs`)
+export const runtime = await import(`${REPO}/src/runtime.ts`)
 export const discovery = await import(`${REPO}/src/discovery.mjs`)
 export const contracts = await import(`${REPO}/src/contracts.mjs`)
 
@@ -46,7 +46,7 @@ export function instrument(files, targets = Object.keys(files)) {
     const res = plugin.transform.call(ctx, readFileSync(file, 'utf8'), file)
     const code = (res?.code ?? readFileSync(file, 'utf8')).replace(
       '"execution-points-prototype/runtime"',
-      JSON.stringify(pathToFileURL(`${REPO}/src/runtime.mjs`).href),
+      JSON.stringify(pathToFileURL(`${REPO}/src/runtime.ts`).href),
     )
     const instFile = file.replace(/\.ts$/, '.inst.ts')
     writeFileSync(instFile, code)

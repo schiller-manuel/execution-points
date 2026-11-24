@@ -3,7 +3,7 @@
  * capture, and async-context replacement scoping, checked at the return values
  * of `select`, `withReplacement`, and `invoke`, and at the `locals` and
  * `original` arguments passed to replacement handlers. It owns
- * `src/runtime.mjs`.
+ * `src/runtime.ts`.
  *
  * ```ts
  * invoke('n0', () => 10, () => ({ a: () => 1 })) // → 10, without calling captureThunk, when no replacement for 'n0' is active
@@ -51,15 +51,17 @@
  * direct values, including keys such as `__proto__` and `toString`), and passes
  * a frozen `context` whose `locals` is a shallowly frozen, null-prototype
  * object mapping `keys` to their captured values (`README.md:82`,
- * `src/runtime.d.ts:44-51`).
+ * the `Context` type in `src/runtime.ts`).
  *
  * For every file registration and `select(file, visitor)` call, `select`
  * resolves to the single node for which `visitor(node)` returns `node` or
- * `node.capture(...)`, throws a `TypeError` when `visitor`, `handler`, or
- * `action` is not a function, and throws an `Error` when `file` is unregistered
- * or `visitor` matches 0 or 2 or more nodes (`README.md:49`; Decision by
+ * `node.capture(...)`, and throws an `Error` when `file` is unregistered or
+ * `visitor` matches 0 or 2 or more nodes (`README.md:49`; Decision by
  * Manuel Schiller (GitHub schiller-manuel), 2026-11-22: `select` is the sole
- * selection API).
+ * selection API). A `visitor`, `handler`, or `action` that is not a function
+ * is for the compiler to reject: the sources are TypeScript, and what the
+ * compiler rejects is not checked again at run time (Decision by Manuel
+ * Schiller, 2026-11-24).
  *
  * For every file, the flag that `registerFile` returns for a home (a function
  * body or a deferred position, as the plugin numbers them) is off until a
@@ -93,7 +95,7 @@
 import fc from 'fast-check'
 import { afterEach } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { invoke, registerFile, verifyReplacements } from '../src/runtime.mjs'
+import { invoke, registerFile, verifyReplacements } from '../src/runtime.ts'
 import { select } from './loose-select'
 
 // The drivers leave replacements behind on purpose (asynchronous scopes, unused ones). The
@@ -134,7 +136,7 @@ function passthroughModel(history: PassthroughHistory) {
 
 oracleProperty({
   id: 'runtime-passthrough',
-  owns: ['src/runtime.mjs#invoke', 'src/runtime.mjs#withReplacement'],
+  owns: ['src/runtime.ts#invoke', 'src/runtime.ts#withReplacement'],
   law: {
     statement:
       'For every registered execution point p and every invoke(p.id, originalThunk, captureThunk) call where no enclosing synchronous or asynchronous p.withReplacement(handler, action) scope is active, invoke evaluates originalThunk() once, returns its result, and does not call captureThunk.',
@@ -358,7 +360,7 @@ function scopeModel(history: ScopeHistory) {
 
 oracleProperty({
   id: 'runtime-replacement-scope',
-  owns: ['src/runtime.mjs#withReplacement', 'src/runtime.mjs#invoke'],
+  owns: ['src/runtime.ts#withReplacement', 'src/runtime.ts#invoke'],
   law: {
     statement:
       'For every p.withReplacement(handler, action) call, withReplacement returns action()\'s result and every invoke(p.id, originalThunk, captureThunk) in action or in any asynchronous descendant created within action\'s async context calls the innermost active handler({ locals, original }), where each original() call evaluates originalThunk() once.',
@@ -628,7 +630,7 @@ function captureModel(history: CaptureHistory) {
 
 oracleProperty({
   id: 'runtime-capture-snapshot',
-  owns: ['src/runtime.mjs#select', 'src/runtime.mjs#invoke', 'src/runtime.mjs#createPointHandle'],
+  owns: ['src/runtime.ts#select', 'src/runtime.ts#invoke', 'src/runtime.ts#createPointHandle'],
   law: {
     statement:
       'For every intercepted execution of a point p whose latest .capture(...keys) call specifies keys, invoke calls captureThunk() once, evaluates only the getter for each key in keys, and passes a frozen context whose locals is a shallowly frozen, null-prototype object mapping keys to their captured values.',
@@ -808,8 +810,6 @@ interface SelectionHistory {
     | 'match-multiple'
     | 'register-after-select'
     | 'unregistered-file'
-    | 'invalid-visitor-arg'
-    | 'invalid-with-replacement-args'
     | 'ignore-non-node-return'
   targetIndex: number
 }
@@ -822,8 +822,6 @@ const selectionArbitrary: fc.Arbitrary<SelectionHistory> = fc.record({
     'match-multiple',
     'register-after-select',
     'unregistered-file',
-    'invalid-visitor-arg',
-    'invalid-with-replacement-args',
     'ignore-non-node-return',
   ),
   targetIndex: fc.integer({ min: 0, max: 2 }),
@@ -863,36 +861,24 @@ function selectionModel(history: SelectionHistory) {
         errorName: 'Error',
         unregistered: true,
       }
-    case 'invalid-visitor-arg':
-      return {
-        outcome: 'error',
-        phase: 'select',
-        errorName: 'TypeError',
-      }
-    case 'invalid-with-replacement-args':
-      return {
-        outcome: 'error',
-        phase: 'withReplacement',
-        errorName: 'TypeError',
-      }
   }
 }
 
 oracleProperty({
   id: 'runtime-visitor-selection',
   owns: [
-    'src/runtime.mjs#registerFile',
-    'src/runtime.mjs#select',
-    'src/runtime.mjs#makeVisitorNode',
-    'src/runtime.mjs#getFileNodes',
+    'src/runtime.ts#registerFile',
+    'src/runtime.ts#select',
+    'src/runtime.ts#makeVisitorNode',
+    'src/runtime.ts#getFileNodes',
   ],
   law: {
     statement:
-      'For every file registration and select(file, visitor) call, select resolves to the single node for which visitor(node) returns node or node.capture(...), throws a TypeError when visitor, handler, or action is not a function, and throws an Error when file is unregistered or visitor matches 0 or 2 or more nodes.',
+      'For every file registration and select(file, visitor) call, select resolves to the single node for which visitor(node) returns node or node.capture(...), and throws an Error when file is unregistered or visitor matches 0 or 2 or more nodes.',
     authority:
-      'README.md:57 ("Returning 0 nodes or 2+ nodes (ambiguous match) is rejected") and src/runtime.mjs.',
+      'README.md:57 ("Returning 0 nodes or 2+ nodes (ambiguous match) is rejected") and src/runtime.ts.',
     limits:
-      'File registration must happen before withReplacement is called.',
+      'File registration must happen before withReplacement is called. Arguments of the wrong kind are for the compiler to reject (decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the sources are TypeScript, and what the compiler rejects is not checked again at run time); the runtime promises nothing for them.',
   },
   histories: {
     arbitrary: selectionArbitrary,
@@ -905,8 +891,6 @@ oracleProperty({
       'rejected-zero-matches',
       'rejected-multiple-matches',
       'rejected-unregistered-file',
-      'rejected-invalid-callback',
-      'rejected-invalid-with-replacement-args',
     ],
     constructed: [
       {
@@ -939,16 +923,6 @@ oracleProperty({
         enters: ['rejected-unregistered-file'],
         build: (base): SelectionHistory => ({ ...base, kind: 'unregistered-file' }),
       },
-      {
-        name: 'non-function-visitor',
-        enters: ['rejected-invalid-callback'],
-        build: (base): SelectionHistory => ({ ...base, kind: 'invalid-visitor-arg' }),
-      },
-      {
-        name: 'non-function-with-replacement-handler',
-        enters: ['rejected-invalid-with-replacement-args'],
-        build: (base): SelectionHistory => ({ ...base, kind: 'invalid-with-replacement-args' }),
-      },
     ],
   },
   model: (history) => selectionModel(history),
@@ -958,39 +932,6 @@ oracleProperty({
       { id: 'sel-1', kind: 'CallExpression' as const, inFunction: 'fn', callee: 'c1', nth: 0 },
       { id: 'sel-2', kind: 'CallExpression' as const, inFunction: 'fn', callee: 'c2', nth: 0 },
     ]
-
-    if (history.kind === 'invalid-visitor-arg') {
-      observe('reach', 'rejected-invalid-callback')
-      try {
-        ;(select as unknown as (f: string, v: unknown) => unknown)('any.ts', null)
-        observe('selection', { outcome: 'unexpected-pass' })
-      } catch (err) {
-        observe('selection', {
-          outcome: 'error',
-          phase: 'select',
-          errorName: err instanceof Error ? err.name : 'unknown',
-        })
-      }
-      return
-    }
-
-    if (history.kind === 'invalid-with-replacement-args') {
-      observe('reach', 'rejected-invalid-with-replacement-args')
-      const file = 'oracle-sel-invalid-args.ts'
-      try {
-        registerFile(file, nodes)
-        const pt = select(file, (n) => (n.id === 'sel-0' ? n : undefined))
-        ;(pt.withReplacement as unknown as (h: unknown, a: unknown) => unknown)('not-fn', () => 1)
-        observe('selection', { outcome: 'unexpected-pass' })
-      } catch (err) {
-        observe('selection', {
-          outcome: 'error',
-          phase: 'withReplacement',
-          errorName: err instanceof Error ? err.name : 'unknown',
-        })
-      }
-      return
-    }
 
     if (history.kind === 'unregistered-file') {
       observe('reach', 'rejected-unregistered-file')
@@ -1175,7 +1116,7 @@ let fileFlagsRuns = 0
 
 oracleProperty({
   id: 'runtime-file-flags',
-  owns: ['src/runtime.mjs#registerFile', 'src/runtime.mjs#withReplacement'],
+  owns: ['src/runtime.ts#registerFile', 'src/runtime.ts#withReplacement'],
   law: {
     statement:
       'For every file, the flag that registerFile returns for a home is off until a replacement is installed for one of that home\'s expressions and on from then on, in every registration of that file, earlier or later, and whatever happens to other homes and other files; and every flag is an object with a key no other flag has.',

@@ -3,7 +3,7 @@
  * in which a scenario's operations can pass the selected expressions. It is
  * checked on the orders the scenario actually ran in, on what each order's
  * `run` resolves to and reports, and on what is thrown and where. It owns
- * `src/runtime.mjs#interleavings` and `src/runtime.mjs#InterleavingFailure`.
+ * `src/runtime.ts#interleavings` and `src/runtime.ts#InterleavingFailure`.
  *
  * ```ts
  * for (const order of interleavings([read, write])) {
@@ -68,7 +68,7 @@
  */
 import { afterEach } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { InterleavingFailure, interleavings, invoke, registerFile, select, verifyReplacements } from '../src/runtime.mjs'
+import { InterleavingFailure, interleavings, invoke, registerFile, select, verifyReplacements } from '../src/runtime.ts'
 
 // The library's own check after each test is not what this law is about, so it finds nothing.
 afterEach(() => {
@@ -95,7 +95,6 @@ const MODES = [
   'schedule-too-long',
   'schedule-too-short',
   'never-finishes',
-  'malformed-arguments',
   'misused',
 ] as const
 
@@ -253,8 +252,6 @@ function interleavingModel(history: InterleavingHistory) {
       return { outcome: { ...OUR_TYPE_ERROR, step: evaluations } }
     case 'never-finishes':
       return { outcome: { threw: 'says-the-run-neither-finished-nor-arrived', ...failedBeforeAnyRelease } }
-    case 'malformed-arguments':
-      return { pointsNotAList: OUR_TYPE_ERROR, pointNotSelected: OUR_TYPE_ERROR, actionNotAFunction: OUR_TYPE_ERROR }
     case 'misused':
       return {
         nextWithoutRunning: OUR_ERROR,
@@ -307,7 +304,7 @@ interface Order {
 
 oracleProperty({
   id: 'runtime-interleavings',
-  owns: ['src/runtime.mjs#interleavings', 'src/runtime.mjs#InterleavingFailure.constructor', 'src/runtime.mjs#createPointHandle'],
+  owns: ['src/runtime.ts#interleavings', 'src/runtime.ts#InterleavingFailure.constructor', 'src/runtime.ts#createPointHandle'],
   // A search waits for the event loop between choices; waiting longer than it must is a defect too.
   work: { ratio: 1 },
   law: {
@@ -316,7 +313,7 @@ oracleProperty({
     authority:
       'Decisions by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: build schedule exploration on top of select() (pick the points, get every ordering, or a sample), with oracle coverage; make it a primitive that can be composed, like a generator or callbacks that can be iterated and awaited, so that the user performs their own checks instead of supplying them; a replacement that never runs must be loud.',
     limits:
-      'Up to three operations with up to three evaluations each, driven by microtasks only; two selected expressions that operations evaluate plus, in one mode, a third that nothing evaluates; a failing scenario throws an error, a string, undefined or null, and does so after its operations finished or before it started any. The decision fixed the shape (an iterable of orders, the caller\'s own checks). The names `run`, `schedule` and `released`, the `schedule` and `choose` options, and which misuse throws are proposals that await the maintainer\'s word.',
+      'Up to three operations with up to three evaluations each, driven by microtasks only; two selected expressions that operations evaluate plus, in one mode, a third that nothing evaluates; a failing scenario throws an error, a string, undefined or null, and does so after its operations finished or before it started any. The decision fixed the shape (an iterable of orders, the caller\'s own checks). The names `run`, `schedule` and `released`, the `schedule` and `choose` options, and which misuse throws are proposals that await the maintainer\'s word. Arguments of the wrong kind are for the compiler to reject (decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the sources are TypeScript, and what the compiler rejects is not checked again at run time); the runtime promises nothing for them.',
   },
   histories: {
     enumerated: enumeratedInterleavingHistories,
@@ -364,7 +361,6 @@ oracleProperty({
       const expressionWith = (id: string) => callees[ids.indexOf(id)] ?? id
       // Only the expressions that some operation evaluates: one that nothing reaches is a mode of its own.
       const points = [...(lengths[0]! > 0 ? [step] : []), ...(lengths.slice(1).some((length) => length > 0) ? [other] : [])]
-      // The arguments are checked as the orders are asked for, before the bound takes the first one.
       const orderings = (options?: object, among: ReadonlyArray<unknown> = points) =>
         atMost(
           (interleavings as unknown as (points: unknown, options?: object) => Generator<Order, void, undefined>)(among, options),
@@ -645,13 +641,6 @@ oracleProperty({
                     : failed.message,
                 )
               : failed,
-        })
-      } else if (history.mode === 'malformed-arguments') {
-        observe('interleavings', {
-          // Refused when the orders are asked for, not when the first one is taken.
-          pointsNotAList: atTheCall(() => orderings(undefined, step as never)),
-          pointNotSelected: atTheCall(() => orderings(undefined, [step, { pause() {} }])),
-          actionNotAFunction: await (orderings().next().value as Order).run('scenario' as never).then(() => 'accepted', whose),
         })
       } else {
         const unrun = orderings()
