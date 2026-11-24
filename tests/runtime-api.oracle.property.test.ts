@@ -139,7 +139,7 @@ function fixture() {
   fixtures += 1
   const file = `api-${fixtures}.ts`
   const id = `${file}#work:CallExpression:send:0`
-  registerFile(file, [{ id, kind: 'CallExpression', inFunction: 'work', callee: 'send', nth: 0 }], [1])
+  registerFile(file, [{ id, kind: 'CallExpression', inFunction: 'work', callee: 'send', nth: 0, line: 1, text: '' }], [1])
   const point = select(file as never, ((n: { callee?: string }) =>
     n.callee === 'send' ? n : undefined) as never) as unknown as AnyPoint
   return { id, point }
@@ -1265,6 +1265,8 @@ oracleProperty({
           inFunction: 'work',
           callee: index === 0 ? 'send' : 'other',
           nth: 0,
+          line: 1,
+          text: '',
         })),
       )
       let otherCapture: unknown

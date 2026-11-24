@@ -51,6 +51,12 @@ export interface IndexedNode {
   readonly callee?: string
   readonly operator?: string
   readonly nth: number
+  /** The line the expression starts on, counted from 1. */
+  readonly line: number
+  /** The expression's source on one line: see `excerpt`. */
+  readonly text: string
+  /** For a call made on an object, that object's source on one line: `cache` in `cache.get(key)`. */
+  readonly object?: string
   readonly start: number
   readonly end: number
   /** Which of the file's homes evaluates the expression: see `homeKind`. */
@@ -60,11 +66,25 @@ export interface IndexedNode {
   readonly captures: readonly string[]
 }
 
+/** A function, class, or variable declarator that has a selectable expression inside it. */
+export interface IndexedContainer {
+  readonly type: 'Function' | 'Class' | 'VariableDeclarator'
+  /** The name it is declared under; a function or class assigned to a constant has the constant's name, an anonymous one has none. */
+  readonly name: string
+  /** The line it starts on, counted from 1. */
+  readonly line: number
+  /** The selectable expressions inside it, however deep, as indexes into the file's nodes. */
+  readonly nodes: readonly number[]
+  /** The containers inside it, however deep, as indexes into the file's containers. */
+  readonly containers: readonly number[]
+}
+
 export interface IndexedFile {
   readonly file: string
   readonly relativeFile: string
   readonly source: string
   readonly nodes: readonly IndexedNode[]
+  readonly containers: readonly IndexedContainer[]
   /** The blocks of ordinary functions: each decides once per call which form of its statements runs. */
   readonly bodies: ReadonlyArray<{ readonly home: number; readonly start: number; readonly end: number }>
   /** Where the file's leading directives end, or 0. */
@@ -244,6 +264,29 @@ function isTiedToItsFunction(part: Syntax): boolean {
   )
 }
 
+const excerptLength = 72
+
+/** Source text as a listing shows it: every run of whitespace as one space, cut to one line's width. */
+export function excerpt(source: string): string {
+  const text = source.replace(/\s+/g, ' ')
+  return text.length > excerptLength ? `${text.slice(0, excerptLength - 1)}…` : text
+}
+
+/** What kind of container a node is for the expressions inside it, and under which name. */
+function containerOf(node: Syntax, functionName: string | undefined): Pick<IndexedContainer, 'type' | 'name'> | undefined {
+  if (functionName !== undefined) return { type: 'Function', name: functionName === '(anonymous)' ? '' : functionName }
+  if (node.kind === SyntaxKind.ClassDeclaration || node.kind === SyntaxKind.ClassExpression) {
+    const { parent } = node
+    // A class without a name of its own takes the name of the constant it is assigned to.
+    const assigned = parent.kind === SyntaxKind.VariableDeclaration && parent.name!.kind === SyntaxKind.Identifier ? parent.name!.text : undefined
+    return { type: 'Class', name: node.name?.text ?? assigned ?? '' }
+  }
+  if (node.kind === SyntaxKind.VariableDeclaration && node.name!.kind === SyntaxKind.Identifier) {
+    return { type: 'VariableDeclarator', name: node.name!.text! }
+  }
+  return undefined
+}
+
 function enclosingFunctionName(node: Syntax): string | undefined {
   switch (node.kind) {
     case SyntaxKind.FunctionDeclaration:
@@ -315,6 +358,14 @@ function callCalleeName(node: Syntax): string {
     return expr.argumentExpression!.text!
   }
   return '(anonymous)'
+}
+
+/** For a call made on an object, that object as the listing shows it. */
+function calledOn(node: Syntax, source: string, bomOffset: number, tree: SourceFile): { object?: string } {
+  const callee = node.expression!
+  if (callee.kind !== SyntaxKind.PropertyAccessExpression && callee.kind !== SyntaxKind.ElementAccessExpression) return {}
+  const object = callee.expression!
+  return { object: excerpt(source.slice(object.getStart(tree) + bomOffset, object.end + bomOffset)) }
 }
 
 /** The names a binding name or pattern declares; an array pattern can leave an element out. */
@@ -392,6 +443,12 @@ export function indexTargetFile(file: string, source: string, root: string, api:
     const nthCounters = new Map<string, number>()
     const found: Array<{ node: Omit<IndexedNode, 'captures'>; at: number; scope: Scope }> = []
     const bodies: Array<{ home: number; start: number; end: number }> = []
+    const containers: Array<{ type: IndexedContainer['type']; name: string; line: number; nodes: number[]; containers: number[] }> = []
+    // The containers the walk is inside of, outermost first.
+    const inside: typeof containers = []
+    // Where each line after the first begins, in the text TypeScript reads.
+    const lineStarts = [...(bomOffset ? source.slice(1) : source).matchAll(/\r\n|\r|\n/g)].map((ending) => ending.index + ending[0].length)
+    const lineOf = (pos: number): number => lineStarts.findLastIndex((begin) => begin <= pos) + 2
     const homes = [0]
     let homeCount = 0
     const functions = new Map<Syntax, FunctionBinding>()
@@ -455,6 +512,13 @@ export function indexTargetFile(file: string, source: string, root: string, api:
       if (home === 'body') {
         bodies.push({ home: homeCount, start: node.getStart(sourceFile) + bomOffset, end: node.end + bomOffset })
       }
+      const container = containerOf(node, fnName)
+      if (container) {
+        for (const outer of inside) outer.containers.push(containers.length)
+        const entered = { ...container, line: lineOf(node.getStart(sourceFile)), nodes: [], containers: [] }
+        containers.push(entered)
+        inside.push(entered)
+      }
 
       // A name that is read, as opposed to a name that is declared or that names a property.
       if (
@@ -476,9 +540,9 @@ export function indexTargetFile(file: string, source: string, root: string, api:
             : node.kind === SyntaxKind.BinaryExpression
               ? 'BinaryExpression'
               : 'ConditionalExpression'
-        const extra: { callee?: string; operator?: string } =
+        const extra: { callee?: string; operator?: string; object?: string } =
           kind === 'CallExpression'
-            ? { callee: callCalleeName(node) }
+            ? { callee: callCalleeName(node), ...calledOn(node, source, bomOffset, sourceFile) }
             : kind === 'BinaryExpression'
               ? {
                   operator: source.slice(
@@ -493,6 +557,7 @@ export function indexTargetFile(file: string, source: string, root: string, api:
         nthCounters.set(scopePrefix, nth + 1)
         const id = `${scopePrefix}:${nth}`
 
+        for (const outer of inside) outer.nodes.push(found.length)
         found.push({
           node: {
             id,
@@ -502,6 +567,8 @@ export function indexTargetFile(file: string, source: string, root: string, api:
             inFunction,
             ...extra,
             nth,
+            line: lineOf(treeStart),
+            text: excerpt(source.slice(start, end)),
             start,
             end,
             home: homes.at(-1)!,
@@ -514,6 +581,7 @@ export function indexTargetFile(file: string, source: string, root: string, api:
 
       node.forEachChild((child) => visit(child, scope))
 
+      if (container) inside.pop()
       if (home) homes.pop()
       if (fnName !== undefined) fnStack.pop()
     }
@@ -527,7 +595,13 @@ export function indexTargetFile(file: string, source: string, root: string, api:
     const statements = tree.statements!
     const leading = statements.findIndex((statement) => !isDirective(statement))
     const directivesEnd = leading ? statements.at(leading - 1)!.end + bomOffset : 0
-    return { file, relativeFile, source, nodes, bodies, directivesEnd }
+    // A container with nothing to select inside it is of no use to a selector.
+    const kept = containers.filter((container) => container.nodes.length)
+    const listed = kept.map((container) => ({
+      ...container,
+      containers: container.containers.map((index) => kept.indexOf(containers[index]!)).filter((index) => index !== -1),
+    }))
+    return { file, relativeFile, source, nodes, containers: listed, bodies, directivesEnd }
   } finally {
     lease.dispose()
   }

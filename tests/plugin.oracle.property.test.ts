@@ -398,12 +398,18 @@ function copiesMappedElsewhere(
     return { line: before.split('\n').length - 1, column: index - (before.lastIndexOf('\n') + 1) }
   }
   const sourceMap = new SourceMap(JSON.parse(JSON.stringify(map)))
+  // The registration describes each expression, with its text in a string. That is no copy of
+  // the expression: nothing evaluates it, and it is the instrumenter's own code.
+  const registration = /^const \w+ = \w+\(".*$/m.exec(generated)
+  const describes = (at: number) =>
+    registration !== null && at >= registration.index && at < registration.index + registration[0].length
   const misses: Record<string, number> = {}
   for (const marker of markers) {
     const written = position(original, original.indexOf(marker))
     let copies = 0
     let elsewhere = 0
     for (let at = generated.indexOf(marker); at !== -1; at = generated.indexOf(marker, at + 1)) {
+      if (describes(at)) continue
       const here = position(generated, at)
       const entry = sourceMap.findEntry(here.line, here.column) as {
         originalLine?: number

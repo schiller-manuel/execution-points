@@ -74,3 +74,42 @@ test('takes a sample of the orders', async () => {
     expect(cachedName('u1')).toBe('Bob')
   }
 })
+
+// A visitor object says where an expression stands, the way a Babel visitor does: visit the
+// function, then traverse into it. `cache.set(id, name)` is written twice in the module.
+const cachingAfterUpdate = select('examples/profile.ts', {
+  Function: (fn) =>
+    fn.name === 'updateProfile' &&
+    fn.traverse({
+      CallExpression: (call) => call.callee === 'set' && call.object === 'cache' && call,
+    }),
+})
+// The call that initializes a constant: visit the declarator, traverse into it.
+const readingForRaw = select('examples/profile.ts', {
+  VariableDeclarator: (declared) => declared.name === 'raw' && declared.traverse({ CallExpression: (call) => call }),
+})
+
+test('selects the cache write of the update, not the one of the read', async () => {
+  reset()
+  let written: unknown
+  await cachingAfterUpdate.withReplacement(
+    ({ original }) => {
+      written = 'intercepted'
+      return original()
+    },
+    () => updateProfile('u1', 'Bob'),
+  )
+  expect(written).toBe('intercepted')
+  // The read's own cache write is another expression: it runs untouched.
+  reset()
+  await cachingAfterUpdate.withReplacement(() => expect.unreachable('the read must not reach the update\'s write'), () => getProfile('u1'), {
+    times: 0,
+  })
+  expect(cachedName('u1')).toBe('Alice')
+})
+
+test('selects the call that initializes a constant', async () => {
+  reset()
+  const name = await readingForRaw.withReplacement(async () => '  Carol  ', () => getProfile('u1'))
+  expect(name).toBe('Carol')
+})

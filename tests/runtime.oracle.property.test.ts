@@ -178,8 +178,8 @@ oracleProperty({
     try {
       const file = 'oracle-passthrough.ts'
       registerFile(file, [
-        { id: 'pt-target', kind: 'CallExpression', inFunction: 'fn', callee: 'target', nth: 0 },
-        { id: 'pt-sibling', kind: 'CallExpression', inFunction: 'fn', callee: 'sibling', nth: 0 },
+        { id: 'pt-target', kind: 'CallExpression', inFunction: 'fn', callee: 'target', nth: 0, line: 1, text: '' },
+        { id: 'pt-sibling', kind: 'CallExpression', inFunction: 'fn', callee: 'sibling', nth: 0, line: 1, text: '' },
       ])
       const targetPoint = select(file, (n) => (n.callee === 'target' ? n.capture('x') : undefined))
       const siblingPoint = select(file, (n) => (n.callee === 'sibling' ? n.capture('x') : undefined))
@@ -425,8 +425,8 @@ oracleProperty({
     try {
       const file = 'oracle-scope.ts'
       registerFile(file, [
-        { id: 'sc-node', kind: 'CallExpression', inFunction: 'work', callee: 'compute', nth: 0 },
-        { id: 'sc-other', kind: 'CallExpression', inFunction: 'work', callee: 'other', nth: 0 },
+        { id: 'sc-node', kind: 'CallExpression', inFunction: 'work', callee: 'compute', nth: 0, line: 1, text: '' },
+        { id: 'sc-other', kind: 'CallExpression', inFunction: 'work', callee: 'other', nth: 0, line: 1, text: '' },
       ])
       const point = select(file, (n) => (n.id === 'sc-node' ? n : undefined))
       const otherPoint = select(file, (n) => (n.id === 'sc-other' ? n : undefined))
@@ -706,7 +706,7 @@ oracleProperty({
     try {
       const file = 'oracle-capture.ts'
       registerFile(file, [
-        { id: 'cap-node', kind: 'CallExpression', inFunction: 'fn', callee: 'send', nth: 0 },
+        { id: 'cap-node', kind: 'CallExpression', inFunction: 'fn', callee: 'send', nth: 0, line: 1, text: '' },
       ])
       const initialKeys = maskToKeys(history.initialMask)
       const overrideKeys = maskToKeys(history.overrideMask)
@@ -928,9 +928,9 @@ oracleProperty({
   model: (history) => selectionModel(history),
   driver: (history, observe) => {
     const nodes = [
-      { id: 'sel-0', kind: 'CallExpression' as const, inFunction: 'fn', callee: 'c0', nth: 0 },
-      { id: 'sel-1', kind: 'CallExpression' as const, inFunction: 'fn', callee: 'c1', nth: 0 },
-      { id: 'sel-2', kind: 'CallExpression' as const, inFunction: 'fn', callee: 'c2', nth: 0 },
+      { id: 'sel-0', kind: 'CallExpression' as const, inFunction: 'fn', callee: 'c0', nth: 0, line: 1, text: '' },
+      { id: 'sel-1', kind: 'CallExpression' as const, inFunction: 'fn', callee: 'c1', nth: 0, line: 1, text: '' },
+      { id: 'sel-2', kind: 'CallExpression' as const, inFunction: 'fn', callee: 'c2', nth: 0, line: 1, text: '' },
     ]
 
     if (history.kind === 'unregistered-file') {
@@ -1185,6 +1185,8 @@ oracleProperty({
           inFunction: 'work',
           callee: `send${node}`,
           nth: 0,
+          line: 1,
+          text: '',
         }))
       const register = (name: string) =>
         history.withHomes ? registerFile(name, nodesOf(name), FLAG_NODE_HOMES) : registerFile(name, nodesOf(name))

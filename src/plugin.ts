@@ -127,18 +127,22 @@ export function executionPoints(options: ExecutionPointsOptions = {}): Execution
         register: uniqueName(code, '__epRegister'),
         file: uniqueName(code, '__epFile'),
       }
-      const metadata = entry.nodes.map(({ id: nodeId, kind, inFunction, callee, operator, nth }) => ({
+      // What a visitor is handed for each expression when the test runs.
+      const metadata = entry.nodes.map(({ id: nodeId, kind, inFunction, callee, operator, object, nth, line, text }) => ({
         id: nodeId,
         kind,
         inFunction,
         ...(callee !== undefined ? { callee } : {}),
         ...(operator !== undefined ? { operator } : {}),
+        ...(object !== undefined ? { object } : {}),
         nth,
+        line,
+        text,
       }))
       const homes = entry.nodes.map((node) => node.home)
       const header =
         `import { invoke as ${names.invoke}, registerFile as ${names.register} } from ${JSON.stringify(runtimeModule)};\n` +
-        `const ${names.file} = ${names.register}(${JSON.stringify(entry.relativeFile)}, ${JSON.stringify(metadata)}, ${JSON.stringify(homes)});\n`
+        `const ${names.file} = ${names.register}(${JSON.stringify(entry.relativeFile)}, ${JSON.stringify(metadata)}, ${JSON.stringify(homes)}, ${JSON.stringify(entry.containers)});\n`
 
       return instrument(code, file, entry, header, names)
     },

@@ -15,8 +15,25 @@ export interface NodeDescriptor {
   readonly nth: number
   readonly callee?: string
   readonly operator?: string
+  /** For a call made on an object, that object as written: `cache` in `cache.get(key)`. */
+  readonly object?: string
+  /** The line the expression starts on, counted from 1. */
+  readonly line: number
+  /** The expression as `execution-points list` prints it: on one line, cut to 72 characters. */
+  readonly text: string
   readonly result: unknown
   readonly locals: object
+}
+
+/** A function, a class, or a variable declarator with selectable expressions inside it. */
+export interface ContainerDescriptor {
+  readonly type: 'Function' | 'Class' | 'VariableDeclarator'
+  /** The name it is declared under. A function or class assigned to a constant has the constant's name; an anonymous one has `''`. */
+  readonly name: string
+  /** The line it starts on, counted from 1. */
+  readonly line: number
+  /** What lies inside it, however deep. It exists in the types alone and types the visitor of `traverse`. */
+  readonly __inside: unknown
 }
 
 /**
@@ -25,6 +42,13 @@ export interface NodeDescriptor {
  * selectable expressions (with inferred result and narrowed local types).
  */
 export interface ExecutionPointFileRegistry {}
+
+/**
+ * Augmented by the content mapper like `ExecutionPointFileRegistry`. Maps each target file to
+ * the union of its containers: the functions, classes and variable declarators that have a
+ * selectable expression inside them.
+ */
+export interface ExecutionPointContainerRegistry {}
 
 export interface Context<Result, Locals extends object> {
   /** Captured binding values. Referenced objects retain their normal mutability. */
@@ -161,6 +185,40 @@ type FileNodes<File extends string> = File extends keyof ExecutionPointFileRegis
   ? Extract<ExecutionPointFileRegistry[File], NodeDescriptor>
   : never
 
+type FileContainers<File extends string> = File extends keyof ExecutionPointContainerRegistry
+  ? Extract<ExecutionPointContainerRegistry[File], ContainerDescriptor>
+  : never
+
+type InsideOf<Container> = Container extends { readonly __inside: infer Inside } ? Inside : never
+
+/** A container as a handler receives it: look inside it with `traverse`. */
+export interface Traversable {
+  /**
+   * Calls the handlers of `visitor` for everything inside this container, however deep, and
+   * returns what they selected. Return that from your own handler.
+   */
+  traverse<R extends VisitorReturn>(visitor: Visitor<InsideOf<this>, R>): R
+}
+
+type ContainerNode<Inside, Type extends ContainerDescriptor['type']> = Extract<Inside, { readonly type: Type }> & Traversable
+
+type ExpressionNode<Inside, Kind extends NodeDescriptor['kind']> = VisitorNode<Extract<Inside, { readonly kind: Kind } & NodeDescriptor>>
+
+/**
+ * A visitor keyed by node type, as in Babel: each handler is called for every node of its type
+ * in scope, and returns the expression it selects (the node, or `node.capture(...)`), what
+ * `node.traverse(...)` returned for a container, or nothing. `Function` covers every kind of
+ * function and `Class` every kind of class.
+ */
+export interface Visitor<Inside, R> {
+  CallExpression?(node: ExpressionNode<Inside, 'CallExpression'>): R
+  BinaryExpression?(node: ExpressionNode<Inside, 'BinaryExpression'>): R
+  ConditionalExpression?(node: ExpressionNode<Inside, 'ConditionalExpression'>): R
+  Function?(node: ContainerNode<Inside, 'Function'>): R
+  Class?(node: ContainerNode<Inside, 'Class'>): R
+  VariableDeclarator?(node: ContainerNode<Inside, 'VariableDeclarator'>): R
+}
+
 type IsUnion<T, Copy = T> = [T] extends [never] ? false : T extends unknown ? ([Copy] extends [T] ? false : true) : never
 
 type CleanReturn<R> = Exclude<R, undefined | void | null | false>
@@ -237,6 +295,12 @@ export interface Interleaving {
 /** What the plugin tells the runtime about one selectable expression. */
 export type RegisteredNode = Omit<NodeDescriptor, 'result' | 'locals'>
 
+/** What the plugin tells the runtime about one container: what is inside it, as indexes into the file's nodes and containers. */
+export interface RegisteredContainer extends Omit<ContainerDescriptor, '__inside'> {
+  readonly nodes: readonly number[]
+  readonly containers: readonly number[]
+}
+
 // ---------------------------------------------------------------------------------------------
 // What the runtime keeps
 // ---------------------------------------------------------------------------------------------
@@ -287,6 +351,7 @@ interface Selection {
 interface Registry {
   readonly storage: AsyncLocalStorage<Map<string, Installation>>
   readonly files: Map<string, readonly RegisteredNode[]>
+  readonly containers: Map<string, readonly RegisteredContainer[]>
   readonly states: Map<string, FileState>
   flagCount: number
   /** Replacements that apply in every async context: a stack per expression id. */
@@ -304,6 +369,7 @@ const shared: unique symbol = Symbol.for('execution-points-prototype.runtime.v2'
 const registry: Registry = ((globalThis as { [shared]?: Registry })[shared] ??= {
   storage: new AsyncLocalStorage(),
   files: new Map(),
+  containers: new Map(),
   states: new Map(),
   flagCount: 0,
   everywhere: new Map(),
@@ -323,8 +389,10 @@ export function registerFile(
   file: string,
   nodes: readonly RegisteredNode[],
   homes: readonly number[] = [],
+  containers: readonly RegisteredContainer[] = [],
 ): ReadonlyArray<{ readonly on: boolean }> {
   registry.files.set(file, nodes)
+  registry.containers.set(file, containers)
   const state = registry.states.get(file) ?? { replaced: new Set(), layouts: new Map() }
   registry.states.set(file, state)
 
@@ -772,42 +840,87 @@ function makeVisitorNode(descriptor: RegisteredNode): VisitedNode {
   })
 }
 
+/** What a traversal found, on its way outward through the handlers that return it. */
+interface Found {
+  readonly __epFound: readonly Selection[]
+}
+
+/** A visitor object when the code runs: a handler per node type. */
+type Handlers = Readonly<Record<string, ((node: never) => unknown) | undefined>>
+
 /**
- * Select an expression in `file` using ordinary TypeScript control-flow narrowing
- * over the file's typed AST node union.
+ * Select an expression in `file`. The visitor is a callback that narrows the file's typed union
+ * of expressions and returns the one it wants, or an object keyed by node type whose handlers
+ * work their way inward with `traverse`.
  */
 export function select<const File extends RegisteredTargetFile, R extends VisitorReturn>(
   file: File,
-  visitor: (node: RegistryIsEmpty extends true ? any : VisitorNode<FileNodes<NoInfer<File>>>) => R,
+  // One signature for both forms, so that a mistake is reported in plain words and not as "no overload matches".
+  visitor:
+    | ((node: RegistryIsEmpty extends true ? any : VisitorNode<FileNodes<NoInfer<File>>>) => R)
+    | Visitor<FileNodes<NoInfer<File>> | FileContainers<NoInfer<File>>, R>,
 ): SelectedPoint<R>
-export function select(file: string, typedVisitor: (node: never) => unknown): unknown {
-  // The registry types the node per file. When the code runs, every file's nodes have one shape.
-  const visitor = typedVisitor as (node: VisitedNode) => unknown
+export function select(file: string, visitor: ((node: never) => unknown) | object): unknown {
   let cached: Selection | undefined
   const resolveNow = (): Selection => {
     if (cached) return cached
     const nodes = getFileNodes(file)
-    const matches: Selection[] = []
-    // A node is selected by returning that node, or what its own capture() returned.
+    const containers = registry.containers.get(file)!
     let strays = 0
-    for (const descriptor of nodes) {
-      const node = makeVisitorNode(descriptor)
-      const result = visitor(node)
-      if (!result) continue
+
+    // What a handler returned for `node`: a selection of it, what a traversal found, or nothing of use.
+    const selectedBy = (result: unknown, node: VisitedNode | undefined): readonly Selection[] => {
+      if (!result) return []
+      if (result === node) return [{ id: node.id, captureNames: [] }]
       const captured = result as Selection
-      if (result === node) {
-        matches.push({ id: descriptor.id, captureNames: [] })
-      } else if (captured.__epSelected && captured.id === descriptor.id) {
-        matches.push({ id: descriptor.id, captureNames: captured.captureNames })
-      } else {
-        strays += 1
-      }
+      if (captured.__epSelected && captured.id === node?.id) return [{ id: captured.id, captureNames: captured.captureNames }]
+      const found = (result as Found).__epFound
+      if (found) return found
+      strays += 1
+      return []
     }
+
+    // Calls each handler for every node of its type among `inside`: expressions first, then containers.
+    const visit = (handlers: Handlers, expressions: Iterable<number>, inner: Iterable<number>): Selection[] => {
+      const selected: Selection[] = []
+      for (const index of expressions) {
+        const descriptor = nodes[index]!
+        const handler = handlers[descriptor.kind] as ((node: VisitedNode) => unknown) | undefined
+        if (!handler) continue
+        const node = makeVisitorNode(descriptor)
+        selected.push(...selectedBy(handler(node), node))
+      }
+      for (const index of inner) {
+        const { nodes: itsNodes, containers: itsContainers, ...described } = containers[index]!
+        const handler = handlers[described.type] as ((node: object) => unknown) | undefined
+        if (!handler) continue
+        const container = Object.freeze({
+          ...described,
+          traverse(visitor: Handlers): Found | undefined {
+            const found = visit(visitor, itsNodes, itsContainers)
+            return found.length ? Object.freeze({ __epFound: found }) : undefined
+          },
+        })
+        selected.push(...selectedBy(handler(container), undefined))
+      }
+      return selected
+    }
+
+    const selected =
+      typeof visitor === 'function'
+        ? nodes.flatMap((descriptor) => {
+            const node = makeVisitorNode(descriptor)
+            // The registry types the node per file. When the code runs, every file's nodes have one shape.
+            return selectedBy((visitor as (node: VisitedNode) => unknown)(node), node)
+          })
+        : visit(visitor as Handlers, nodes.keys(), containers.keys())
+    // An expression that several containers lead to is still one expression.
+    const matches = [...new Map(selected.map((selection) => [JSON.stringify([selection.id, selection.captureNames]), selection])).values()]
     if (matches.length !== 1) {
       throw new Error(
         `[execution-points] Visitor for "${file}" must match exactly 1 expression; matched ${matches.length}.` +
           (strays > 0
-            ? ` For ${strays} of the file's nodes it returned something that is not the node: return the node it was given, node.capture(...), or nothing.`
+            ? ` For ${strays} of the file's nodes it returned something that is not the node: return the node it was given, node.capture(...), what node.traverse(...) returned, or nothing.`
             : ''),
       )
     }

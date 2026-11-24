@@ -579,7 +579,10 @@ function renderNode(node: EmittedNode): string {
     `readonly inFunction: ${JSON.stringify(node.inFunction)};`,
     node.callee === undefined ? 'readonly callee?: undefined;' : `readonly callee: ${JSON.stringify(node.callee)};`,
     node.operator === undefined ? 'readonly operator?: undefined;' : `readonly operator: ${JSON.stringify(node.operator)};`,
+    node.object === undefined ? 'readonly object?: undefined;' : `readonly object: ${JSON.stringify(node.object)};`,
     `readonly nth: ${node.nth};`,
+    `readonly line: ${node.line};`,
+    `readonly text: ${JSON.stringify(node.text)};`,
   ]
   if (node.unportableReason) fields.push(`readonly __unportable: ${JSON.stringify(node.unportableReason)};`)
   fields.push(
@@ -587,14 +590,18 @@ function renderNode(node: EmittedNode): string {
     `readonly result: ${node.result};`,
     `readonly locals: ${typeLiteral(Object.entries(node.locals))}`,
   )
-  return `  | { ${fields.join(' ')} }`
+  return `{ ${fields.join(' ')} }`
 }
 
+/** One of the file's types, or `never` where there is none. */
+const unionOf = (names: readonly string[]): string => names.join(' | ') || 'never'
+
 /**
- * The registry module. Each file's nodes are a type alias declared outside the
- * `declare module` block, where a global name cannot bind to one of the
- * library's own exports. `__EPOpaque<Id>` is the result type of an expression
- * whose own type cannot be written: a different type for every node id.
+ * The registry module. Each file's nodes and containers are type aliases declared outside the
+ * `declare module` block, where a global name cannot bind to one of the library's own exports.
+ * A container names what lies inside it, so that a visitor that traverses into it is typed with
+ * exactly that. `__EPOpaque<Id>` is the result type of an expression whose own type cannot be
+ * written: a different type for every node id.
  */
 function renderFileModule(
   declarations: readonly string[],
@@ -609,12 +616,25 @@ function renderFileModule(
     declarations.map((declaration) => `${declaration}\n\n`).join('')
   const spans = files.map(([entry, nodes], i) => {
     const start = text.length
-    text += `type __EPFile${i} =\n${nodes.map(renderNode).join('\n')};\n`
+    const nodeName = (index: number): string => `__EPNode${i}_${index}`
+    const containerName = (index: number): string => `__EPContainer${i}_${index}`
+    text += nodes.map((node, index) => `type ${nodeName(index)} = ${renderNode(node)};\n`).join('')
+    text += `type __EPFile${i} = ${unionOf(nodes.map((_, index) => nodeName(index)))};\n`
+    text += entry.containers
+      .map(
+        (container, index) =>
+          `type ${containerName(index)} = { readonly type: ${JSON.stringify(container.type)}; readonly name: ${JSON.stringify(container.name)}; ` +
+          `readonly line: ${container.line}; readonly __inside: ${unionOf([...container.nodes.map(nodeName), ...container.containers.map(containerName)])} };\n`,
+      )
+      .join('')
+    text += `type __EPContainers${i} = ${unionOf(entry.containers.map((_, index) => containerName(index)))};\n`
     return { file: entry.file, start, end: text.length }
   })
   text +=
     "\ndeclare module 'execution-points-prototype' {\n  interface ExecutionPointFileRegistry {\n" +
     files.map(([entry], i) => `    ${JSON.stringify(entry.relativeFile)}: __EPFile${i};\n`).join('') +
+    '  }\n  interface ExecutionPointContainerRegistry {\n' +
+    files.map(([entry], i) => `    ${JSON.stringify(entry.relativeFile)}: __EPContainers${i};\n`).join('') +
     '  }\n}\n'
   return { text, spans }
 }

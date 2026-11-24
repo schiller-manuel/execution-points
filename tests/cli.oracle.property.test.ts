@@ -416,8 +416,10 @@ oracleProperty({
       for (const index of history.files.map((_, each) => each)) {
         if (asked !== undefined && fileName(index) !== asked) continue
         const result = await plugin.transform.call({}, writeFile(history, index).source, join(dir, fileName(index)))
-        const metadata = /\w+\("[^"]*", (\[.*?\]), \[[\d,]*\]\);\n/s.exec(result?.code ?? '')
-        registered.push(...(metadata ? (JSON.parse(metadata[1]!) as Array<{ id: string }>).map((node) => node.id) : []))
+        // The registration is one statement on one line, and every argument of it is JSON: the file, its nodes, and more.
+        const written = /= \w+\((".*)\);\n/.exec(result?.code ?? '')?.[1]
+        const nodes = written === undefined ? [] : ((JSON.parse(`[${written}]`) as [string, Array<{ id: string }>])[1])
+        registered.push(...nodes.map((node) => node.id))
       }
       // The same command line with no directory given, and with the current one given.
       const here = (io: { cwd?: string }) => {

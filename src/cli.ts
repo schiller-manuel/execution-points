@@ -13,8 +13,6 @@ its text.
   file     list this target only; without it, every target
   --json   print the entries as one JSON array`
 
-const excerptLength = 72
-
 /** One expression as the command reports it. */
 export interface ListedExpression {
   readonly file: string
@@ -38,14 +36,13 @@ export interface RunOptions {
 /** One expression as the command reports it: where an editor shows it, what a visitor sees of it, and its text on one line. */
 function entryOf(
   { source, relativeFile }: IndexedFile,
-  { id, kind, callee, operator, inFunction, nth, start, end }: IndexedNode,
+  { id, kind, callee, operator, inFunction, nth, line, text, start }: IndexedNode,
 ): ListedExpression {
   // A byte-order mark is no character of the first line.
   const linesBefore = source.slice(source.charCodeAt(0) === 0xfeff ? 1 : 0, start).split(/\r\n|\r|\n/)
-  const text = source.slice(start, end).replace(/\s+/g, ' ')
   return {
     file: relativeFile,
-    line: linesBefore.length,
+    line,
     column: linesBefore.at(-1)!.length + 1,
     id,
     kind,
@@ -53,7 +50,7 @@ function entryOf(
     ...(operator !== undefined ? { operator } : {}),
     inFunction,
     nth,
-    text: text.length > excerptLength ? `${text.slice(0, excerptLength - 1)}…` : text,
+    text,
   }
 }
 
