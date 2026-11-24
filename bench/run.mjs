@@ -403,6 +403,7 @@ function parseArgs(argv) {
   const opts = {
     selfTest: false,
     run: false,
+    regradeDir: null,
     tasks: null,
     arms: ['control', 'treatment'],
     models: null,
@@ -424,6 +425,7 @@ function parseArgs(argv) {
     const a = argv[i]
     if (a === '--self-test') opts.selfTest = true
     else if (a === '--run') opts.run = true
+    else if (a === '--regrade') opts.regradeDir = path.resolve(argv[++i])
     else if (a === '--tasks') opts.tasks = argv[++i].split(',').filter(Boolean)
     else if (a === '--arms') opts.arms = argv[++i].split(',').filter(Boolean)
     else if (a === '--models') opts.models = argv[++i].split(',').filter(Boolean)
@@ -529,9 +531,11 @@ function writePristineWorkspaceConfigs(dir, task, arm, { includeRuntimeGuard = f
   const setupLine = includeRuntimeGuard
     ? `setupFiles: [${JSON.stringify(RUNTIME_GUARD_PATH)}],\n    `
     : ''
-  // N-23: Pin exact include to task.testRel (blocks sibling .tsx/.test files from running!)
-  // N-31: Pin reporters: ['default'] so COPILOT_CLI=1 doesn't switch to minimal agent reporter!
-  const testBlock = `{ ${setupLine}include: [${JSON.stringify(task.testRel)}], reporters: ['default'], environment: 'node' }`
+  // N-23 & V-02: Pin exact include ONLY in grading sandboxes (includeRuntimeGuard=true) so
+  // sibling .tsx files cannot run during grading, while agents can still run scratch checks in their workspace.
+  // N-31: Pin reporters: ['default'] in both workspace and grading sandboxes.
+  const includeLine = includeRuntimeGuard ? `include: [${JSON.stringify(task.testRel)}], ` : ''
+  const testBlock = `{ ${setupLine}${includeLine}reporters: ['default'], environment: 'node' }`
   const tsInclude = ['src/**/*.ts', 'src/**/*.tsx', 'src/**/*.mts', 'src/**/*.cts']
 
   if (arm === 'treatment') {
@@ -653,7 +657,8 @@ function buildAgentPrompt(task) {
     'You are debugging and fixing an asynchronous concurrency bug in this standalone TypeScript + Vitest workspace.',
     'Start by reading `PROMPT.md` and `TESTING_GUIDE.md`, then inspect all files under `src/`.',
     `Follow every constraint in \`PROMPT.md\` and \`TESTING_GUIDE.md\`, add deterministic regression tests in \`${task.testRel}\`, fix the bug in \`${task.targetRel}\`, and verify \`npm test\` and \`npm run check\` both pass before finishing.`,
-    'Do not monkey-patch JavaScript or Node.js globals, do not add real-time sleeps or retry loops, and do not add test-only hooks or extra exports to production files.',
+    'Edit files under `src/` with file-editing tools (not shell redirects), and run `npm test` and `npm run check` directly to verify.',
+    'Do not monkey-patch JavaScript or Node.js globals, do not intercept Node runtime internals (`node:async_hooks`, `node:worker_threads`), do not add real-time sleeps or retry loops, and do not add test-only hooks or extra exports to production files.',
   ].join('\n')
 }
 
@@ -1038,14 +1043,7 @@ export async function evaluateAgentTests({
     }
     const allMutantsDetected = mutantResults.every((m) => m.detected)
 
-    // 3. Two-sided adequacy: MUST pass on the task's shipped reference fix (closes E-06 & L-11!)
-    const refFiles = REFERENCE_FIXES[taskId]
-    writeVariant({ ...baselineFiles, ...refFiles })
-    const refRun = await runVitestClassified(evalDir, task.testRel, runOpts)
-    collectGuard(refRun)
-    const refFixPass = refRun.outcome === 'passed'
-
-    // 4. E9 Buggy refactors (false-green rate)
+    // 3. E9 Buggy refactors (false-green rate)
     const refactors = buildBuggyRefactors(taskId, baselineFiles)
     const refactorResults = []
     for (const ref of refactors) {
@@ -1059,7 +1057,7 @@ export async function evaluateAgentTests({
       })
     }
 
-    // 5. E9 Valid alternative fixes (E9-01: separate assertion, timeout, and selector/compile break!)
+    // 4. Design-diverse valid fixes (D-14 symmetric gate + E9 robustness)
     const validAlts = VALID_FIX_VARIANTS[taskId] ?? []
     const validResults = []
     for (const alt of validAlts) {
@@ -1079,12 +1077,18 @@ export async function evaluateAgentTests({
       })
     }
 
+    const refEntry = validResults.find((v) => v.id.endsWith('-ref')) ?? validResults[0]
+    const refFixPass = refEntry?.outcome === 'true_green'
+    const refFixOutcome = refEntry?.outcome === 'true_green' ? 'passed' : (refEntry?.outcome ?? 'loud_break')
+    const passesAtLeastOneValidFix = validResults.some((v) => v.outcome === 'true_green')
+
     return {
       redReproducesBug: redResult.outcome === 'true_red',
       redOutcome: redResult.outcome,
       redSummary: redResult.summary,
       refFixPass,
-      refFixOutcome: refRun.outcome,
+      refFixOutcome,
+      passesAtLeastOneValidFix,
       runtimeGlobalPatches: [...new Set(runtimeGlobalPatches)],
       runtimeRealSleeps: [...new Set(runtimeRealSleeps)],
       singleBugMutants: {
@@ -1371,12 +1375,14 @@ export function parseCopilotEvents(stdout, targetRel) {
   let compactions = 0
   let deniedToolCalls = 0
   let writeDenials = 0
+  let shellWriteDenials = 0
   let firstSourceEditIndex = -1
   let firstFailingTestIndex = -1
   let firstSourceEditAt = null
   let firstFailingTestAt = null
   let eventIndex = 0
   const testCallIds = new Set()
+  const shellWriteCallIds = new Set()
   const pendingSourceEdits = new Map() // callId -> { isWriteTool, touchesTarget }
   const targetBase = path.basename(targetRel)
 
@@ -1429,7 +1435,12 @@ export function parseCopilotEvents(stdout, targetRel) {
           if (/(?:^|\s)\.\.\/|\/tmp\/|ep-grader|ep-bench|execution-points/.test(cmd)) {
             suspiciousPaths.push(cmd.slice(0, 120))
           }
-          if (/npm test|vitest/.test(cmd) && callId) {
+          // V-06: Track shell commands that attempt file writes
+          if (/(?:>>?|\bsed\s+-i|\bcp\s|\bmv\s|\btee\s|\bpython3?\s)/.test(cmd) && callId) {
+            shellWriteCallIds.add(callId)
+          }
+          // V-03: Only treat actual test invocations as test calls
+          if (/(?:^|[;&|]\s*)(?:npm\s+test|npx\s+vitest|vitest\s+run)/.test(cmd.trim()) && callId) {
             testCallIds.add(callId)
           }
         }
@@ -1443,12 +1454,13 @@ export function parseCopilotEvents(stdout, targetRel) {
 
         const isDenied =
           errCode === 'denied' ||
-          /denied|permission denied/i.test(errMsg) ||
-          /denied|permission denied/i.test(content)
+          /denied|permission denied|no-ask-user/i.test(errMsg) ||
+          /denied|permission denied|no-ask-user/i.test(content)
 
         if (isDenied) {
           deniedToolCalls++
           if (editMeta?.isWriteTool) writeDenials++
+          if (callId && shellWriteCallIds.has(callId)) shellWriteDenials++
         }
 
         // N-04: Only count source edits that actually SUCCEEDED!
@@ -1457,8 +1469,11 @@ export function parseCopilotEvents(stdout, targetRel) {
           firstSourceEditAt = ts
         }
 
-        if (callId && testCallIds.has(callId)) {
-          if (success === false || /FAIL\s+src\/|AssertionError|expected .+ to/i.test(content)) {
+        // V-03: Never count denied shell commands as failing RED test runs!
+        if (callId && testCallIds.has(callId) && !isDenied) {
+          if (
+            /FAIL\s+src\/|AssertionError|expected .+ to|Tests\s+\d+\s+failed/i.test(content)
+          ) {
             if (firstFailingTestIndex === -1) {
               firstFailingTestIndex = eventIndex
               firstFailingTestAt = ts
@@ -1477,6 +1492,7 @@ export function parseCopilotEvents(stdout, targetRel) {
     compactions,
     deniedToolCalls,
     writeDenials,
+    shellWriteDenials,
     filesRead: [...filesRead],
     shellCommandCount: shellCommands.length,
     suspiciousPaths: [...new Set(suspiciousPaths)],
@@ -1564,9 +1580,38 @@ async function runAgentPhase({
 }
 
 /**
+ * Monitors wall-clock vs monotonic time during grading to detect host sleep
+ * (e.g. macOS Clamshell Sleep on battery — closes G-2 / N-05!).
+ */
+function createSleepMonitor() {
+  let hostSleepDetected = false
+  let maxJumpMs = 0
+  let lastWall = Date.now()
+  const startWall = lastWall
+  const startMono = process.hrtime.bigint()
+  const interval = setInterval(() => {
+    const now = Date.now()
+    const gap = now - lastWall
+    if (gap > maxJumpMs) maxJumpMs = gap
+    if (gap > 10_000) hostSleepDetected = true
+    lastWall = now
+  }, 2_000)
+  interval.unref()
+  return {
+    stop() {
+      clearInterval(interval)
+      const wallElapsedMs = Date.now() - startWall
+      const monoElapsedMs = Number(process.hrtime.bigint() - startMono) / 1e6
+      if (Math.abs(wallElapsedMs - monoElapsedMs) > 10_000) hostSleepDetected = true
+      return { hostSleepDetected, maxJumpMs, wallElapsedMs }
+    },
+  }
+}
+
+/**
  * Grades a completed trial exclusively from its immutable `allWorkspaceFiles`
- * snapshot inside FRESH sandboxes (never runs tests inside the agent workspace —
- * closes R-19, R-01, E-01, E-04, E-05, E-06, A-01, R-11, R-12, R-18).
+ * snapshot inside FRESH run-scoped sandboxes (never runs tests inside the agent workspace —
+ * closes R-19, R-01, E-01, E-04, E-05, E-06, A-01, R-11, R-12, R-18, G-2, N-01/N-02).
  */
 export async function gradeTrialPhase({
   phase1,
@@ -1574,6 +1619,7 @@ export async function gradeTrialPhase({
   provenance,
   copilotVersion,
   toolchains,
+  parentDir = realpathSync(tmpdir()),
 }) {
   const {
     trialId,
@@ -1589,8 +1635,8 @@ export async function gradeTrialPhase({
     allWorkspaceFiles,
   } = phase1
   const task = TASKS[taskId]
-  const baselineFiles = readTaskBaselineFiles(taskId)
   let ownFixDir = null
+  const sleepMon = createSleepMonitor()
 
   try {
     const usage = extractUsageMetrics(cli.usageRaw, model)
@@ -1689,8 +1735,8 @@ export async function gradeTrialPhase({
           realSleeps: [],
         }
 
-    // 2. Run own-fix tests & type checks in a BRAND-NEW pristine sandbox with `--config` + runtime guard (closes R-19!)
-    ownFixDir = realpathSync(mkdtempSync(path.join(realpathSync(tmpdir()), `ep-ownfix-${taskId}-`)))
+    // 2. Run own-fix tests & type checks in a BRAND-NEW pristine sandbox under parentDir (closes R-19, N-01/N-02!)
+    ownFixDir = realpathSync(mkdtempSync(path.join(parentDir, `ep-ownfix-${taskId}-`)))
     const ownCfg = writePristineWorkspaceConfigs(ownFixDir, task, arm, {
       includeRuntimeGuard: true,
     })
@@ -1753,15 +1799,16 @@ export async function gradeTrialPhase({
     const typecheckPass = prodTypecheckRes.ok && (arm === 'control' ? fullTypecheckRes.ok : true)
     const contractTypecheckPass = arm === 'treatment' ? fullTypecheckRes.ok : true
 
-    // 3. Evaluate agent's test suite: RED + single-bug mutants + refFixPass (E-06) + E9
+    // 3. Evaluate agent's test suite: RED + single-bug mutants + D-14 symmetric valid-fix gate + E9
     const testEval = testText
-      ? await evaluateAgentTests({ taskId, arm, agentSrcFiles: allWorkspaceFiles, toolchains })
+      ? await evaluateAgentTests({ taskId, arm, agentSrcFiles: allWorkspaceFiles, toolchains, parentDir })
       : {
           redReproducesBug: false,
           redOutcome: 'loud_break',
           redSummary: 'missing test file',
           refFixPass: false,
           refFixOutcome: 'loud_break',
+          passesAtLeastOneValidFix: false,
           runtimeGlobalPatches: [],
           runtimeRealSleeps: [],
           singleBugMutants: { total: 0, detectedCount: 0, allDetected: false, results: [] },
@@ -1782,7 +1829,7 @@ export async function gradeTrialPhase({
           },
         }
 
-    // Combine AST + runtime guard violations (closes E-01, E-05, A-01, N-22, N-23!)
+    // Combine AST + runtime guard violations (closes E-01, E-05, A-01, N-22, N-23, D-12!)
     const allGlobalPatches = [
       ...new Set([
         ...testAudit.globalPatches,
@@ -1800,11 +1847,11 @@ export async function gradeTrialPhase({
     const noGlobalMonkeyPatch = allGlobalPatches.length === 0
     const noRealSleeps = allRealSleeps.length === 0
 
-    // Two-sided adequacy (closes E-06 & L-11!)
+    // D-14 symmetric two-sided adequacy: must pass >= 1 design-diverse independent valid fix (blocks E-06 without single-reference bias!)
     const adequateReproduction =
       testEval.redReproducesBug &&
       testEval.singleBugMutants.allDetected &&
-      testEval.refFixPass &&
+      testEval.passesAtLeastOneValidFix &&
       agentTestRun.ok
 
     // 4. Hidden yield-engine oracle grader + pristine visible tests over entire non-test `src/`
@@ -1817,22 +1864,27 @@ export async function gradeTrialPhase({
       srcFilesOrDir: prodSrcMap,
       toolchains,
       runVisibleToo: true,
+      parentDir,
     })
 
-    // N-05: Detect infrastructure failures (non-zero CLI exit without timeout, missing usage on live run, or write denials blocking all edits)
+    const sleepStats = sleepMon.stop()
+
+    // N-05 & G-2: Detect infrastructure failures (host sleep, non-zero CLI exit without timeout, missing usage on live run, or write denials blocking all edits)
     const anySrcChanged = Object.entries(allWorkspaceFiles).some(
       ([rel, content]) => rel.startsWith('src/') && initialSnapshot[rel] !== content,
     )
     const isLiveRun = model !== 'self-test'
     const infraFailure =
-      isLiveRun &&
-      ((cli.exitCode !== 0 && !cli.timedOut) ||
-        Boolean(cli.spawnError) ||
-        Boolean(usage.usageMissing) ||
-        (eventStats.writeDenials > 0 && !anySrcChanged))
+      sleepStats.hostSleepDetected ||
+      (isLiveRun &&
+        ((cli.exitCode !== 0 && !cli.timedOut) ||
+          Boolean(cli.spawnError) ||
+          Boolean(usage.usageMissing) ||
+          (eventStats.writeDenials > 0 && !anySrcChanged)))
 
     const solved =
       !infraFailure &&
+      !Boolean(agentTestRun.guardViolations?.guardMissing) &&
       grader.oraclePass &&
       grader.visibleTestsPass &&
       agentTestRun.ok &&
@@ -1867,6 +1919,8 @@ export async function gradeTrialPhase({
       toolSha256: provenance.toolSha256,
       tasksSha256: provenance.tasksSha256,
       graderChecksum: toolchains.graderChecksum,
+      hostSleepDetected: sleepStats.hostSleepDetected,
+      gradingDurationMs: sleepStats.wallElapsedMs,
       infraFailure,
       ungradable: infraFailure || Boolean(agentTestRun.guardViolations?.guardMissing),
       aborted: false,
@@ -1881,10 +1935,12 @@ export async function gradeTrialPhase({
       redOutcome: testEval.redOutcome,
       refFixPass: testEval.refFixPass,
       refFixOutcome: testEval.refFixOutcome,
+      passesAtLeastOneValidFix: testEval.passesAtLeastOneValidFix,
       adequateReproduction,
       singleBugMutants: testEval.singleBugMutants,
       typecheckPass,
       writeDenials: eventStats.writeDenials,
+      shellWriteDenials: eventStats.shellWriteDenials,
       contractTypecheckPass,
       cleanProduction,
       productionViolations: [...prodViolations, ...auxViolations],
@@ -1934,6 +1990,7 @@ export async function gradeTrialPhase({
     }
     return record
   } catch (err) {
+    sleepMon.stop()
     const errorRecord = {
       runId,
       trialId,
@@ -1980,10 +2037,11 @@ export async function gradeTrialPhase({
 }
 
 async function runSelfTest() {
-  console.log('Running v2.2 hardened benchmark self-test...\n')
+  console.log('Running v2.3 hardened benchmark self-test...\n')
   const provenance = computeProvenance()
   const toolchains = prepareToolchains(REPO_ROOT)
   let failures = 0
+  let cheatCount = 0 // G-8: hoist out of try block so final summary never throws ReferenceError!
 
   try {
     // 1. Toolchain isolation (symlinks + `.bin` shims) & full grader checksum (I-03, R-02)
@@ -2030,6 +2088,8 @@ async function runSelfTest() {
       { name: 'N-24 comma (0, setTimeout)', code: `await new Promise((r) => (0, setTimeout)(r, 40))`, check: (r) => r.usesRealSleep },
       { name: 'N-24 expect.poll', code: `import { expect } from 'vitest'; await expect.poll(() => true).toBe(true)`, check: (r) => r.usesRealSleep },
       { name: 'N-12 vi.spyOn(namespaceImport) -> module-mock', code: `import { vi } from 'vitest'; import * as storage from './storage'; vi.spyOn(storage, 'readFromDb')`, check: (r) => r.usesModuleMock && r.technique === 'module-mock' && !r.usesGlobalPatch },
+      { name: 'D-12 node:async_hooks runtime internal hook blocked', code: `import { createHook } from 'node:async_hooks'; createHook({ init() {} }).enable()`, check: (r) => r.usesGlobalPatch && r.technique === 'global-patch' },
+      { name: 'D-12 node:worker_threads receiveMessageOnPort blocked', code: `import { receiveMessageOnPort } from 'node:worker_threads'; void receiveMessageOnPort`, check: (r) => r.usesGlobalPatch && r.technique === 'global-patch' },
       { name: 'A-01 import type EP not execution-points', code: `import type { ExecutionPoint } from 'execution-points-prototype'; export type X = ExecutionPoint<any, any>`, check: (r) => !r.usesExecutionPoints && r.technique === 'none' },
       { name: 'allows setTimeout with active useFakeTimers', code: `import { vi } from 'vitest'; vi.useFakeTimers(); setTimeout(() => {}, 10); vi.advanceTimersByTimeAsync(10)`, check: (r) => !r.usesRealSleep && r.usesFakeTimers },
       { name: 'ignores setTimeout in comment', code: `// no setTimeout\nimport { expect, test } from 'vitest'\ntest('ok', () => expect(1).toBe(1))`, check: (r) => !r.usesRealSleep && !r.usesGlobalPatch },
@@ -2150,6 +2210,7 @@ test('hangs forever waiting for uncalled seam', async () => {
       'utf8',
     )
     const cheats = buildMustRejectCheats(buggyStale)
+    cheatCount = cheats.length
     for (const ch of cheats) {
       const baseline = readTaskBaselineFiles(ch.taskId)
       const graded = await gradeTrialPhase({
@@ -2326,7 +2387,7 @@ test('hangs forever waiting for uncalled seam', async () => {
     process.exit(1)
   }
   console.log(
-    `Self-test PASSED (isolation, AST+runtime guards, ${cheats.length} cheats rejected, ${GOOD_WITNESSES.length} legal witnesses passed, 10 tasks, ${CALIBRATION_VARIANTS.length} calibration variants, and all single-bug mutants rejected by oracle).`,
+    `Self-test PASSED (isolation, AST+runtime guards, ${cheatCount} cheats rejected, ${GOOD_WITNESSES.length} legal witnesses passed, 10 tasks, ${CALIBRATION_VARIANTS.length} calibration variants, and all single-bug mutants rejected by oracle).`,
   )
 }
 
@@ -2490,10 +2551,86 @@ function printSummary(results, byArm, outDir) {
   console.log(`Run \`node bench/analyze.mjs ${path.join(outDir, 'results.jsonl')}\` for full stratified report.`)
 }
 
+async function runRegrade(regradeDir) {
+  const srcJsonl = path.join(regradeDir, 'results.jsonl')
+  if (!existsSync(srcJsonl)) throw new Error(`Missing ${srcJsonl}`)
+  const origRows = readFileSync(srcJsonl, 'utf8')
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l))
+
+  const provenance = computeProvenance()
+  const runTmpRoot = realpathSync(mkdtempSync(path.join(realpathSync(tmpdir()), 'ep-regrade-')))
+  const toolchains = prepareToolchains(REPO_ROOT, runTmpRoot)
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const outJsonl = path.join(regradeDir, `regraded-${stamp}.jsonl`)
+
+  console.log(`Re-grading ${origRows.length} rows from ${regradeDir} -> ${outJsonl}`)
+  try {
+    for (let i = 0; i < origRows.length; i++) {
+      const orig = origRows[i]
+      if (orig.notStarted || orig.aborted) {
+        appendFileSync(outJsonl, JSON.stringify(orig) + '\n')
+        continue
+      }
+      const trialDir = path.join(regradeDir, 'trials', orig.trialId)
+      const srcFiles = collectRelativeFiles(trialDir, 'src')
+      const stdout = existsSync(path.join(trialDir, 'events.jsonl'))
+        ? readFileSync(path.join(trialDir, 'events.jsonl'), 'utf8')
+        : ''
+      const usageRaw = existsSync(path.join(trialDir, 'usage.json'))
+        ? JSON.parse(readFileSync(path.join(trialDir, 'usage.json'), 'utf8'))
+        : null
+      const baseline = readTaskBaselineFiles(orig.taskId)
+      const r = await gradeTrialPhase({
+        phase1: {
+          trialId: orig.trialId,
+          taskId: orig.taskId,
+          arm: orig.arm,
+          model: orig.model,
+          reasoning: orig.reasoning,
+          trialIndex: orig.trialIndex ?? 1,
+          promptStyle: orig.promptStyle ?? 'symptom',
+          trialLogDir: null,
+          cli: {
+            stdout,
+            stderr: '',
+            exitCode: orig.exitCode ?? 0,
+            timedOut: Boolean(orig.timedOut),
+            spawnError: orig.spawnError ?? null,
+            durationMs: orig.durationMs ?? 0,
+            usageRaw,
+          },
+          initialSnapshot: baseline,
+          allWorkspaceFiles: srcFiles,
+        },
+        runId: orig.runId ?? 'regrade',
+        provenance,
+        copilotVersion: orig.copilotVersion ?? 'unknown',
+        toolchains,
+        parentDir: runTmpRoot,
+      })
+      appendFileSync(outJsonl, JSON.stringify(r) + '\n')
+      console.log(
+        `[${i + 1}/${origRows.length}] ${r.trialId} -> solved=${r.solved} (was ${orig.solved}) oracle=${r.oraclePass} adq=${r.adequateReproduction} validAny=${r.passesAtLeastOneValidFix}`,
+      )
+    }
+  } finally {
+    closeAuditApi()
+    toolchains.cleanup()
+    rmSync(runTmpRoot, { recursive: true, force: true })
+  }
+  console.log(`Re-grade complete: ${outJsonl}`)
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2))
   if (opts.selfTest) {
     await runSelfTest()
+    return
+  }
+  if (opts.regradeDir) {
+    await runRegrade(opts.regradeDir)
     return
   }
 
@@ -2557,18 +2694,18 @@ async function main() {
   activeTempDirs.add(runTmpRoot)
 
   console.log(
-    `Starting v2.2 benchmark runId=${runId}: ${jobs.length} trials (${blocks.length} blocks, prompt=${opts.promptStyle}, phaseSplit=${opts.phaseSplit}, concurrency=${opts.concurrency}, maxTotalCredits=${opts.maxTotalCredits}, seed=${opts.seed})`,
+    `Starting v2.3 benchmark runId=${runId}: ${jobs.length} trials (${blocks.length} blocks, prompt=${opts.promptStyle}, phaseSplit=${opts.phaseSplit}, concurrency=${opts.concurrency}, maxTotalCredits=${opts.maxTotalCredits}, seed=${opts.seed})`,
   )
   console.log(
     `Provenance: git=${provenance.gitCommit}${provenance.gitDirty ? '-dirty' : ''} harness=${provenance.harnessSha256} cal=${provenance.calibrationSha256} tool=${provenance.toolSha256} cli="${copilotVersion}"`,
   )
   console.log(`Output directory: ${outDir}`)
 
-  // Built-in macOS sleep assertion so long runs & Phase-2 grading don't pause on idle/disk sleep
+  // Built-in macOS sleep assertion (-i idle, -m disk, -s system sleep on AC; lid-close on battery is still caught by createSleepMonitor!)
   let caffeinateProc = null
   if (process.platform === 'darwin') {
     try {
-      caffeinateProc = spawn('caffeinate', ['-i', '-m', '-w', String(process.pid)], {
+      caffeinateProc = spawn('caffeinate', ['-i', '-m', '-s', '-w', String(process.pid)], {
         stdio: 'ignore',
       })
       caffeinateProc.on('error', () => {})
@@ -2760,7 +2897,14 @@ async function main() {
         }
       } else {
         for (const p1 of blockP1s) {
-          const r = await gradeTrialPhase({ phase1: p1, runId, provenance, copilotVersion, toolchains })
+          const r = await gradeTrialPhase({
+            phase1: p1,
+            runId,
+            provenance,
+            copilotVersion,
+            toolchains,
+            parentDir: runTmpRoot,
+          })
           results.push(r)
           writtenTrialIds.add(r.trialId)
           appendFileSync(jsonlPath, JSON.stringify(r) + '\n')
@@ -2782,12 +2926,13 @@ async function main() {
           provenance,
           copilotVersion,
           toolchains,
+          parentDir: runTmpRoot,
         })
         results.push(r)
         writtenTrialIds.add(r.trialId)
         appendFileSync(jsonlPath, JSON.stringify(r) + '\n')
         console.log(
-          `[P2 ${i + 1}/${phase1Outputs.length}] GRADED ${r.taskId} | ${r.arm} -> solved=${r.solved} oracle=${r.oraclePass} adqRed=${r.adequateReproduction} ref=${r.refFixPass} infra=${r.infraFailure} tech=${r.technique}`,
+          `[P2 ${i + 1}/${phase1Outputs.length}] GRADED ${r.taskId} | ${r.arm} -> solved=${r.solved} oracle=${r.oraclePass} adqRed=${r.adequateReproduction} validAny=${r.passesAtLeastOneValidFix} infra=${r.infraFailure} tech=${r.technique}`,
         )
       }
     }
@@ -2803,7 +2948,7 @@ async function main() {
   const cmh = stratifiedCMH(equalSeamRows, (r) => Boolean(r.solved))
   const rd = matchedRiskDifferenceCI(equalSeamRows, (r) => Boolean(r.solved))
   const summary = {
-    version: 'v2.2',
+    version: 'v2.3',
     runId,
     generatedAt: new Date().toISOString(),
     copilotVersion,

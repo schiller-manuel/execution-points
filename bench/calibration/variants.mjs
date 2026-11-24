@@ -6,8 +6,11 @@
  */
 
 import {
+  CANCEL_COMMIT_SERIAL_REF,
   CROSS_MODULE_TRANSFER_M1_ONLY_FROM,
   CROSS_MODULE_TRANSFER_REF,
+  CROSS_MODULE_TRANSFER_SERIAL_REF,
+  DEBOUNCE_SEARCH_ABORT_REF,
   DEBOUNCE_SEARCH_M1_NO_DISPOSE,
   DEBOUNCE_SEARCH_M2_NO_SEQ,
   DEBOUNCE_SEARCH_REF,
@@ -16,14 +19,17 @@ import {
   DOUBLE_SUBMIT_REF,
   EVENT_ORDER_M1_NO_MONOTONIC,
   EVENT_ORDER_REF,
+  EVENT_ORDER_WATERMARK_REF,
   P2_CALIBRATION_VARIANTS,
   P2_REFERENCE_FIXES,
   RETRY_STORM_M1_NO_EPOCH,
   RETRY_STORM_M2_NO_PROBE_LOCK,
   RETRY_STORM_REF,
+  RETRY_STORM_TOKEN_REF,
   SINGLE_FLIGHT_M1_STAMPEDE_ONLY,
   SINGLE_FLIGHT_M2_INVALIDATION_ONLY,
   STALE_CACHE_V9_REVISION,
+  TOKEN_SESSION_LATE_DELETE,
   TOKEN_SESSION_T1B_LOGOUT_BROKEN,
 } from './p2-variants.mjs'
 
@@ -551,8 +557,9 @@ export async function getActiveToken(userId: string): Promise<string | null> {
   if (!current || current.epoch !== expectedEpoch) {
     return null
   }
-  current.token = verified
-  return verified
+  // D-13: Concurrent reads within one active session converge on a single token
+  current.token ??= verified
+  return current.token
 }
 
 export async function logout(userId: string): Promise<void> {
@@ -655,8 +662,8 @@ export async function getActiveToken(userId: string): Promise<string | null> {
   if (sessions.get(userId) !== existing) return null
   const verified = await verifyTokenPolicy(userId, raw)
   if (sessions.get(userId) !== existing) return null
-  existing.token = verified
-  return verified
+  existing.token ??= verified
+  return existing.token
 }
 
 export async function logout(userId: string): Promise<void> {
@@ -1220,6 +1227,7 @@ export const VALID_FIX_VARIANTS = {
   ],
   'token-session': [
     { id: 'T3-ref', files: { 'src/session-manager.ts': TOKEN_SESSION_T3 } },
+    { id: 'T6-late-delete', files: { 'src/session-manager.ts': TOKEN_SESSION_LATE_DELETE } },
     { id: 'T2a-early-abort', files: { 'src/session-manager.ts': TOKEN_SESSION_T2A } },
     { id: 'T2b-object-id', files: { 'src/session-manager.ts': TOKEN_SESSION_T2B } },
     { id: 'T4-two-callsites', files: { 'src/session-manager.ts': TOKEN_SESSION_T4 } },
@@ -1235,6 +1243,7 @@ export const VALID_FIX_VARIANTS = {
   ],
   'cancel-commit': [
     { id: 'CC-ref', files: { 'src/job-runner.ts': CANCEL_COMMIT_REF } },
+    { id: 'CC-serial-stage', files: { 'src/job-runner.ts': CANCEL_COMMIT_SERIAL_REF } },
   ],
   'double-submit': [
     { id: 'DS-ref', files: { 'src/payment-processor.ts': DOUBLE_SUBMIT_REF } },
@@ -1242,15 +1251,19 @@ export const VALID_FIX_VARIANTS = {
   ],
   'debounce-search': [
     { id: 'DB-ref', files: { 'src/search-controller.ts': DEBOUNCE_SEARCH_REF } },
+    { id: 'DB-abort-design', files: { 'src/search-controller.ts': DEBOUNCE_SEARCH_ABORT_REF } },
   ],
   'retry-storm': [
     { id: 'RS-ref', files: { 'src/resilient-client.ts': RETRY_STORM_REF } },
+    { id: 'RS-token-design', files: { 'src/resilient-client.ts': RETRY_STORM_TOKEN_REF } },
   ],
   'event-order': [
     { id: 'EO-ref', files: { 'src/order-projector.ts': EVENT_ORDER_REF } },
+    { id: 'EO-watermark-design', files: { 'src/order-projector.ts': EVENT_ORDER_WATERMARK_REF } },
   ],
   'cross-module-transfer': [
     { id: 'CM-ref', files: { 'src/ledger.ts': CROSS_MODULE_TRANSFER_REF } },
+    { id: 'CM-serial-design', files: { 'src/ledger.ts': CROSS_MODULE_TRANSFER_SERIAL_REF } },
   ],
 }
 

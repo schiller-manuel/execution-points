@@ -134,6 +134,45 @@ export function submitPayment(
 }
 `
 
+// G-11 must-fail calibration variant: deduplicates on success, but when a joined in-flight
+// promise rejects, waiters retry directly without registering a new in-flight promise -> double-charges!
+export const DOUBLE_SUBMIT_BYPASS = `${DOUBLE_SUBMIT_BASE_HELPERS}
+
+async function chargeDirect(idempotencyKey: string, amountCents: number): Promise<PaymentReceipt> {
+  await validatePayment(amountCents)
+  await reserveFunds(idempotencyKey, amountCents)
+  const chargeId = await chargeGateway(idempotencyKey, amountCents)
+  const receipt: PaymentReceipt = { idempotencyKey, amountCents, chargeId }
+  receipts.set(idempotencyKey, receipt)
+  return { ...receipt }
+}
+
+export async function submitPayment(
+  idempotencyKey: string,
+  amountCents: number,
+): Promise<PaymentReceipt> {
+  const existing = receipts.get(idempotencyKey)
+  if (existing) return { ...existing }
+  const active = inflight.get(idempotencyKey)
+  if (active) {
+    try {
+      return { ...(await active) }
+    } catch {
+      // BUG (DS-BYPASS): retries directly without re-registering inflight -> 2 waiters both charge!
+      return chargeDirect(idempotencyKey, amountCents)
+    }
+  }
+  const promise = chargeDirect(idempotencyKey, amountCents)
+  inflight.set(idempotencyKey, promise)
+  promise
+    .finally(() => {
+      if (inflight.get(idempotencyKey) === promise) inflight.delete(idempotencyKey)
+    })
+    .catch(() => {})
+  return promise
+}
+`
+
 export const DOUBLE_SUBMIT_POISON = `${DOUBLE_SUBMIT_BASE_HELPERS}
 
 // Mutant DS1: deduplicates but forgets to clean up inflight on rejection -> poisons retries
@@ -722,6 +761,411 @@ export async function updateProfile(id: string, name: string): Promise<Profile> 
 }
 `
 
+// ── G-1 & G-4/N-10 design-diverse second valid fixes for all tasks ──────────
+
+// G-1: cancel-commit design 2 — keeps baseline `${jobId}.stage.tmp` filename via per-job serialization
+export const CANCEL_COMMIT_SERIAL_REF = `import fs from 'node:fs/promises'
+import path from 'node:path'
+
+export interface JobRecord {
+  jobId: string
+  status: 'running' | 'completed' | 'cancelled'
+  payload?: string
+  result?: string
+}
+
+export interface JobRunner {
+  startJob(jobId: string, payload: string): Promise<JobRecord>
+  cancelJob(jobId: string): Promise<JobRecord>
+  getJobState(jobId: string): Promise<JobRecord | null>
+}
+
+export function createJobRunner(dataDir: string): JobRunner {
+  const statePath = (jobId: string) => path.join(dataDir, \`\${jobId}.json\`)
+  const stagePath = (jobId: string) => path.join(dataDir, \`\${jobId}.stage.tmp\`)
+  const latestGen = new Map<string, number>()
+  const jobChains = new Map<string, Promise<unknown>>()
+
+  function bumpGen(jobId: string): number {
+    const g = (latestGen.get(jobId) ?? 0) + 1
+    latestGen.set(jobId, g)
+    return g
+  }
+
+  function serialize<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = jobChains.get(jobId) ?? Promise.resolve()
+    const next = prev.catch(() => {}).then(fn)
+    jobChains.set(jobId, next)
+    return next
+  }
+
+  async function readState(jobId: string): Promise<JobRecord | null> {
+    try {
+      const raw = await fs.readFile(statePath(jobId), 'utf8')
+      return JSON.parse(raw) as JobRecord
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+      throw err
+    }
+  }
+
+  async function writeState(record: JobRecord): Promise<void> {
+    await fs.writeFile(statePath(record.jobId), JSON.stringify(record), 'utf8')
+  }
+
+  function startJob(jobId: string, payload: string): Promise<JobRecord> {
+    const gen = bumpGen(jobId)
+    const stale = () => latestGen.get(jobId) !== gen
+    return serialize(jobId, async () => {
+      if (stale()) return { jobId, status: 'cancelled' }
+      await writeState({ jobId, status: 'running', payload })
+      if (stale()) return { jobId, status: 'cancelled' }
+
+      const computed = \`processed:\${payload.trim().toUpperCase()}\`
+      await fs.writeFile(stagePath(jobId), computed, 'utf8')
+      if (stale()) {
+        await fs.rm(stagePath(jobId), { force: true })
+        return { jobId, status: 'cancelled' }
+      }
+
+      const staged = await fs.readFile(stagePath(jobId), 'utf8')
+      if (stale()) {
+        await fs.rm(stagePath(jobId), { force: true })
+        return { jobId, status: 'cancelled' }
+      }
+
+      const completed: JobRecord = { jobId, status: 'completed', payload, result: staged }
+      await writeState(completed)
+      await fs.rm(stagePath(jobId), { force: true })
+      return completed
+    })
+  }
+
+  function cancelJob(jobId: string): Promise<JobRecord> {
+    const gen = bumpGen(jobId)
+    return serialize(jobId, async () => {
+      if (latestGen.get(jobId) !== gen) return { jobId, status: 'cancelled' }
+      const cancelled: JobRecord = { jobId, status: 'cancelled' }
+      await writeState(cancelled)
+      await fs.rm(stagePath(jobId), { force: true })
+      return cancelled
+    })
+  }
+
+  async function getJobState(jobId: string): Promise<JobRecord | null> {
+    return readState(jobId)
+  }
+
+  return { startJob, cancelJob, getJobState }
+}
+`
+
+// G-4: debounce-search design 2 — AbortController per search instead of numeric requestSeq
+export const DEBOUNCE_SEARCH_ABORT_REF = `import { fetchSearchResults } from './search-api'
+
+export interface SearchSnapshot {
+  query: string
+  results: string[]
+  disposed: boolean
+}
+
+export interface SearchController {
+  onInput(query: string): void
+  flush(): Promise<void>
+  dispose(): void
+  getSnapshot(): SearchSnapshot
+}
+
+export function createSearchController(debounceMs = 20): SearchController {
+  let latestQuery = ''
+  let latestResults: string[] = []
+  let disposed = false
+  let activeController: AbortController | null = null
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const pending = new Set<Promise<void>>()
+
+  function runSearch(query: string, controller: AbortController): Promise<void> {
+    const task = (async () => {
+      const results = await fetchSearchResults(query)
+      if (disposed || controller.signal.aborted) return
+      latestQuery = query
+      latestResults = results
+    })()
+    pending.add(task)
+    task.finally(() => pending.delete(task)).catch(() => {})
+    return task
+  }
+
+  function onInput(query: string): void {
+    if (disposed) return
+    if (timer !== null) clearTimeout(timer)
+    activeController?.abort()
+    const controller = new AbortController()
+    activeController = controller
+    timer = setTimeout(() => {
+      timer = null
+      if (disposed || controller.signal.aborted) return
+      void runSearch(query, controller)
+    }, debounceMs)
+  }
+
+  async function flush(): Promise<void> {
+    while (pending.size > 0) {
+      await Promise.all([...pending])
+    }
+  }
+
+  function dispose(): void {
+    disposed = true
+    activeController?.abort()
+    activeController = null
+    if (timer !== null) {
+      clearTimeout(timer)
+      timer = null
+    }
+  }
+
+  function getSnapshot(): SearchSnapshot {
+    return { query: latestQuery, results: [...latestResults], disposed }
+  }
+
+  return { onInput, flush, dispose, getSnapshot }
+}
+`
+
+// G-4: retry-storm design 2 — object-identity cycle token instead of numeric epoch
+export const RETRY_STORM_TOKEN_REF = `import { callUpstream } from './upstream'
+
+export type BreakerState = 'CLOSED' | 'OPEN' | 'HALF_OPEN'
+
+export interface ResilientClient {
+  request(payload: string): Promise<string>
+  getState(): BreakerState
+  forceHalfOpen(): void
+}
+
+export function createResilientClient(failureThreshold = 2): ResilientClient {
+  let state: BreakerState = 'CLOSED'
+  let consecutiveFailures = 0
+  let cycleToken = {}
+  let activeProbe: Promise<string> | null = null
+
+  function forceHalfOpen(): void {
+    if (state === 'OPEN') {
+      state = 'HALF_OPEN'
+      activeProbe = null
+      cycleToken = {}
+    }
+  }
+
+  async function request(payload: string): Promise<string> {
+    if (state === 'OPEN') {
+      throw new Error('Circuit breaker is OPEN')
+    }
+    const isProbe = state === 'HALF_OPEN'
+    if (isProbe && activeProbe !== null) {
+      throw new Error('Circuit breaker probe already in flight (OPEN)')
+    }
+
+    const myToken = cycleToken
+    const run = (async () => {
+      try {
+        const result = await callUpstream(payload)
+        if (myToken === cycleToken) {
+          consecutiveFailures = 0
+          if (isProbe) {
+            state = 'CLOSED'
+            cycleToken = {}
+          }
+        }
+        return result
+      } catch (err) {
+        if (myToken === cycleToken) {
+          consecutiveFailures += 1
+          if (isProbe || consecutiveFailures >= failureThreshold) {
+            state = 'OPEN'
+            cycleToken = {}
+          }
+        }
+        throw err
+      } finally {
+        if (isProbe && activeProbe === run) {
+          activeProbe = null
+        }
+      }
+    })()
+
+    if (isProbe) activeProbe = run
+    return run
+  }
+
+  return { request, getState: () => state, forceHalfOpen }
+}
+`
+
+// G-4: event-order design 2 — highest-seq watermark guard without double readOrder
+export const EVENT_ORDER_WATERMARK_REF = `import { enrichOrderStatus, readOrder, resetOrderRepo, saveOrder, type OrderRecord } from './order-repo'
+
+export type { OrderRecord }
+
+export interface OrderEvent {
+  orderId: string
+  seq: number
+  status: string
+}
+
+const chains = new Map<string, Promise<unknown>>()
+const watermarks = new Map<string, number>()
+
+export function resetProjector(): void {
+  chains.clear()
+  watermarks.clear()
+  resetOrderRepo()
+}
+
+export async function getOrder(orderId: string): Promise<OrderRecord | null> {
+  return readOrder(orderId)
+}
+
+export function applyOrderEvent(event: OrderEvent): Promise<OrderRecord> {
+  const prev = chains.get(event.orderId) ?? Promise.resolve()
+  const task = prev
+    .catch(() => {})
+    .then(async () => {
+      const current = await readOrder(event.orderId)
+      const knownMax = Math.max(current?.seq ?? -Infinity, watermarks.get(event.orderId) ?? -Infinity)
+      if (event.seq <= knownMax && current) {
+        return current
+      }
+      const normalized = await enrichOrderStatus(event.status)
+      const next: OrderRecord = { orderId: event.orderId, seq: event.seq, status: normalized }
+      watermarks.set(event.orderId, event.seq)
+      await saveOrder(next)
+      return { ...next }
+    })
+  chains.set(event.orderId, task)
+  return task
+}
+`
+
+// G-4: cross-module-transfer design 2 — single serialized ledger queue (deadlock-free without lock sorting)
+export const CROSS_MODULE_TRANSFER_SERIAL_REF = `import { readBalance, resetAccounts, seedAccount, writeBalance } from './account-store'
+import { recordTransfer, resetAuditLog } from './audit-log'
+
+let ledgerQueue: Promise<unknown> = Promise.resolve()
+
+export function resetLedger(): void {
+  ledgerQueue = Promise.resolve()
+  resetAccounts()
+  resetAuditLog()
+}
+
+export function createAccount(accountId: string, initialBalance: number): void {
+  seedAccount(accountId, initialBalance)
+}
+
+export async function getBalance(accountId: string): Promise<number> {
+  return readBalance(accountId)
+}
+
+export function transfer(fromId: string, toId: string, amount: number): Promise<void> {
+  if (!Number.isInteger(amount) || amount <= 0) {
+    return Promise.reject(new Error('Transfer amount must be a positive integer'))
+  }
+  if (fromId === toId) {
+    return Promise.reject(new Error('Cannot transfer to the same account'))
+  }
+  const run = ledgerQueue
+    .catch(() => {})
+    .then(async () => {
+      const fromBal = await readBalance(fromId)
+      if (fromBal < amount) throw new Error('Insufficient funds')
+      const toBal = await readBalance(toId)
+      await writeBalance(fromId, fromBal - amount)
+      await writeBalance(toId, toBal + amount)
+      await recordTransfer({ fromId, toId, amount })
+    })
+  ledgerQueue = run
+  return run
+}
+`
+
+// D-13: token-session design 2 — single token per session + late delete at end of logout
+export const TOKEN_SESSION_LATE_DELETE = `interface SessionRecord {
+  userId: string
+  token: string | null
+  epoch: number
+}
+
+const sessions = new Map<string, SessionRecord>()
+const userEpochs = new Map<string, number>()
+let tokenSeq = 0
+
+${YIELD_IO}
+
+async function requestNewToken(userId: string): Promise<string> {
+  await yieldIo()
+  tokenSeq += 1
+  return \`tok-\${userId}-\${tokenSeq}\`
+}
+
+async function verifyTokenPolicy(_userId: string, token: string): Promise<string> {
+  await yieldIo()
+  return token
+}
+
+async function prepareRevocation(_userId: string): Promise<void> {
+  await yieldIo()
+}
+
+async function notifyAuthServer(_userId: string): Promise<void> {
+  await yieldIo()
+}
+
+async function flushAuditLog(_userId: string): Promise<void> {
+  await yieldIo()
+}
+
+export function resetSessions(): void {
+  sessions.clear()
+  userEpochs.clear()
+  tokenSeq = 0
+}
+
+export function login(userId: string): void {
+  const epoch = (userEpochs.get(userId) ?? 0) + 1
+  userEpochs.set(userId, epoch)
+  sessions.set(userId, { userId, token: null, epoch })
+}
+
+export async function getActiveToken(userId: string): Promise<string | null> {
+  const existing = sessions.get(userId)
+  if (!existing) return null
+  if (existing.token !== null) return existing.token
+  const expectedEpoch = existing.epoch
+  const raw = await requestNewToken(userId)
+  const verified = await verifyTokenPolicy(userId, raw)
+  const current = sessions.get(userId)
+  if (!current || current.epoch !== expectedEpoch) {
+    return null
+  }
+  current.token ??= verified
+  return current.token
+}
+
+export async function logout(userId: string): Promise<void> {
+  const target = sessions.get(userId)
+  const logoutEpoch = (userEpochs.get(userId) ?? 0) + 1
+  userEpochs.set(userId, logoutEpoch)
+  await prepareRevocation(userId)
+  await notifyAuthServer(userId)
+  await flushAuditLog(userId)
+  if (target && sessions.get(userId) === target) {
+    sessions.delete(userId)
+  }
+}
+`
+
 export const P2_REFERENCE_FIXES = {
   'double-submit': { 'src/payment-processor.ts': DOUBLE_SUBMIT_REF },
   'debounce-search': { 'src/search-controller.ts': DEBOUNCE_SEARCH_REF },
@@ -734,6 +1178,7 @@ export const P2_CALIBRATION_VARIANTS = [
   // double-submit
   { id: 'DS0', task: 'double-submit', expectPass: false, label: 'buggy double-submit', useBaseline: true },
   { id: 'DS1', task: 'double-submit', expectPass: false, label: 'rejection poisons inflight map', files: { 'src/payment-processor.ts': DOUBLE_SUBMIT_POISON } },
+  { id: 'DSB', task: 'double-submit', expectPass: false, label: 'G-11 DS-BYPASS waiter retries without inflight (double-charges)', files: { 'src/payment-processor.ts': DOUBLE_SUBMIT_BYPASS } },
   { id: 'DS2', task: 'double-submit', expectPass: true, label: 'reference double-submit fix (shared inflight)', files: { 'src/payment-processor.ts': DOUBLE_SUBMIT_REF } },
   { id: 'DS3', task: 'double-submit', expectPass: true, label: 'D-05 design-diverse per-key queue fix', files: { 'src/payment-processor.ts': DOUBLE_SUBMIT_QUEUE_REF } },
 
@@ -742,23 +1187,29 @@ export const P2_CALIBRATION_VARIANTS = [
   { id: 'DB1', task: 'debounce-search', expectPass: false, label: 'fixes stale order only, misses dispose', files: { 'src/search-controller.ts': DEBOUNCE_SEARCH_M1_NO_DISPOSE } },
   { id: 'DB2', task: 'debounce-search', expectPass: false, label: 'fixes dispose only, misses stale order', files: { 'src/search-controller.ts': DEBOUNCE_SEARCH_M2_NO_SEQ } },
   { id: 'DB3', task: 'debounce-search', expectPass: true, label: 'reference debounce-search fix', files: { 'src/search-controller.ts': DEBOUNCE_SEARCH_REF } },
+  { id: 'DB4', task: 'debounce-search', expectPass: true, label: 'G-4 AbortController debounce-search fix', files: { 'src/search-controller.ts': DEBOUNCE_SEARCH_ABORT_REF } },
 
   // retry-storm
   { id: 'RS0', task: 'retry-storm', expectPass: false, label: 'buggy retry-storm', useBaseline: true },
   { id: 'RS1', task: 'retry-storm', expectPass: false, label: 'fixes probe storm only, misses stale failure', files: { 'src/resilient-client.ts': RETRY_STORM_M1_NO_EPOCH } },
   { id: 'RS2', task: 'retry-storm', expectPass: false, label: 'fixes stale failure only, misses probe storm', files: { 'src/resilient-client.ts': RETRY_STORM_M2_NO_PROBE_LOCK } },
   { id: 'RS3', task: 'retry-storm', expectPass: true, label: 'reference retry-storm fix', files: { 'src/resilient-client.ts': RETRY_STORM_REF } },
+  { id: 'RS4', task: 'retry-storm', expectPass: true, label: 'G-4 object-token retry-storm fix', files: { 'src/resilient-client.ts': RETRY_STORM_TOKEN_REF } },
 
   // event-order
   { id: 'EO0', task: 'event-order', expectPass: false, label: 'buggy event-order', useBaseline: true },
   { id: 'EO1', task: 'event-order', expectPass: false, label: 'serializes queue but drops monotonic seq check', files: { 'src/order-projector.ts': EVENT_ORDER_M1_NO_MONOTONIC } },
   { id: 'EO2', task: 'event-order', expectPass: true, label: 'reference event-order fix', files: { 'src/order-projector.ts': EVENT_ORDER_REF } },
+  { id: 'EO3', task: 'event-order', expectPass: true, label: 'G-4 watermark event-order fix', files: { 'src/order-projector.ts': EVENT_ORDER_WATERMARK_REF } },
 
   // cross-module-transfer
   { id: 'CM0', task: 'cross-module-transfer', expectPass: false, label: 'buggy cross-module-transfer', useBaseline: true },
   { id: 'CM1', task: 'cross-module-transfer', expectPass: false, label: 'locks only fromId (loses concurrent credit)', files: { 'src/ledger.ts': CROSS_MODULE_TRANSFER_M1_ONLY_FROM } },
   { id: 'CM2', task: 'cross-module-transfer', expectPass: true, label: 'reference cross-module-transfer fix', files: { 'src/ledger.ts': CROSS_MODULE_TRANSFER_REF } },
+  { id: 'CM3', task: 'cross-module-transfer', expectPass: true, label: 'G-4 serialized-ledger cross-module-transfer fix', files: { 'src/ledger.ts': CROSS_MODULE_TRANSFER_SERIAL_REF } },
 
-  // Also verify T1b fails token-session grader
+  // Additional calibration checks for G-1 & D-13
+  { id: 'CC3', task: 'cancel-commit', expectPass: true, label: 'G-1 serialized cancel-commit keeping baseline stage.tmp', files: { 'src/job-runner.ts': CANCEL_COMMIT_SERIAL_REF } },
+  { id: 'T6', task: 'token-session', expectPass: true, label: 'D-13 late-delete single-token token-session fix', files: { 'src/session-manager.ts': TOKEN_SESSION_LATE_DELETE } },
   { id: 'T1b', task: 'token-session', expectPass: false, label: 'fixes re-login only, misses logout resurrection', files: { 'src/session-manager.ts': TOKEN_SESSION_T1B_LOGOUT_BROKEN } },
 ]

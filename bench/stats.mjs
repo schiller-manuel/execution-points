@@ -77,9 +77,10 @@ export function exactMcNemarP(treatOnly, ctrlOnly) {
 function stratumKey(r) {
   const model = r.actualModel || r.model || 'unknown'
   const prompt = r.promptStyle || 'unknown'
-  // N-27: Include trialIndex so replicate blocks pair 1:1 and exact McNemar stays defined with replicates!
+  // N-27: Include runId + trialIndex so re-runs never merge into 2x2 blocks and exact McNemar stays defined
+  const run = r.runId || 'run'
   const trial = r.trialIndex ?? 1
-  return `${r.taskId}|${model}|${r.reasoning}|${prompt}|t${trial}`
+  return `${run}|${r.taskId}|${model}|${r.reasoning}|${prompt}|t${trial}`
 }
 
 export function stratifiedCMH(rows, getOutcome = (r) => Boolean(r.solved)) {
@@ -233,5 +234,65 @@ export function matchedRiskDifferenceCI(rows, getOutcome = (r) => Boolean(r.solv
     high: Number(Math.min(1, diff + du).toFixed(4)),
     blocks: matchedBlocks,
     method: 'newcombe-paired',
+  }
+}
+
+/**
+ * Paired ITT billed-credit difference (Treatment - Control) per matched block
+ * with deterministic bootstrap 95% CI (closes G-9).
+ */
+export function pairedCreditDiffCI(rows, iters = 2000) {
+  const blocks = new Map()
+  for (const r of rows) {
+    if (r.arm !== 'control' && r.arm !== 'treatment') continue
+    if (r.notStarted || r.usage?.usageMissing || typeof r.usage?.aiCredits !== 'number') continue
+    const key = stratumKey(r)
+    const b = blocks.get(key) ?? {}
+    b[r.arm] = r.usage.aiCredits
+    blocks.set(key, b)
+  }
+
+  const diffs = []
+  let treatCheaper = 0
+  for (const b of blocks.values()) {
+    if (typeof b.treatment === 'number' && typeof b.control === 'number') {
+      const d = b.treatment - b.control
+      diffs.push(d)
+      if (d < 0) treatCheaper++
+    }
+  }
+  if (diffs.length === 0) {
+    return { blocks: 0, meanDiff: null, low: null, high: null, treatCheaper: 0 }
+  }
+  const meanDiff = diffs.reduce((s, x) => s + x, 0) / diffs.length
+  if (diffs.length === 1) {
+    return {
+      blocks: 1,
+      meanDiff: Number(meanDiff.toFixed(2)),
+      low: null,
+      high: null,
+      treatCheaper,
+    }
+  }
+
+  let seed = 1337
+  const rand = () => {
+    seed = (Math.imul(1664525, seed) + 1013904223) >>> 0
+    return seed / 4294967296
+  }
+  const samples = []
+  for (let i = 0; i < iters; i++) {
+    let sum = 0
+    for (let j = 0; j < diffs.length; j++) sum += diffs[Math.floor(rand() * diffs.length)]
+    samples.push(sum / diffs.length)
+  }
+  samples.sort((a, b) => a - b)
+
+  return {
+    blocks: diffs.length,
+    meanDiff: Number(meanDiff.toFixed(2)),
+    low: Number(samples[Math.floor(iters * 0.025)].toFixed(2)),
+    high: Number(samples[Math.floor(iters * 0.975)].toFixed(2)),
+    treatCheaper,
   }
 }

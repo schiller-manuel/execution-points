@@ -54,75 +54,100 @@ describe('hidden oracle grader: double-submit (yield-engine)', () => {
     }
   })
 
-  test('failed in-flight payment does not poison subsequent retry', async () => {
-    resetPayments()
-    failNextCharge('k1', 'Gateway 502')
-    const errs: string[] = []
-    const successes: PaymentReceipt[] = []
-    const sched = createYieldScheduler()
-    sched.spawn(
-      0,
-      async () => {
-        try {
-          successes.push(await submitPayment('k1', 500))
-        } catch (err) {
-          errs.push((err as Error).message)
-        }
-      },
-      { atStep: 0 },
-    )
-    sched.spawn(
-      1,
-      async () => {
-        try {
-          successes.push(await submitPayment('k1', 500))
-        } catch (err) {
-          errs.push((err as Error).message)
-        }
-      },
-      { atStep: 0 },
-    )
-    await sched.run((ready) => ready[0])
+  test('failed in-flight payment does not poison subsequent retry and never double-charges (N>=3, catches DS-BYPASS / G-11)', async () => {
+    for (const mode of ['first', 'last', 'alt'] as const) {
+      resetPayments()
+      failNextCharge('k1', 'Gateway 502')
+      const errs: string[] = []
+      const successes: PaymentReceipt[] = []
+      const sched = createYieldScheduler()
+      for (let i = 0; i < 3; i++) {
+        sched.spawn(
+          i,
+          async () => {
+            try {
+              successes.push(await submitPayment('k1', 500))
+            } catch (err) {
+              errs.push((err as Error).message)
+            }
+          },
+          { atStep: 0 },
+        )
+      }
+      let step = 0
+      await sched.run((ready) => {
+        if (mode === 'first') return ready[0]
+        if (mode === 'last') return ready[ready.length - 1]
+        return ready[step++ % ready.length]
+      })
 
-    // D-05: Both valid designs satisfy the prompt:
-    // (A) Shared in-flight promise: both concurrent callers receive the failure (errs=2, successes=0, charges=0)
-    // (B) Per-key queue/mutex: caller 1 fails, caller 2 retries and succeeds once (errs=1, successes=1, charges=1)
-    const countAfterWave = getGatewayChargeCount('k1')
-    const sharedFailure = errs.length === 2 && successes.length === 0 && countAfterWave === 0
-    const queuedRetry = errs.length === 1 && successes.length === 1 && countAfterWave === 1
-    expect(sharedFailure || queuedRetry).toBe(true)
+      // D-05 design-neutral law for N=3 concurrent callers with 1 injected gateway failure:
+      // - At least 1 caller saw the injected failure; errors + successes === 3
+      // - Gateway charged AT MOST ONCE during the wave (catches DS-BYPASS double-charge!)
+      // - If any callers succeeded via queued retry, charge count is 1 and all share one receipt
+      expect(errs.length + successes.length).toBe(3)
+      expect(errs.length).toBeGreaterThanOrEqual(1)
+      const countAfterWave = getGatewayChargeCount('k1')
+      expect(countAfterWave).toBeLessThanOrEqual(1)
+      if (successes.length > 0) {
+        expect(countAfterWave).toBe(1)
+        for (const r of successes) expect(r).toEqual(successes[0])
+      } else {
+        expect(countAfterWave).toBe(0)
+      }
 
-    // Subsequent call must never remain poisoned and total charges must stay 1
-    const retry = await submitPayment('k1', 500)
-    expect(retry.amountCents).toBe(500)
-    if (queuedRetry) expect(retry).toEqual(successes[0])
-    expect(getGatewayChargeCount('k1')).toBe(1)
+      // Subsequent call must never remain poisoned and total charges must be exactly 1
+      const retry = await submitPayment('k1', 500)
+      expect(retry.amountCents).toBe(500)
+      if (successes.length > 0) expect(retry).toEqual(successes[0])
+      expect(getGatewayChargeCount('k1')).toBe(1)
+    }
   })
 
-  test('randomized schedules with multi-key isolation', async () => {
+  test('randomized schedules with multi-key isolation and injected failures', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.array(fc.integer({ min: 0, max: 1000 }), { minLength: 40, maxLength: 80 }),
-        async (picks) => {
+        fc.boolean(),
+        async (picks, injectFail) => {
           resetPayments()
-          let a1!: PaymentReceipt
-          let a2!: PaymentReceipt
+          if (injectFail) failNextCharge('k-a', 'Gateway 502')
+          const aSuccesses: PaymentReceipt[] = []
+          const aErrors: string[] = []
           let b1!: PaymentReceipt
           const sched = createYieldScheduler()
-          sched.spawn(0, async () => { a1 = await submitPayment('k-a', 100) }, { atStep: 0 })
-          sched.spawn(1, async () => { a2 = await submitPayment('k-a', 100) }, { atStep: 1 })
-          sched.spawn(2, async () => { b1 = await submitPayment('k-b', 200) }, { atStep: 0 })
+          for (let i = 0; i < 3; i++) {
+            sched.spawn(
+              i,
+              async () => {
+                try {
+                  aSuccesses.push(await submitPayment('k-a', 100))
+                } catch (err) {
+                  aErrors.push((err as Error).message)
+                }
+              },
+              { atStep: i === 2 ? 1 : 0 },
+            )
+          }
+          sched.spawn(3, async () => { b1 = await submitPayment('k-b', 200) }, { atStep: 0 })
           let idx = 0
           await sched.run((ready) => ready[picks[idx++ % picks.length] % ready.length])
 
-          expect(getGatewayChargeCount('k-a')).toBe(1)
+          expect(aSuccesses.length + aErrors.length).toBe(3)
+          expect(getGatewayChargeCount('k-a')).toBeLessThanOrEqual(1)
           expect(getGatewayChargeCount('k-b')).toBe(1)
-          expect(a1).toEqual(a2)
+          if (aSuccesses.length > 0) {
+            for (const r of aSuccesses) expect(r).toEqual(aSuccesses[0])
+            expect(b1.chargeId).not.toBe(aSuccesses[0].chargeId)
+          }
+          const finalA = await submitPayment('k-a', 100)
+          expect(getGatewayChargeCount('k-a')).toBe(1)
+          if (aSuccesses.length > 0) expect(finalA).toEqual(aSuccesses[0])
           expect(b1.idempotencyKey).toBe('k-b')
-          expect(b1.chargeId).not.toBe(a1.chargeId)
+          expect(b1.chargeId).not.toBe(finalA.chargeId)
         },
       ),
-      { numRuns: 20, seed: 4242 },
+      { numRuns: 24, seed: 4242 },
     )
   })
 })

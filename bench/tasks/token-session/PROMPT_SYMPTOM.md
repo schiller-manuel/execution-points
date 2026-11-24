@@ -4,8 +4,9 @@
 Under concurrent authentication traffic, users who log out sometimes remain authenticated on subsequent `getActiveToken(userId)` calls—or, after logging out and logging back in, end up with a revoked token from their previous session instead of their new session's token.
 
 Expected behavior:
-- After `logout(userId)` completes (with no subsequent `login(userId)`), `getActiveToken(userId)` must return `null`.
+- After `logout(userId)` completes (with no subsequent `login(userId)`), `getActiveToken(userId)` must return `null`. (Whether `logout` invalidates the session at start or upon completion is up to the implementation, provided no stale token survives after `logout` completes.)
 - After `logout(userId)` followed by `login(userId)`, an earlier session's in-flight `getActiveToken(userId)` must never overwrite the new session's token.
+- Concurrent `getActiveToken(userId)` calls within the same active session must converge on one token for that session (not return two different tokens).
 - Concurrent `login` / `logout` calls for one user (`'bob'`) must never invalidate or deny tokens to another logged-in user (`'alice'`).
 
 ## Your Task

@@ -162,64 +162,54 @@ A second probe-backed re-review of `c4c9e6f` (`bench-v2.1-re-review.md`) confirm
    - Restricted primary CMH / exact McNemar / uncorrected Newcombe paired RD to equal-capability Strata B + C (Stratum A reported separately), paired blocks by `trialIndex`, checked `--max-total-credits` at block boundaries (writing `not_started` rows), restricted E9 to `adequateReproduction === true` rows, made billed `aiCredits` the primary cost metric, omitted `--max-ai-credits` by default so CLI tool results don't inject live cost meters (`N-32`), and enforced full provenance-hash matching (including `calibrationSha256`, `lockfileSha256`, versions, and clean tree).
 
 ### 2026-11-23 — v2.2 Self-Test Verification (`node bench/run.mjs --self-test`)
-- **Toolchain symlink + `.bin` shim leak scan & whole-toolchain grader checksum:** PASS.
-- **Hardened AST auditor (28 test cases including `N-12`/`N-22`/`N-24`/`N-25`/`S10` + 7 prod cases):** PASS.
-- **Treatment virtual contract check & `timeout != true_red`:** PASS.
-- **8 adversarial must-reject cheats (`E-01`, `E-04`, `E-05`, `E-06`, `R-19`, `R-01`, `N-22`, `N-23`):** 8/8 REJECTED (`solved=false`).
-- **3 legal adequacy witnesses (`W-01` Treatment on `V9` and `V9_REV`, Control on `stale-cache-seam` `vf=3/3`):** 3/3 PASSED (`solved=true`, `adequateReproduction=true`).
-- **Baseline workspaces (10 tasks × 2 arms):** 20/20 PASS.
-- **Grader calibration corpus (49 variants including `N-11` `V9sw`/`SCS2` and `N-14` `V9ra`/`SCS3`/`SF3`):** 49/49 PASS.
-- **Hidden oracle rejection across ALL 16 single-bug mutants (`N-18`, including `CC-M1-shared-stage-file`):** 16/16 REJECTED.
-- **Production AST audit on 10 reference fixes:** 10/10 PASS.
+- All 110 individual checks across sections 1–10 printed `PASS` (49/49 calibration variants, 16/16 single-bug mutants rejected by hidden oracle, 8/8 constructed cheats rejected, 3/3 legal witnesses passed).
+- **Bug caught later in audit (`G-8`):** `const cheats` was scoped inside the `try` block, so after printing all 110 PASS lines the final log line threw `ReferenceError: cheats is not defined` and exited 1. Also note 5 uncommon sleep spellings still slipped both AST and runtime guard (none used in live runs). Fixed in v2.3.
 
 ### 2026-11-23 — v2.2 Multi-Model Pilot (22 Started Trials + 2 `not_started`, `afdd5a5`)
 *Run ID: `576a8346-1e65-4f19-9fea-bc0b2e67b236` · Output: `/Users/caligano/.ep-bench-results/v2-2026-11-23T17-51-32-082Z` · Copilot CLI 1.0.114 · Hardened `--sandbox` · `--phase-split` · `--prompt-style symptom` · `--seed 42` · `--max-total-credits 1000`*
 
 - **Live preflight (`N-00` + `N-30`):** PASS (`srcWritten=true`, `rootBlocked=true`, `17.8` credits).
-- **Zero infrastructure failures, zero write denials, zero global monkey-patching, zero out-of-workspace escapes** across all 22 started trials (`B12` `stale-cache / gemini-4-neon` cleanly marked `not_started` at block boundary after `1051.2/1000` cumulative credits).
-- **Hidden oracle pass rate:** 22/22 (100% — every agent produced an oracle-passing production fix).
+- **Health:** Zero edit-tool write denials, zero global monkey-patching, zero out-of-workspace reads across all 22 started trials (`B12` cleanly marked `not_started` at block boundary after `1051.2/1000` credits). One `ungradable` row (`cancel-commit | control | gemini`) was traced via `pmset -g log` to macOS Clamshell Sleep on battery; re-graded cleanly at `c70758a`, it is `ungradable=false` and remains `solved=false` (missed `CC-M1`). Note `claude-opus-5.5` also hit refused shell-write attempts (tracked as `shellWriteDenials` starting in v2.3).
+- **Hidden oracle pass rate:** 22/22 (100%).
 
-#### Results by Stratum (`bench/analyze.mjs`)
+### 2026-11-23 — v2.2 Remaining 6 Tasks & Full 10-Task Pooled Pilot (58 Started Trials / 29 Matched Blocks, `afdd5a5` + `c70758a`)
+*Batch 2 Run ID: `2edc0402-1b2c-4a92-91f7-298c5a83382e` · Output: `/Users/caligano/.ep-bench-results/v2-2026-11-23T18-59-46-092Z` · 36 trials / 18 blocks (`retry-storm`, `event-order`, `cross-module-transfer`, `debounce-search`, `token-session`, `double-submit`) · `1,230.3` credits · Seed 43. Batch 1 ran at `afdd5a5` and Batch 2 at `c70758a` (the only diff between those commits is `BENCHMARK-LOG.md`); all 7 code/task/calibration hashes match.*
 
-| Stratum | Arm | Solved | Adequate RED | EP Adoption | E9 False-Green (adq only) | E9 Valid-Fix Pass (adq only) | Billed Credits (per solved) |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| **Stratum B (`io-seam`: `stale-cache-seam`, `single-flight`)** | Control | **6/6** (100.0%) | 6/6 | 0/6 | 0.0% (0/12) | 15/15 (100.0%) | 243.1 (`40.5`/solved) |
-| **Stratum B (`io-seam`)** | Treatment | **6/6** (100.0%) | 6/6 | **4/6** | 0.0% (0/12) | 15/15 (100.0%) | 253.9 (`42.3`/solved) |
-| **Stratum C (`real-async`: `cancel-commit`)** | Control | **1/3** (33.3%) | 1/3 | 0/3 | 0.0% (0/2) | 1/1 (100.0%) | 138.4 (`138.4`/solved) |
-| **Stratum C (`real-async`: `cancel-commit`)** | Treatment | **2/3** (66.7%) | 2/3 | **1/3** | 0.0% (0/4) | 2/2 (100.0%) | 168.2 (`84.1`/solved) |
-| **Primary (Strata B + C equal-capability, 9 blocks)** | Control vs. Treatment | **7/9 vs. 8/9** | 7/9 vs. 8/9 | 0/9 vs. 5/9 | 0/14 vs. 0/16 | 16/16 vs. 17/17 | CMH `p=1`, exact McNemar `p=1`, Newcombe RD `+11.1pp [-13.8, +38.5]` |
-| **Stratum A (`closed-module`: `stale-cache`, separate)** | Control | **1/2** (50.0%) | 1/2 | 0/2 | **33.3%** (1/3) | 5/5 (100.0%) | 150.3 (`150.3`/solved) |
-| **Stratum A (`closed-module`, separate)** | Treatment | **2/2** (100.0%) | 2/2 | **2/2** | **0.0%** (0/6) | 8/10 (80.0%, `sel=2`, `assert=0`, `to=0`) | 79.4 (`39.7`/solved) |
+- **Batch 2 health:** Preflight PASS (`17.8` credits), `0/36` infra failures, `0/36` edit-tool write denials (`20` shell-write attempts by `claude-opus-5.5` were refused by shell policy), `0/36` global monkey-patching, `34/36` hidden oracle passes (both oracle failures were `claude-opus-5.5` Control & Treatment on `double-submit`, hitting the unstated `D-05` concurrent-joiner-failure law).
 
-#### Notable Empirical Findings from the Pilot
-1. **Organic adoption varies sharply by model (7/11 = 63.6% overall in Treatment):**
-   - `gemini-4-neon` chose `execution-points` on **3/3** started tasks (including `cancel-commit`, where it was the sole Treatment discordant solve over Control!).
-   - `claude-opus-5.5` chose `execution-points` on **3/4** tasks (`stale-cache-seam`, `single-flight`, `stale-cache`), using `vi.mock` only on `cancel-commit`.
-   - `gpt-6.2-astra` chose `module-mock` on **3/3** Strata B+C tasks and `execution-points` on **1/1** Stratum A task.
-   - Across all 7 Treatment trials that actually used `execution-points`, **7/7 (100%) solved** with **0/17 (0.0%) false greens** and **0 assertion/timeout false reds** (only 2 loud `selector_or_compile_break`s on `V7-multifile`).
-2. **Ingenious Control workaround on closed-module `stale-cache` (`gpt-6.2-astra`):**
-   - Without touching a single global, `gpt-6.2-astra` imported `node:async_hooks.createHook` + `node:worker_threads.receiveMessageOnPort` to intercept raw `MESSAGEPORT` libuv handles created inside `yieldIo()`, dequeue the message off the receiver port, hold it behind a barrier, and re-post it after release!
-   - It achieved `solved=PASS` (`5/5` valid-fix passes), **but** went falsely green (`1/3` FG) on `R3-setImmediate-io` because it depended on the `MessageChannel` implementation detail.
-   - Meanwhile `claude-opus-5.5` in Control spent **316.5s / 112.8 credits / 1.42M tokens** struggling on `stale-cache` and failed (`adqRed=NO`, `3/3` FG), whereas Treatment `claude-opus-5.5` solved cleanly with `execution-points` in **99.2s / 49.3 credits** (`0/3` FG).
-3. **Discordance & power calibration for the full matrix:**
-   - `io-seam` (`stale-cache-seam`, `single-flight`) is at ceiling (`6/6` in both arms — 0 discordant pairs!). Future matrix budget should focus on harder tasks with real discordance (`cancel-commit`, `cross-module-transfer`, `retry-storm`, `debounce-search`, `event-order`) and closed-module Stratum A (`stale-cache`, `token-session`, `double-submit`), plus `low` reasoning levels where task difficulty isn't saturated.
+#### Pooled 10-Task Stored Results (58 Started Trials / 29 Matched Blocks, official `c70758a` rule)
+*Per protocol discipline (`G-10`), the stored `c70758a` grading remains the primary record for this pool; no post-hoc `D-05` or `D-12` re-scoring is used for significance.*
 
-### 2026-11-23 — v2.2 Remaining 6 Tasks & Full 10-Task Pooled Pilot (58 Started Trials / 29 Matched Blocks, `c70758a`)
-*Batch 2 Run ID: `2edc0402-1b2c-4a92-91f7-298c5a83382e` · Output: `/Users/caligano/.ep-bench-results/v2-2026-11-23T18-59-46-092Z` · 36 trials / 18 blocks (`retry-storm`, `event-order`, `cross-module-transfer`, `debounce-search`, `token-session`, `double-submit`) · `1,230.3` credits · Seed 43 · Identical provenance hashes to Batch 1 (`harness=72980c4288ec98f3`, `cal=7eba7597662f8546`, `tool=b3c2647af9f71716`), pooled cleanly by `bench/analyze.mjs` with zero warnings.*
+| Stratum | Blocks | Control `solved` | Treatment `solved` | Guided EP Uptake (Trt) | E9 FG (adq) | Paired ITT Credits `T − C` |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Stratum B (`io-seam`, 5 tasks)** | 15 | 15/15 (100.0%) | 15/15 (100.0%) | 10/15 (66.7%) | 0/30 vs. 0/30 | ceiling (0 discordant) |
+| **Stratum C (`real-async`, 2 tasks)** | 6 | 4/6 (66.7%) | 5/6 (83.3%) | 2/6 (33.3%) | 0/8 vs. 0/10 | 1/0 discordant (`cancel-commit / gemini`) |
+| **Primary (Strata B + C equal-capability)** | **21** | **19/21 (90.5%)** | **20/21 (95.2%)** | **12/21 (57.1%)** | **0/38 vs. 0/40** | **`+1.8 cr [-2.5, +6.0]`** · exact McNemar `p = 1.0`, Newcombe RD `+4.8pp [-9.3, +21.7]` |
+| **Stratum A (`closed-module`, 3 tasks, separate)** | **8** | **3/8 (37.5%)** | **7/8 (87.5%)** | **8/8 (100.0%)** | **1/7 (14.3%) vs. 0/19 (0.0%)** | **`-8.8 cr [-28.0, +10.4]`** · exact McNemar `p = 0.125` (descriptive Newcombe `+50.0pp [+10.4, +73.0]`) |
+| **All 29 matched blocks (pooled)** | **29** | **22/29 (75.9%)** | **27/29 (93.1%)** | **20/29 (69.0%)** | **1/45 vs. 0/59** | **`-1.2 cr [-6.8, +4.5]`** (`T` cheaper in 18/29 blocks) · official `5/0` (`p = 0.0625`) |
 
-- **Batch 2 health:** Preflight PASS (`17.8` credits), `0/36` infra failures, `0/36` write denials, `0/36` global monkey-patching, `34/36` hidden oracle passes (both oracle failures were `claude-opus-5.5` Control & Treatment on `double-submit`, hitting the unstated `D-05` concurrent-joiner-failure law where a per-key queue retries and succeeds instead of sharing the first caller's error).
+#### Gate Sensitivity & Honest Summary (from v2.2 Independent Audit)
+The official `c70758a` gate checked every test against a **single** hardcoded reference fix (`refFixPass`), which penalized Control tests that pinned stricter semantics than our outlier `token-session` reference (`G-6`) and deadlocked both `claude-opus-5.5` `cancel-commit` tests on a renamed temp file (`G-1`), while ignoring Treatment selector breaks on non-reference valid fixes (`G-7`). Under alternative gates across the same 29 blocks:
+- **Official (`c70758a` single-reference gate):** Control `22/29` vs. Treatment `27/29`, discordant `5/0`, exact McNemar `p = 0.0625`.
+- **No reference gate (`RED + mutants + own fix + oracle`):** Control `25/29` vs. Treatment `28/29`, discordant **`3/0`**, exact McNemar `p = 0.25`.
+- **All calibrated valid fixes (`strict E9`):** Control `22/29` vs. Treatment `23/29`, discordant **`2/1`**, exact McNemar `p = 1.0`.
+- **Hidden oracle only (fix quality):** `28/29` in both arms (`p = 1.0`).
+- **Summary supported by these 58 trials:** Both arms fixed the bug in 28/29 blocks by the stored hidden oracle at essentially identical per-trial cost (`T − C = -1.2 cr [-6.8, +4.5]`). On reproduction alone (baseline RED + every single-bug mutant), Control missed a seeded bug in 3 pairs where Treatment did not (`stale-cache/claude`, `token-session/gemini`, `cancel-commit/gemini`) and never the reverse (`3/0`, `p = 0.25`). No superiority claim is statistically significant yet; `io-seam` hit a 100% ceiling at `medium` reasoning, motivating harder strata and cheaper/lower-reasoning models (`gpt-6.2-sol`, `claude-haiku-5.5`) next.
 
-#### Pooled 10-Task Results (58 Started Trials / 29 Matched Blocks, `bench/analyze.mjs`)
+---
 
-| Stratum | Blocks | Control `solved` | Treatment `solved` | EP Adoption (Trt) | E9 FG (adq) | E9 VFPass (adq) | Billed Credits (Ctrl vs. Trt / solved) |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| **Stratum B (`io-seam`, 5 tasks)** | 15 | 15/15 (100.0%) | 15/15 (100.0%) | 10/15 (66.7%) | 0/30 vs. 0/30 | 24/24 vs. 24/24 | `37.1` vs. `37.5` |
-| **Stratum C (`real-async`, 2 tasks)** | 6 | 4/6 (66.7%) | 5/6 (83.3%) | 2/6 (33.3%) | 0/8 vs. 0/10 | 4/4 vs. 5/5 | `54.6` vs. `50.0` |
-| **Primary (Strata B + C equal-capability)** | **21** | **19/21 (90.5%)** | **20/21 (95.2%)** | **12/21 (57.1%)** | **0/38 vs. 0/40** | **28/28 vs. 29/29** | CMH `p=1`, exact McNemar `p=1`, Newcombe RD `+4.8pp [-9.3, +21.7]` |
-| **Stratum A (`closed-module`, 3 tasks, separate)** | **8** | **3/8 (37.5%)** | **7/8 (87.5%)** | **8/8 (100.0%)** | **1/7 (14.3%) vs. 0/19 (0.0%)** | **7/7 vs. 21/25 (`sel=4`, `assert=0`, `to=0`)** | **`121.5` vs. `42.0`** · CMH `p=0.134`, exact McNemar `p=0.125`, Newcombe RD **`+50.0pp [+10.4, +73.0]`** |
+## v2.3 — Pre-Matrix Audit Fixes (`G-1`, `G-2`, `G-4`–`G-11`, `D-05`/`D-12`–`D-14`, `V-01`–`V-07`, 2026-11-24)
 
-#### Model Adoption & Cost Breakdown (All 29 Matched Blocks)
-- **Organic `execution-points` adoption in Treatment:** `20/29` (69.0%) overall — `gemini-4-neon` **9/9 (100%)**, `claude-opus-5.5` **8/10 (80%)**, `gpt-6.2-astra` **3/10 (30%, 3/3 on Stratum A)**.
-- **Per-task Stratum A breakdown:** `token-session` Control `0/3` vs. Treatment `3/3`; `stale-cache` Control `1/2` (via `createHook`+`receiveMessageOnPort`, `1/3` FG) vs. Treatment `2/2` (`0/6` FG); `double-submit` Control `2/3` vs. Treatment `2/3` (both non-solves hit `D-05`).
-- **Total credits:** Control `1,139.8` cr (`51.8`/solved) vs. Treatment `1,106.1` cr (`41.0`/solved) — across Stratum A, Treatment was **2.9× cheaper per solved task** (`42.0` vs. `121.5` cr/solved).
-- **Zero discordant losses:** Across all 29 matched blocks, there were **5 Treatment-only wins and 0 Control-only wins** (`4` in Stratum A, `1` in Stratum C). Note: Pilot 1's 1 `ungradable` row (`cancel-commit | control | gemini`) was traced by the reviewer via `pmset -g log` to macOS Clamshell Sleep on battery; re-graded cleanly at `c70758a`, it remains `solved=false` (missed `CC-M1`). Batch 2 ran under `caffeinate -i -m` with zero sleep interruptions.
+Following the independent v2.2 audit (`bench-v2.2-audit.md`) and its addendum on `263a864`, we closed every remaining pre-matrix defect before launching the cheaper-model / varying-reasoning matrix:
+
+1. **Strengthened `double-submit` oracle (`G-11`, `D-05`):** Upgraded failed-in-flight test to `N = 3` concurrent callers with failure injection in the `fast-check` property, asserting `charges <= 1` and identical receipts across all succeeding callers without choosing a design. Added `DS-BYPASS` (`expectPass: false`) to calibration and documented `D-05` in both prompts.
+2. **Symmetric `D-14` adequacy gate + ≥2 design-diverse valid fixes per task (`G-1`, `G-4`, `G-6`, `G-7`, `N-10`, `D-13`):**
+   - `adequateReproduction` now requires `passesAtLeastOneValidFix` (at least one calibrated valid fix in `VALID_FIX_VARIANTS`), defeating `E-06` fingerprint cheats without single-reference bias.
+   - Aligned `TOKEN_SESSION_T3` and `T2b` with `D-13` (single token per active session), documented `D-13` in prompts, and added `T6-late-delete`.
+   - Added design-diverse second valid fixes for all 5 previously single-fix tasks (`CC-serial-stage` keeping `j1.stage.tmp` for `G-1`, `DB-abort-design`, `RS-token-design`, `EO-watermark-design`, `CM-serial-design`), all verified in `--self-test`.
+3. **Anti-cheat (`D-12` for future runs only):** `ast-audit.mjs` now blocks importing `node:async_hooks` / `node:worker_threads` in test files (effective v2.3 onward; never applied retroactively to the stored `c70758a` pilot).
+4. **Operations, sleep detection & `--regrade` (`G-2`, `G-8`, `N-01`–`N-02`, `V-01`–`V-07`):**
+   - Hoisted `cheatCount` outside `try` in `runSelfTest()` so `--self-test` exits `0` (`G-8`).
+   - Added `createSleepMonitor()` inside `gradeTrialPhase` (flags `hostSleepDetected=true`, `infraFailure=true`, `ungradable=true` if wall-clock jumps >10s vs. monotonic time during grading), upgraded `caffeinate` to `-i -m -s` (while noting AC power + lid open is still required against battery clamshell sleep), moved all grading sandboxes under `runTmpRoot`, and added `node bench/run.mjs --regrade <runDir>`.
+   - Normalized relative paths in `graderChecksum` (`V-07`), added `gitCommit`/`copilotVersion`/`graderChecksum` to `PROVENANCE_FIELDS`, added `runId` to `stratumKey` (`N-27`), added `shellWriteDenials` (`V-06`), excluded denied shell calls from `firstFailingTestIndex` (`V-03`), kept `include: [task.testRel]` strictly in grading sandboxes (`V-02`), and added paired ITT credit CIs (`G-9`) + a full gate-sensitivity table directly to `bench/analyze.mjs`.
+   - Pre-registered `D-01`–`D-14` explicitly in `bench/PROTOCOL.md`.

@@ -16,7 +16,7 @@
  */
 import { readFileSync } from 'node:fs'
 import { formatUsd } from './pricing.mjs'
-import { formatCI, matchedRiskDifferenceCI, stratifiedCMH, wilsonCI } from './stats.mjs'
+import { formatCI, matchedRiskDifferenceCI, pairedCreditDiffCI, stratifiedCMH, wilsonCI } from './stats.mjs'
 
 const args = process.argv.slice(2)
 const allowMixed = args.includes('--allow-mixed')
@@ -36,6 +36,9 @@ for (const file of files) {
 }
 
 const PROVENANCE_FIELDS = [
+  'gitCommit',
+  'copilotVersion',
+  'graderChecksum',
   'harnessSha256',
   'calibrationSha256',
   'lockfileSha256',
@@ -62,12 +65,14 @@ for (const { file, row } of rawRows) {
   seenKeys.add(dedupKey)
 
   if (row.gitDirty === true) dirtyRows++
-  let missingAny = false
-  for (const f of PROVENANCE_FIELDS) {
-    if (row[f] === undefined || row[f] === null) missingAny = true
-    else provenanceSets[f].add(String(row[f]))
+  if (!row.notStarted && !row.aborted) {
+    let missingAny = false
+    for (const f of PROVENANCE_FIELDS) {
+      if (row[f] === undefined || row[f] === null) missingAny = true
+      else provenanceSets[f].add(String(row[f]))
+    }
+    if (missingAny) missingProvRows++
   }
-  if (missingAny) missingProvRows++
   rows.push(row)
 }
 
@@ -198,12 +203,19 @@ console.log(
 console.log('=== PRIMARY Stratified Analysis — Equal-Capability Strata B + C ONLY (ITT) ===')
 const cmhPrimary = stratifiedCMH(equalSeamRows, (r) => Boolean(r.solved))
 const rdPrimary = matchedRiskDifferenceCI(equalSeamRows, (r) => Boolean(r.solved))
+const credPrimary = pairedCreditDiffCI(equalSeamRows)
 console.log(
   `Primary CMH (B+C, strata=${cmhPrimary.strataCount}): z=${cmhPrimary.z}, p=${cmhPrimary.pValue}, exactMcNemarP=${cmhPrimary.exactMcNemarP ?? 'n/a'}, commonOR=${cmhPrimary.commonOddsRatio ?? 'n/a'}`,
 )
 if (rdPrimary.diff !== null) {
   console.log(
     `Newcombe paired RD (B+C, blocks=${rdPrimary.blocks}): ${(rdPrimary.diff * 100).toFixed(1)}pp [${(rdPrimary.low * 100).toFixed(1)}pp, ${(rdPrimary.high * 100).toFixed(1)}pp]`,
+  )
+}
+if (credPrimary.blocks > 0) {
+  const ciStr = credPrimary.low !== null ? ` [${credPrimary.low >= 0 ? '+' : ''}${credPrimary.low}, ${credPrimary.high >= 0 ? '+' : ''}${credPrimary.high}]` : ''
+  console.log(
+    `Paired ITT credits T-C (B+C, blocks=${credPrimary.blocks}): ${credPrimary.meanDiff >= 0 ? '+' : ''}${credPrimary.meanDiff} cr${ciStr} (Treatment cheaper in ${credPrimary.treatCheaper}/${credPrimary.blocks} blocks)`,
   )
 }
 
@@ -219,14 +231,70 @@ if (closedModRows.length > 0) {
   console.log('\n=== SEPARATE Capability Result — Stratum A (closed-module: tool vs no module seam) ===')
   const cmhA = stratifiedCMH(closedModRows, (r) => Boolean(r.solved))
   const rdA = matchedRiskDifferenceCI(closedModRows, (r) => Boolean(r.solved))
+  const credA = pairedCreditDiffCI(closedModRows)
   console.log(
     `Stratum A CMH (strata=${cmhA.strataCount}): z=${cmhA.z}, p=${cmhA.pValue}, exactMcNemarP=${cmhA.exactMcNemarP ?? 'n/a'}, commonOR=${cmhA.commonOddsRatio ?? 'n/a'}`,
   )
   if (rdA.diff !== null) {
     console.log(
-      `Stratum A Newcombe RD (blocks=${rdA.blocks}): ${(rdA.diff * 100).toFixed(1)}pp [${(rdA.low * 100).toFixed(1)}pp, ${(rdA.high * 100).toFixed(1)}pp]`,
+      `Stratum A Newcombe RD (blocks=${rdA.blocks}, descriptive — use exact McNemar for small N): ${(rdA.diff * 100).toFixed(1)}pp [${(rdA.low * 100).toFixed(1)}pp, ${(rdA.high * 100).toFixed(1)}pp]`,
     )
   }
+  if (credA.blocks > 0) {
+    const ciStr = credA.low !== null ? ` [${credA.low >= 0 ? '+' : ''}${credA.low}, ${credA.high >= 0 ? '+' : ''}${credA.high}]` : ''
+    console.log(
+      `Stratum A paired ITT credits T-C (blocks=${credA.blocks}): ${credA.meanDiff >= 0 ? '+' : ''}${credA.meanDiff} cr${ciStr} (Treatment cheaper in ${credA.treatCheaper}/${credA.blocks} blocks)`,
+    )
+  }
+}
+
+// G-7 / D-14: Always display gate-sensitivity table across all started rows
+console.log('\n=== Gate-Sensitivity Summary (All Started Matched Blocks) ===')
+const credAll = pairedCreditDiffCI(startedRows)
+if (credAll.blocks > 0) {
+  const ciStr = credAll.low !== null ? ` [${credAll.low >= 0 ? '+' : ''}${credAll.low}, ${credAll.high >= 0 ? '+' : ''}${credAll.high}]` : ''
+  console.log(
+    `Paired ITT credits T-C (all ${credAll.blocks} blocks): ${credAll.meanDiff >= 0 ? '+' : ''}${credAll.meanDiff} cr${ciStr} (Treatment cheaper in ${credAll.treatCheaper}/${credAll.blocks})`,
+  )
+}
+const baseGatesOk = (r) =>
+  !r.infraFailure &&
+  Boolean(r.oraclePass) &&
+  Boolean(r.visibleTestsPass) &&
+  Boolean(r.agentTestsPass) &&
+  Boolean(r.typecheckPass) &&
+  Boolean(r.contractTypecheckPass) &&
+  Boolean(r.cleanProduction) &&
+  r.noGlobalMonkeyPatch !== false &&
+  r.noRealSleeps !== false &&
+  Boolean(r.redReproducesBug) &&
+  Boolean(r.singleBugMutants?.allDetected)
+
+const gateDefs = [
+  ['official (stored solved)', (r) => Boolean(r.solved)],
+  ['noValidFixGate (RED+mutants+own)', (r) => baseGatesOk(r)],
+  ['anyValidFix (D-14 symmetric)', (r) => baseGatesOk(r) && (r.validFixRobustness?.trueGreenCount ?? 0) >= 1],
+  [
+    'allValidFixes (strict E9)',
+    (r) =>
+      baseGatesOk(r) &&
+      (r.validFixRobustness?.total ?? 0) > 0 &&
+      r.validFixRobustness.trueGreenCount === r.validFixRobustness.total,
+  ],
+  ['oracleOnly (fix quality only)', (r) => Boolean(r.oraclePass)],
+]
+for (const [label, fn] of gateDefs) {
+  const c = startedRows.filter((r) => r.arm === 'control' && fn(r)).length
+  const cN = startedRows.filter((r) => r.arm === 'control').length
+  const t = startedRows.filter((r) => r.arm === 'treatment' && fn(r)).length
+  const tN = startedRows.filter((r) => r.arm === 'treatment').length
+  const cmh = stratifiedCMH(startedRows, fn)
+  const disc = cmh.discordantPairs
+    ? `${cmh.discordantPairs.treatmentOnly}/${cmh.discordantPairs.controlOnly}`
+    : 'n/a'
+  console.log(
+    `  ${label.padEnd(34)} C=${c}/${cN} T=${t}/${tN} | disc(T/C)=${disc.padEnd(5)} exactMcNemarP=${cmh.exactMcNemarP ?? 'n/a'}`,
+  )
 }
 
 console.log('\n=== Per-Stratum Breakdown (approximate 95% Wilson CIs — E9 over adequate reproductions only) ===')

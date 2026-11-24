@@ -544,6 +544,17 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
           namespaceImports.add(clause.namedBindings.name.text)
         }
 
+        // D-12: Forbid stepping runtime internals (`async_hooks` / `worker_threads` MESSAGEPORT hooks) in tests
+        if (
+          (mod === 'node:async_hooks' ||
+            mod === 'async_hooks' ||
+            mod === 'node:worker_threads' ||
+            mod === 'worker_threads') &&
+          !isTypeOnly
+        ) {
+          globalPatches.push(`runtimeInternal(${mod})`)
+        }
+
         if (mod === 'execution-points-prototype' && !isTypeOnly && clause?.namedBindings) {
           if (clause.namedBindings.kind === SyntaxKind.NamedImports) {
             for (const el of clause.namedBindings.elements) {
@@ -648,7 +659,7 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
           }
         }
 
-        // Dynamic import('node:timers/promises' | 'node:timers')
+        // Dynamic import('node:timers/promises' | 'node:timers' | 'node:async_hooks' | 'node:worker_threads')
         if (expr?.kind === SyntaxKind.ImportKeyword && args[0]?.kind === SyntaxKind.StringLiteral) {
           if (
             args[0].text === 'node:timers/promises' ||
@@ -657,6 +668,14 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
             args[0].text === 'timers'
           ) {
             sleepCallSites.push({ label: `import(${args[0].text})`, fakeTimersActiveAtCall: false })
+          }
+          if (
+            args[0].text === 'node:async_hooks' ||
+            args[0].text === 'async_hooks' ||
+            args[0].text === 'node:worker_threads' ||
+            args[0].text === 'worker_threads'
+          ) {
+            globalPatches.push(`runtimeInternal(import(${args[0].text}))`)
           }
         }
 

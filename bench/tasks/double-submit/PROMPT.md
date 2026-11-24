@@ -3,7 +3,7 @@
 ## Symptom
 `src/payment-processor.ts` has a check-then-act idempotency race:
 1. When two or more concurrent `submitPayment(idempotencyKey, amountCents)` calls arrive for the same key before the first charge finishes, all of them miss `receipts.get(idempotencyKey)` and invoke `chargeGateway(...)` independently, resulting in duplicate charges.
-2. If an in-flight payment fails (gateway error or invalid amount), subsequent calls for that `idempotencyKey` must be able to retry cleanly without remaining stuck on a failed promise.
+2. If an in-flight payment fails (gateway error or invalid amount), subsequent calls for that `idempotencyKey` must be able to retry cleanly without remaining stuck on a failed promise (either sharing the failure across concurrent joiners with 0 charges until retry, or queuing callers so a waiter retries and charges at most once, is valid).
 3. Distinct `idempotencyKey`s must remain independent, and completed keys must serve cached receipts.
 
 ## Your Task

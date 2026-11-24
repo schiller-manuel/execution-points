@@ -5,7 +5,7 @@ When a customer submits the same payment twice concurrently with the same `idemp
 
 Expected behavior:
 - Concurrent `submitPayment(idempotencyKey, amountCents)` calls for the same `idempotencyKey` must charge the gateway **at most once** (`getGatewayChargeCount(key) === 1`) and return the same receipt.
-- If a payment fails (gateway error or validation error), the key must NOT remain permanently stuck/poisoned: a subsequent retry with the same `idempotencyKey` must execute cleanly and succeed.
+- If a payment fails (gateway error or validation error), the key must NOT remain permanently stuck/poisoned: a subsequent retry with the same `idempotencyKey` must execute cleanly and succeed. Either sharing the failure across concurrent joiners (0 charges until a subsequent retry) or serializing queued callers so a subsequent waiter retries and charges at most once is acceptable.
 - Payments for different `idempotencyKey`s must remain independent.
 - Sequential repeated calls for an already-completed key must return the cached receipt without calling the gateway again.
 

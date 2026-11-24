@@ -29,12 +29,21 @@ import {
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-function hashFiles(paths) {
+function hashEntries(entries, normalizeRoot = null) {
+  // V-07: Hash RELATIVE keys + path-normalized file contents so graderChecksum
+  // detects tampering AND stays deterministic across runs!
   const h = createHash('sha256')
-  for (const p of [...paths].sort()) {
-    if (existsSync(p)) {
-      h.update(p)
-      h.update(readFileSync(p))
+  for (const { key, file } of [...entries].sort((a, b) => a.key.localeCompare(b.key))) {
+    if (existsSync(file)) {
+      h.update(key)
+      h.update('\0')
+      const raw = readFileSync(file)
+      if (normalizeRoot && key.includes('.bin/')) {
+        h.update(raw.toString('utf8').replaceAll(normalizeRoot, '<GRADER_ROOT>'))
+      } else {
+        h.update(raw)
+      }
+      h.update('\0')
     }
   }
   return h.digest('hex')
@@ -247,35 +256,41 @@ export function sweepStaleTempDirs() {
   return removed
 }
 
-function collectWholeGraderHashPaths(graderNm, repoRoot) {
-  const files = []
-  const pushIfExists = (p) => {
-    if (existsSync(p)) files.push(p)
+function collectWholeGraderHashEntries(graderNm, repoRoot) {
+  const entries = []
+  const pushRepoFile = (file) => {
+    if (existsSync(file)) {
+      entries.push({ key: `repo:${path.relative(repoRoot, file).replaceAll('\\', '/')}`, file })
+    }
+  }
+  const pushNmFile = (file) => {
+    if (existsSync(file)) {
+      entries.push({ key: `nm:${path.relative(graderNm, file).replaceAll('\\', '/')}`, file })
+    }
   }
   const gradersDir = path.join(repoRoot, 'bench/graders')
   if (existsSync(gradersDir)) {
-    for (const f of readdirSync(gradersDir)) pushIfExists(path.join(gradersDir, f))
+    for (const f of readdirSync(gradersDir)) pushRepoFile(path.join(gradersDir, f))
   }
-  pushIfExists(path.join(repoRoot, 'bench/runtime-guard.setup.mjs'))
+  pushRepoFile(path.join(repoRoot, 'bench/runtime-guard.setup.mjs'))
 
-  // Hash ALL `.bin` shims + top-level package.json + vitest/fast-check/typescript entrypoints in graderNm (N-30!)
   const binDir = path.join(graderNm, '.bin')
   if (existsSync(binDir)) {
-    for (const f of readdirSync(binDir)) pushIfExists(path.join(binDir, f))
+    for (const f of readdirSync(binDir)) pushNmFile(path.join(binDir, f))
   }
   for (const pkg of ['vitest', 'vite', 'fast-check', 'typescript', 'magic-string']) {
-    pushIfExists(path.join(graderNm, pkg, 'package.json'))
+    pushNmFile(path.join(graderNm, pkg, 'package.json'))
   }
   const pnpmDir = path.join(graderNm, '.pnpm')
   if (existsSync(pnpmDir)) {
     for (const entry of readdirSync(pnpmDir)) {
       const subBin = path.join(pnpmDir, entry, 'node_modules/.bin')
       if (existsSync(subBin)) {
-        for (const f of readdirSync(subBin)) pushIfExists(path.join(subBin, f))
+        for (const f of readdirSync(subBin)) pushNmFile(path.join(subBin, f))
       }
     }
   }
-  return files
+  return entries
 }
 
 export function prepareToolchains(repoRoot, parentDir = realpathSync(tmpdir())) {
@@ -328,9 +343,9 @@ export function prepareToolchains(repoRoot, parentDir = realpathSync(tmpdir())) 
   assertNoRepoLeak(treatmentNm, repoRoot)
   assertNoRepoLeak(graderNm, repoRoot)
 
-  // Full grader toolchain + source checksum (R-02 & N-30)
-  const graderFilesToCheck = collectWholeGraderHashPaths(graderNm, repoRoot)
-  const initialGraderChecksum = hashFiles(graderFilesToCheck)
+  // Full grader toolchain + source checksum using relative paths (R-02, N-30, V-07)
+  const graderEntriesToCheck = collectWholeGraderHashEntries(graderNm, repoRoot)
+  const initialGraderChecksum = hashEntries(graderEntriesToCheck, baseDir)
 
   return {
     baseDir,
@@ -339,7 +354,7 @@ export function prepareToolchains(repoRoot, parentDir = realpathSync(tmpdir())) 
     graderNm,
     graderChecksum: initialGraderChecksum,
     verifyGraderChecksum() {
-      const current = hashFiles(graderFilesToCheck)
+      const current = hashEntries(graderEntriesToCheck, baseDir)
       if (current !== initialGraderChecksum) {
         throw new Error(
           `Grader toolchain/source checksum mismatch: expected ${initialGraderChecksum}, got ${current}`,
