@@ -7,17 +7,23 @@
  *   references REPO_ROOT (rewrites pnpm's embedded `NODE_PATH` shims!).
  * - Trial workspaces never share a writable `node_modules` with each other or the grader.
  * - Trial workspaces never contain `@tanstack/oracles`, `fast-check`, or hidden graders.
- * - Treatment workspaces receive a real file copy of `execution-points-prototype`
- *   (`package.json` + `src/`), never a symlink back to the repository.
+ * - Treatment workspaces receive a real file copy of `execution-points-prototype` as
+ *   the package ships it (`package.json`, `points.schema.json`, `dist/`), never a
+ *   symlink back to the repository, and its commands in `node_modules/.bin`, as an
+ *   install would link them (so `npx execution-points …` resolves without a network).
+ * - The library is built into the toolchain's own temp root. Nothing here writes into
+ *   the checkout: its `dist/` belongs to whoever builds there (`buildLibrary`).
  * - Full grader checksum hashes BOTH grader `node_modules` binaries AND every file
  *   under `bench/graders/` plus `bench/runtime-guard.setup.mjs`,
- *   `bench/deterministic-io.setup.mjs` and `bench/classify.mjs`.
+ *   `bench/deterministic-io.setup.mjs`, `bench/classify.mjs` and
+ *   `bench/failure-reporter.mjs`.
  * - Refuses a symlinked root `node_modules`: stripping the copies would delete
  *   packages from the checkout the link points to.
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  chmodSync,
   cpSync,
   existsSync,
   lstatSync,
@@ -27,6 +33,8 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -345,6 +353,7 @@ function collectWholeGraderHashEntries(graderNm, repoRoot) {
   pushRepoFile(path.join(repoRoot, 'bench/runtime-guard.setup.mjs'))
   pushRepoFile(path.join(repoRoot, 'bench/deterministic-io.setup.mjs'))
   pushRepoFile(path.join(repoRoot, 'bench/classify.mjs'))
+  pushRepoFile(path.join(repoRoot, 'bench/failure-reporter.mjs'))
 
   const binDir = path.join(graderNm, '.bin')
   if (existsSync(binDir)) {
@@ -363,6 +372,53 @@ function collectWholeGraderHashEntries(graderNm, repoRoot) {
     }
   }
   return entries
+}
+
+/**
+ * Builds the library from the sources of `repoRoot` into `outDir`, which must lie outside
+ * the checkout, and returns `outDir`. The checkout's own `dist/` is neither read nor
+ * written: `tsdown` empties its output directory first, and other processes (a type check,
+ * the gap check) read the checkout's `dist/` while a bench process starts.
+ */
+export function buildLibrary(repoRoot, outDir) {
+  const inside = path.relative(realpathSync(repoRoot), path.resolve(outDir))
+  if (!inside.startsWith('..') && !path.isAbsolute(inside)) {
+    throw new Error(`The library must be built outside the checkout, not into ${outDir}`)
+  }
+  execFileSync(
+    process.execPath,
+    [path.join(repoRoot, 'node_modules/tsdown/dist/run.mjs'), '--logLevel', 'error', '--out-dir', outDir],
+    { cwd: repoRoot, stdio: ['ignore', 'ignore', 'inherit'] },
+  )
+  return outDir
+}
+
+/**
+ * Installs the package into `nmDir` as its `package.json` ships it: the manifest, what
+ * `files` lists (taken from the build in `builtDir` for `dist`), and a link in `.bin` for
+ * every command in `bin`, relative, as a package manager creates it.
+ */
+function installBuiltPackage(repoRoot, builtDir, nmDir) {
+  const manifest = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8'))
+  const dest = path.join(nmDir, manifest.name)
+  mkdirSync(dest, { recursive: true })
+  cpSync(path.join(repoRoot, 'package.json'), path.join(dest, 'package.json'))
+  for (const entry of manifest.files ?? []) {
+    const from = entry === 'dist' ? builtDir : path.join(repoRoot, entry)
+    cpSync(from, path.join(dest, entry), { recursive: true })
+  }
+  const bins = typeof manifest.bin === 'string' ? { [manifest.name]: manifest.bin } : (manifest.bin ?? {})
+  const binDir = path.join(nmDir, '.bin')
+  mkdirSync(binDir, { recursive: true })
+  for (const [command, rel] of Object.entries(bins)) {
+    const target = path.join(dest, rel)
+    if (!existsSync(target)) throw new Error(`The package names the command "${command}" at ${rel}, which the build did not produce`)
+    chmodSync(target, statSync(target).mode | 0o111)
+    const link = path.join(binDir, command)
+    rmSync(link, { force: true })
+    symlinkSync(path.relative(binDir, target), link)
+  }
+  return { dest, commands: Object.keys(bins) }
 }
 
 export function prepareToolchains(repoRoot, parentDir = realpathSync(tmpdir())) {
@@ -411,19 +467,12 @@ export function prepareToolchains(repoRoot, parentDir = realpathSync(tmpdir())) 
   stripNonTrialEntries(controlNm)
   rewriteBinShims(controlNm, repoRoot)
 
-  // 3. Trial treatment toolchain = control + REAL copy of execution-points-prototype
+  // 3. Trial treatment toolchain = control + REAL copy of execution-points-prototype.
+  // The package ships `dist`: built here from the sources, so a workspace never gets a library
+  // older than they are, and built into this toolchain's root, so the checkout is not written.
   cloneDirCoW(controlNm, treatmentNm)
-  const epDest = path.join(treatmentNm, 'execution-points-prototype')
-  mkdirSync(epDest, { recursive: true })
-  // The package ships `dist`. Build it here, so a workspace never gets a library older than the
-  // sources.
-  execFileSync(process.execPath, [path.join(repoRoot, 'node_modules/tsdown/dist/run.mjs'), '--logLevel', 'error'], {
-    cwd: repoRoot,
-    stdio: ['ignore', 'ignore', 'inherit'],
-  })
-  cpSync(path.join(repoRoot, 'package.json'), path.join(epDest, 'package.json'))
-  cpSync(path.join(repoRoot, 'points.schema.json'), path.join(epDest, 'points.schema.json'))
-  cpSync(path.join(repoRoot, 'dist'), path.join(epDest, 'dist'), { recursive: true })
+  const builtDir = buildLibrary(repoRoot, path.join(baseDir, 'library-dist'))
+  const library = installBuiltPackage(repoRoot, builtDir, treatmentNm)
   rewriteBinShims(treatmentNm, repoRoot)
 
   // Verify zero symlinks AND zero `.bin` text shims leak REPO_ROOT (I-03)
@@ -440,6 +489,9 @@ export function prepareToolchains(repoRoot, parentDir = realpathSync(tmpdir())) 
     controlNm,
     treatmentNm,
     graderNm,
+    // Where the treatment arm's library is, and the commands it puts into `.bin`.
+    libraryDir: library.dest,
+    libraryCommands: library.commands,
     graderChecksum: initialGraderChecksum,
     verifyGraderChecksum() {
       const current = hashEntries(graderEntriesToCheck, baseDir)

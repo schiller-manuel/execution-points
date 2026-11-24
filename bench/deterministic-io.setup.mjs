@@ -1,6 +1,6 @@
 /**
  * Deterministic leaf disk I/O for grading sandboxes of real-filesystem tasks
- * (harness v2.4, protocol decision D-09). Loaded through Vitest `setupFiles`
+ * (harness v2.5, protocol decision D-09). Loaded through Vitest `setupFiles`
  * before the runtime guard, only for tasks with `deterministicLeafIo: true`
  * and only while GRADING. Agents' own workspaces keep the real asynchronous
  * `node:fs/promises`.

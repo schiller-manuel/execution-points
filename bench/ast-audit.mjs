@@ -404,22 +404,371 @@ export function auditExtraProductionFile(source, relPath, api = getAuditApi()) {
   }
 }
 
+// ── Use of `execution-points-prototype` in a test (PROTOCOL D-18) ────────────
+
+/** The entry points of the package a test imports `select` from. */
+const LIBRARY_MODULES = new Set(['execution-points-prototype', 'execution-points-prototype/runtime'])
+
+/**
+ * What a selected point offers, read off `Point` and `SelectablePoint` in the
+ * library's declarations. `--self-test` compares the lists below with the
+ * declarations the treatment toolchain ships, so a member the library adds
+ * cannot go unnoticed here.
+ *
+ * An operation puts a point to use: it installs a replacement or a pause.
+ */
+export const POINT_OPERATIONS = Object.freeze([
+  'withReplacement',
+  'replace',
+  'returns',
+  'throws',
+  'resolves',
+  'rejects',
+  'pause',
+])
+/** Members of a point that use nothing by themselves: a counter, and the point with captures. */
+export const POINT_OTHER_MEMBERS = Object.freeze(['calls', 'capture'])
+/** Functions of the package that take points and put them to use. */
+export const POINT_CONSUMERS = Object.freeze(['interleavings'])
+
+// No other library names a method this way, so it counts on a receiver the walk cannot follow.
+const UNMISTAKABLE_OPERATION = 'withReplacement'
+const ITERATION_METHODS = new Set(['forEach', 'map', 'filter', 'flatMap', 'find', 'findLast', 'some', 'every'])
+const CONTAINER_METHODS = new Set(['slice', 'concat', 'filter', 'flat', 'reverse', 'values', 'toReversed', 'toSorted'])
+const CONTAINER_FUNCTIONS = new Set(['Object.values', 'Object.entries', 'Array.from', 'Array.of'])
+
+function isFunctionLike(node) {
+  return (
+    node?.kind === SyntaxKind.FunctionDeclaration ||
+    node?.kind === SyntaxKind.FunctionExpression ||
+    node?.kind === SyntaxKind.ArrowFunction ||
+    node?.kind === SyntaxKind.MethodDeclaration
+  )
+}
+
+/**
+ * Lists the member names of the named interfaces in a declaration file, and
+ * the declared functions that have a parameter typed with one of `paramTypes`.
+ * Used by `--self-test` to read what a point offers from the shipped
+ * declarations instead of from a list kept here.
+ */
+export function readLibrarySurface(
+  declarationSource,
+  { interfaces = ['Point', 'SelectablePoint'], paramTypes = ['Waitable', 'Point'] } = {},
+  api = getAuditApi(),
+) {
+  const lease = api.createSourceFile('library.d.ts', declarationSource)
+  try {
+    const members = new Set()
+    const consumers = new Set()
+    const typed = new RegExp(`\\b(?:${paramTypes.join('|')})\\b`)
+    const visit = (node) => {
+      if (node.kind === SyntaxKind.InterfaceDeclaration && interfaces.includes(node.name?.text)) {
+        for (const member of node.members ?? []) {
+          if (member.name?.kind === SyntaxKind.Identifier) members.add(member.name.text)
+        }
+      }
+      if (node.kind === SyntaxKind.FunctionDeclaration && node.name) {
+        for (const param of node.parameters ?? []) {
+          if (param.type && typed.test(declarationSource.slice(param.type.pos, param.type.end))) {
+            consumers.add(node.name.text)
+          }
+        }
+      }
+      node.forEachChild(visit)
+    }
+    visit(lease.sourceFile)
+    return { members: [...members].sort(), consumers: [...consumers].sort() }
+  } finally {
+    lease.dispose()
+  }
+}
+
+/**
+ * Says whether a test file puts `execution-points-prototype` to use, and how.
+ *
+ * A file uses the library when it imports `select` from the package, calls
+ * it, and puts a selected point to use: it calls one of `POINT_OPERATIONS` on
+ * the point, or hands it to one of `POINT_CONSUMERS`.
+ *
+ * Which expressions hold a point is followed by name within the file: a
+ * variable initialized from `select(...)`, from `point.capture(...)`, or from
+ * a list or object of points; a parameter of a local function that is called
+ * with a point; the result of a local function that returns one; the item of
+ * a loop over points. `seeds` names what other test files of the same tree
+ * export (`auditTestTree`). Limits: scopes are not told apart, and a point
+ * kept in a class field, a `Map`, or behind an imported helper is not
+ * followed, except for `withReplacement`, which is counted on any receiver.
+ */
+function auditLibraryUse(sf, seeds = {}) {
+  const selectNames = new Set()
+  const consumerNames = new Map() // local name -> consumer
+  const namespaces = new Set()
+  const functions = new Map() // name -> function-like node declared in this file
+  const points = new Set() // names that hold a point, or a list or object of points
+  const pointFns = new Set() // names of functions that return one
+  const seedPoints = new Set(seeds.points ?? [])
+  const seedPointFns = new Set(seeds.pointFns ?? [])
+
+  const bindImport = (imported, local) => {
+    if (imported === 'select') selectNames.add(local)
+    else if (POINT_CONSUMERS.includes(imported)) consumerNames.set(local, imported)
+  }
+  const dynamicImportOfLibrary = (expr) => {
+    let e = unwrapExpr(expr)
+    if (e?.kind === SyntaxKind.AwaitExpression) e = unwrapExpr(e.expression)
+    return (
+      e?.kind === SyntaxKind.CallExpression &&
+      e.expression?.kind === SyntaxKind.ImportKeyword &&
+      e.arguments?.[0]?.kind === SyntaxKind.StringLiteral &&
+      LIBRARY_MODULES.has(e.arguments[0].text)
+    )
+  }
+
+  const collect = (node) => {
+    if (node.kind === SyntaxKind.ImportDeclaration && node.moduleSpecifier?.kind === SyntaxKind.StringLiteral) {
+      const mod = node.moduleSpecifier.text
+      const clause = node.importClause
+      const bindings = clause?.namedBindings
+      if (clause && !clause.isTypeOnly && bindings) {
+        if (LIBRARY_MODULES.has(mod)) {
+          if (bindings.kind === SyntaxKind.NamespaceImport) namespaces.add(bindings.name.text)
+          else if (bindings.kind === SyntaxKind.NamedImports) {
+            for (const el of bindings.elements ?? []) {
+              if (!el.isTypeOnly) bindImport(el.propertyName?.text ?? el.name.text, el.name.text)
+            }
+          }
+        } else if (mod.startsWith('.')) {
+          // What another test file of the tree exports as a point, or as a function that returns one.
+          if (bindings.kind === SyntaxKind.NamespaceImport) {
+            if (seedPoints.size > 0) points.add(bindings.name.text)
+          } else if (bindings.kind === SyntaxKind.NamedImports) {
+            for (const el of bindings.elements ?? []) {
+              const imported = el.propertyName?.text ?? el.name.text
+              if (seedPoints.has(imported)) points.add(el.name.text)
+              if (seedPointFns.has(imported)) pointFns.add(el.name.text)
+            }
+          }
+        }
+      }
+    }
+    if (node.kind === SyntaxKind.FunctionDeclaration && node.name) functions.set(node.name.text, node)
+    if (node.kind === SyntaxKind.VariableDeclaration && node.initializer) {
+      const init = unwrapExpr(node.initializer)
+      if (node.name?.kind === SyntaxKind.Identifier && isFunctionLike(init)) functions.set(node.name.text, init)
+      if (dynamicImportOfLibrary(node.initializer)) {
+        if (node.name?.kind === SyntaxKind.Identifier) namespaces.add(node.name.text)
+        else if (node.name?.kind === SyntaxKind.ObjectBindingPattern) {
+          for (const el of node.name.elements ?? []) {
+            if (el.name?.kind === SyntaxKind.Identifier) bindImport(el.propertyName?.text ?? el.name.text, el.name.text)
+          }
+        }
+      }
+    }
+    node.forEachChild(collect)
+  }
+  collect(sf)
+
+  const libraryCallee = (call) => {
+    const callee = unwrapExpr(call.expression)
+    if (callee?.kind === SyntaxKind.Identifier) {
+      if (selectNames.has(callee.text)) return 'select'
+      return consumerNames.get(callee.text)
+    }
+    if (callee?.kind === SyntaxKind.PropertyAccessExpression || callee?.kind === SyntaxKind.ElementAccessExpression) {
+      const object = unwrapExpr(callee.expression)
+      const key = getPropertyKeyText(callee)
+      if (object?.kind === SyntaxKind.Identifier && namespaces.has(object.text)) {
+        if (key === 'select') return 'select'
+        if (POINT_CONSUMERS.includes(key)) return key
+      }
+    }
+    return undefined
+  }
+
+  const isPointExpr = (expr) => {
+    const e = unwrapExpr(expr)
+    if (!e) return false
+    switch (e.kind) {
+      case SyntaxKind.Identifier:
+        return points.has(e.text)
+      case SyntaxKind.CallExpression: {
+        if (libraryCallee(e) === 'select') return true
+        const callee = unwrapExpr(e.expression)
+        if (callee?.kind === SyntaxKind.Identifier) return pointFns.has(callee.text)
+        if (callee?.kind === SyntaxKind.PropertyAccessExpression || callee?.kind === SyntaxKind.ElementAccessExpression) {
+          const key = getPropertyKeyText(callee)
+          if (key === 'capture' || CONTAINER_METHODS.has(key)) return isPointExpr(callee.expression)
+          const object = unwrapExpr(callee.expression)
+          if (object?.kind === SyntaxKind.Identifier && CONTAINER_FUNCTIONS.has(`${object.text}.${key}`)) {
+            return (e.arguments ?? []).some(isPointExpr)
+          }
+        }
+        return false
+      }
+      case SyntaxKind.PropertyAccessExpression:
+      case SyntaxKind.ElementAccessExpression: {
+        // A member of a list or object of points is a point; a member of a point is not.
+        const key = getPropertyKeyText(e)
+        if (POINT_OPERATIONS.includes(key) || POINT_OTHER_MEMBERS.includes(key)) return false
+        return isPointExpr(e.expression)
+      }
+      case SyntaxKind.ArrayLiteralExpression:
+        return (e.elements ?? []).some((el) => isPointExpr(el.kind === SyntaxKind.SpreadElement ? el.expression : el))
+      case SyntaxKind.ObjectLiteralExpression:
+        return (e.properties ?? []).some((prop) => {
+          if (prop.kind === SyntaxKind.PropertyAssignment) return isPointExpr(prop.initializer)
+          if (prop.kind === SyntaxKind.ShorthandPropertyAssignment) return points.has(prop.name?.text)
+          if (prop.kind === SyntaxKind.SpreadAssignment) return isPointExpr(prop.expression)
+          return false
+        })
+      case SyntaxKind.ConditionalExpression:
+        return isPointExpr(e.whenTrue) || isPointExpr(e.whenFalse)
+      default:
+        return false
+    }
+  }
+
+  let changed = true
+  const hold = (bindingName) => {
+    const names = []
+    collectBindingNames(bindingName, names)
+    for (const name of names) {
+      if (!points.has(name)) {
+        points.add(name)
+        changed = true
+      }
+    }
+  }
+  const returnsPoint = (fn) => {
+    const body = fn.body
+    if (!body) return false
+    if (body.kind !== SyntaxKind.Block) return isPointExpr(body)
+    let found = false
+    const walk = (node) => {
+      if (found || (node !== body && isFunctionLike(node))) return
+      if (node.kind === SyntaxKind.ReturnStatement && node.expression && isPointExpr(node.expression)) {
+        found = true
+        return
+      }
+      node.forEachChild(walk)
+    }
+    walk(body)
+    return found
+  }
+  const propagate = (node) => {
+    if (node.kind === SyntaxKind.VariableDeclaration && node.initializer && isPointExpr(node.initializer)) {
+      hold(node.name)
+    } else if (node.kind === SyntaxKind.BinaryExpression && node.operatorToken?.kind === SyntaxKind.EqualsToken) {
+      const left = unwrapExpr(node.left)
+      if (left?.kind === SyntaxKind.Identifier && isPointExpr(node.right)) hold(left)
+    } else if (node.kind === SyntaxKind.ForOfStatement && isPointExpr(node.expression)) {
+      if (node.initializer?.kind === SyntaxKind.VariableDeclarationList) {
+        for (const decl of node.initializer.declarations ?? []) hold(decl.name)
+      }
+    } else if (node.kind === SyntaxKind.CallExpression) {
+      const callee = unwrapExpr(node.expression)
+      const args = node.arguments ?? []
+      // A local function called with a point: that parameter holds one.
+      const fn = callee?.kind === SyntaxKind.Identifier ? functions.get(callee.text) : undefined
+      if (fn) {
+        args.forEach((arg, i) => {
+          if (fn.parameters?.[i] && isPointExpr(arg)) hold(fn.parameters[i].name)
+        })
+      }
+      // A callback that walks a list of points: its first parameter holds one.
+      if (
+        (callee?.kind === SyntaxKind.PropertyAccessExpression || callee?.kind === SyntaxKind.ElementAccessExpression) &&
+        ITERATION_METHODS.has(getPropertyKeyText(callee)) &&
+        isPointExpr(callee.expression)
+      ) {
+        for (const arg of args) {
+          const callback = unwrapExpr(arg)
+          if (isFunctionLike(callback) && callback.parameters?.[0]) hold(callback.parameters[0].name)
+        }
+      }
+    }
+    node.forEachChild(propagate)
+  }
+  while (changed) {
+    changed = false
+    propagate(sf)
+    for (const [name, fn] of functions) {
+      if (!pointFns.has(name) && returnsPoint(fn)) {
+        pointFns.add(name)
+        changed = true
+      }
+    }
+  }
+
+  const operations = new Set()
+  let selectCalled = false
+  const use = (node) => {
+    if (node.kind === SyntaxKind.CallExpression) {
+      const library = libraryCallee(node)
+      if (library === 'select') selectCalled = true
+      else if (library) operations.add(library)
+      const callee = unwrapExpr(node.expression)
+      if (callee?.kind === SyntaxKind.PropertyAccessExpression || callee?.kind === SyntaxKind.ElementAccessExpression) {
+        const key = getPropertyKeyText(callee)
+        if (POINT_OPERATIONS.includes(key) && (key === UNMISTAKABLE_OPERATION || isPointExpr(callee.expression))) {
+          operations.add(key)
+        }
+      }
+    }
+    node.forEachChild(use)
+  }
+  use(sf)
+
+  // What this file hands to the other test files of the tree.
+  const exportedPoints = new Set()
+  const exportedPointFns = new Set()
+  for (const statement of sf.statements ?? []) {
+    if (statement.kind === SyntaxKind.VariableStatement && hasExportModifier(statement)) {
+      for (const decl of statement.declarationList?.declarations ?? []) {
+        const names = []
+        collectBindingNames(decl.name, names)
+        for (const name of names) {
+          if (points.has(name)) exportedPoints.add(name)
+          if (pointFns.has(name)) exportedPointFns.add(name)
+        }
+      }
+    } else if (statement.kind === SyntaxKind.FunctionDeclaration && hasExportModifier(statement) && statement.name) {
+      if (pointFns.has(statement.name.text)) exportedPointFns.add(statement.name.text)
+    } else if (statement.kind === SyntaxKind.ExportDeclaration && statement.exportClause?.kind === SyntaxKind.NamedExports) {
+      for (const el of statement.exportClause.elements ?? []) {
+        const local = el.propertyName?.text ?? el.name.text
+        if (points.has(local)) exportedPoints.add(el.name.text)
+        if (pointFns.has(local)) exportedPointFns.add(el.name.text)
+      }
+    }
+  }
+
+  return {
+    selectUsed: (selectNames.size > 0 || namespaces.size > 0) && selectCalled,
+    operations: [...operations].sort(),
+    exportedPoints: [...exportedPoints],
+    exportedPointFns: [...exportedPointFns],
+  }
+}
+
 /**
  * Inspect an agent-written test or test-helper file using the TypeScript 7.1 AST.
  * Catches all 33 A-01 evasions (aliases, bracket access, Reflect.defineProperty,
  * compound/destructuring assignments, eval/Function, EventTarget, timers/promises
  * namespace/default/dynamic imports, Atomics.wait, vi.waitUntil, scheduler.wait,
  * dead-code fake timers, and fake timers turned off via useRealTimers).
+ *
+ * `librarySeeds` names the points other test files of the same tree export
+ * (see `auditLibraryUse`).
  */
-export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) {
+export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi(), librarySeeds = {}) {
   const lease = api.createSourceFile(fileName, source)
   try {
     const sf = lease.sourceFile
     const globalPatches = []
     const sleepCalls = []
-    let epSelectImported = false
-    let epSelectCalled = false
-    let epWithReplacementCalled = false
+    const libraryUse = auditLibraryUse(sf, librarySeeds)
     let usesModuleMock = false
     let usesDeferredPromise = false
 
@@ -555,18 +904,6 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
           globalPatches.push(`runtimeInternal(${mod})`)
         }
 
-        if (mod === 'execution-points-prototype' && !isTypeOnly && clause?.namedBindings) {
-          if (clause.namedBindings.kind === SyntaxKind.NamedImports) {
-            for (const el of clause.namedBindings.elements) {
-              if (!el.isTypeOnly && (el.propertyName?.text ?? el.name.text) === 'select') {
-                epSelectImported = true
-              }
-            }
-          } else if (clause.namedBindings.kind === SyntaxKind.NamespaceImport) {
-            epSelectImported = true
-          }
-        }
-
         if (mod === 'vitest' && !isTypeOnly && clause?.namedBindings?.kind === SyntaxKind.NamedImports) {
           for (const el of clause.namedBindings.elements) {
             if (!el.isTypeOnly && (el.propertyName?.text ?? el.name.text) === 'vi') {
@@ -683,7 +1020,6 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
         if (expr?.kind === SyntaxKind.Identifier) {
           const name = expr.text
           if (name === 'eval') globalPatches.push('eval')
-          if (name === 'select' && epSelectImported) epSelectCalled = true
           if (stubGlobalAliases.has(name)) globalPatches.push(`stubGlobal(${args[0]?.text ?? '?'})`)
           if (spyOnAliases.has(name) && args.length >= 1) {
             const targetRoot = resolveProtectedChain(args[0])
@@ -714,9 +1050,6 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
           const objExpr = unwrapExpr(expr.expression)
           const objName = rootIdentifierName(objExpr, aliasMap)
           const propName = getPropertyKeyText(expr)
-
-          if (propName === 'withReplacement' && epSelectImported) epWithReplacementCalled = true
-          if (propName === 'select' && epSelectImported) epSelectCalled = true
 
           // N-24: setTimeout.call / .apply / .bind and expect.poll
           if (
@@ -832,7 +1165,8 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
       if (!s.fakeTimersActiveAtCall) sleepCalls.push(s.label)
     }
 
-    const usesExecutionPoints = epSelectImported && epSelectCalled && epWithReplacementCalled
+    // PROTOCOL D-18: `select` imported and called, and a selected point put to use.
+    const usesExecutionPoints = libraryUse.selectUsed && libraryUse.operations.length > 0
 
     let technique = 'none'
     if (globalPatches.length > 0) technique = 'global-patch'
@@ -844,6 +1178,9 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
 
     return {
       usesExecutionPoints,
+      // Which operations of the library the file uses; empty unless `usesExecutionPoints`.
+      libraryOperations: usesExecutionPoints ? libraryUse.operations : [],
+      libraryUse,
       usesModuleMock,
       usesFakeTimers: everUsedFakeTimers,
       usesGlobalPatch: globalPatches.length > 0,
@@ -859,24 +1196,40 @@ export function auditTestAst(source, fileName = 'test.ts', api = getAuditApi()) 
 
 /**
  * Audits ALL test and test-helper files together (closes E-05 / R-12).
+ *
+ * The tree uses the library when one of its files imports and calls `select`
+ * and one of its files puts a point to use (PROTOCOL D-18). A point that one
+ * file exports and another imports from a relative module is followed.
  */
 export function auditTestTree(filesMap, api = getAuditApi()) {
+  const entries = Object.entries(filesMap)
+  let results = entries.map(([rel, content]) => [rel, auditTestAst(content, rel, api)])
+  const seeds = {
+    points: results.flatMap(([, r]) => r.libraryUse.exportedPoints),
+    pointFns: results.flatMap(([, r]) => r.libraryUse.exportedPointFns),
+  }
+  if (seeds.points.length > 0 || seeds.pointFns.length > 0) {
+    results = entries.map(([rel, content]) => [rel, auditTestAst(content, rel, api, seeds)])
+  }
+
   const globalPatches = []
   const realSleeps = []
-  let usesExecutionPoints = false
+  const operations = new Set()
+  let selectUsed = false
   let usesModuleMock = false
   let usesFakeTimers = false
   let usesDeferred = false
 
-  for (const [rel, content] of Object.entries(filesMap)) {
-    const r = auditTestAst(content, rel, api)
-    if (r.usesExecutionPoints) usesExecutionPoints = true
+  for (const [rel, r] of results) {
+    if (r.libraryUse.selectUsed) selectUsed = true
+    for (const op of r.libraryUse.operations) operations.add(op)
     if (r.usesModuleMock) usesModuleMock = true
     if (r.usesFakeTimers) usesFakeTimers = true
     if (r.technique === 'deferred-only') usesDeferred = true
     for (const g of r.globalPatches) globalPatches.push(`${rel}:${g}`)
     for (const s of r.realSleeps) realSleeps.push(`${rel}:${s}`)
   }
+  const usesExecutionPoints = selectUsed && operations.size > 0
 
   let technique = 'none'
   if (globalPatches.length > 0) technique = 'global-patch'
@@ -888,6 +1241,7 @@ export function auditTestTree(filesMap, api = getAuditApi()) {
 
   return {
     usesExecutionPoints,
+    libraryOperations: usesExecutionPoints ? [...operations].sort() : [],
     usesModuleMock,
     usesFakeTimers,
     usesGlobalPatch: globalPatches.length > 0,

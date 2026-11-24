@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Intention-to-treat statistical analyzer for benchmark `results.jsonl` files
- * (harness v2.4; reads rows written by v2.2 and later).
+ * (harness v2.5; reads rows written by v2.2 and later).
  *
  * What it guarantees (ST-02..ST-07, E9-01, N-05..N-09, N-13, N-21, N-26..N-28, V-07):
  * - Every started row stays in the intention-to-treat denominator. A row that
@@ -408,6 +408,13 @@ function summarizeGroup(items) {
   }
   const techniques = {}
   for (const r of active) techniques[r.technique ?? 'unknown'] = (techniques[r.technique ?? 'unknown'] ?? 0) + 1
+  // D-18: trials per operation of the library. A trial that uses two operations counts under
+  // both. Rows written before v2.5 only knew `withReplacement`, so that is what they used.
+  const libraryOperations = {}
+  for (const r of active) {
+    if (!r.usesExecutionPoints) continue
+    for (const op of r.libraryOperations ?? ['withReplacement']) libraryOperations[op] = (libraryOperations[op] ?? 0) + 1
+  }
 
   return {
     n,
@@ -438,6 +445,7 @@ function summarizeGroup(items) {
     usageMissing: count((r) => Boolean(r.usage?.usageMissing)),
     firstRedBeforeEdit: count((r) => r.firstRedBeforeFirstSourceEdit === true),
     techniques,
+    libraryOperations,
     e9Eligible: eligible,
     refactor,
     valid,
@@ -536,6 +544,13 @@ for (const arm of ['control', 'treatment']) {
     .map(([k, v]) => `${k}=${v}`)
     .join(' ')
   console.log(`      technique:   ${tech} | usesExecutionPoints=${f(s.adoptedEp)}`)
+  if (s.adoptedEp > 0) {
+    const ops = Object.entries(s.libraryOperations)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k}=${v}`)
+      .join(' ')
+    console.log(`      library:     trials per operation (a trial can use several): ${ops}`)
+  }
   console.log(`      process:     firstRedBeforeFirstSourceEdit=${f(s.firstRedBeforeEdit)} | wall-clock ${s.avgSec.toFixed(1)} s/trial`)
   const perSolved =
     s.solved > 0

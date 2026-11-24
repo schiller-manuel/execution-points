@@ -1,5 +1,5 @@
 /**
- * Statistical helpers for benchmark analysis (harness v2.4; P1.5, P2.3–P2.5, ST-01..ST-07):
+ * Statistical helpers for benchmark analysis (harness v2.5; P1.5, P2.3–P2.5, ST-01..ST-07):
  * - Approximate Wilson 95% confidence intervals for binomial proportions.
  * - Stratified Cochran–Mantel–Haenszel (CMH) test across matched blocks
  *   `(runId x taskId x requested model x reasoning x promptStyle x trialIndex)`.
