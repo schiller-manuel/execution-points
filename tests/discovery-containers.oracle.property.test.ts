@@ -1,9 +1,9 @@
 /**
- * This oracle owns what `indexTargetFile` records for selecting an expression by where it
- * stands: every selectable expression's line, its text on one line and the object a member
- * call is made on, and every function, class and variable declarator that contains a
- * selectable expression, with what lies inside it. It is checked on the output of
- * `indexTargetFile`, and it owns `src/discovery.ts#indexTargetFile`.
+ * This oracle owns what `indexTargetFile` records about where an expression stands: every
+ * selectable expression's line, its text on one line and the object a member call is made on,
+ * and every function, class and variable declarator that contains a selectable expression,
+ * with what lies inside it. It is checked on the output of `indexTargetFile`, and it owns
+ * `src/discovery.ts#indexTargetFile`.
  *
  * ```ts
  * indexTargetFile(file, source, root)
@@ -23,7 +23,8 @@
  *
  * Two parts are checked: the **places** (a line and a text for each expression, as an editor
  * and `execution-points list` show them) and the **containment** (each container's name, line,
- * and everything inside it at any depth).
+ * and everything inside it at any depth). The places are for the listing alone: a visitor is
+ * handed the containment and the object, and no line and no text.
  *
  * For every module, `indexTargetFile` gives each selectable expression the line it starts on,
  * counted from 1, its source text with every run of whitespace as one space and cut to 72
@@ -32,9 +33,10 @@
  * with the name it is declared under (a function or class assigned to a constant has the
  * constant's name; an anonymous one has the empty name), the line it starts on, and exactly
  * the selectable expressions and the other containers that lie inside it, however deep
- * (Decisions by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: build the selector
- * fields `text`, `line`, the receiver of a call and the binding a call initializes; say
- * "inside" by Babel-style nested traversal instead of `inFunction` and `inClass`).
+ * (Decisions by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: a command that lists
+ * what can be selected, each expression with its position and text in the source; the
+ * receiver of a call as `object`; say "inside" by Babel-style nested traversal instead of
+ * `inFunction` and `inClass`).
  *
  * The model works on a tree it builds the module from: it knows what stands inside what because
  * it put it there, and where each line is because it wrote the lines. It never parses.
@@ -50,9 +52,9 @@ oracleProperty({
     statement:
       'For every module, indexTargetFile gives each selectable expression the line it starts on, counted from 1, its source text with every run of whitespace as one space and cut to 72 characters, and, for a call made on an object, that object\'s text; and it lists every function, class and variable declarator that contains at least one selectable expression, with the name it is declared under (a function or class assigned to a constant has the constant\'s name, an anonymous one the empty name), the line it starts on, and exactly the selectable expressions and the other containers that lie inside it, however deep.',
     authority:
-      'Decisions by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: build the selector fields `text`, `line`, the receiver of a member call and the binding a call initializes; say "inside" by Babel-style nested traversal (a visitor object keyed by node type, `Function` and `Class`, `traverse`) instead of `inFunction` and `inClass`.',
+      'Decisions by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: a command that lists what can be selected, each expression with the position and text it has in the source; the receiver of a member call as `object`; say "inside" by Babel-style nested traversal (a visitor object keyed by node type, `Function` and `Class`, `traverse`) instead of `inFunction` and `inClass`. Since the decision of the same day to drop `line` and `text` from the selectors, the line and the text serve the listing alone.',
     limits:
-      'Twenty-two modules written from a tree of calls, sums, functions in seven forms, classes in two, fields and constants, with and without a byte-order mark and Windows line ends. The decisions fixed the fields and the traversal. That the receiver is called `object`, that a variable declarator is a third container, and that `text` is the listing\'s text (one line, cut to 72) are proposals that await the maintainer\'s word.',
+      'Twenty-two modules written from a tree of calls, sums, functions in seven forms, classes in two, fields and constants, with and without a byte-order mark and Windows line ends. That a variable declarator is a third container is a proposal.',
   },
   histories: {
     enumerated: CONTAINER_HISTORIES,

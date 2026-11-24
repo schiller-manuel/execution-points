@@ -581,8 +581,6 @@ function renderNode(node: EmittedNode): string {
     node.operator === undefined ? 'readonly operator?: undefined;' : `readonly operator: ${JSON.stringify(node.operator)};`,
     node.object === undefined ? 'readonly object?: undefined;' : `readonly object: ${JSON.stringify(node.object)};`,
     `readonly nth: ${node.nth};`,
-    `readonly line: ${node.line};`,
-    `readonly text: ${JSON.stringify(node.text)};`,
   ]
   if (node.unportableReason) fields.push(`readonly __unportable: ${JSON.stringify(node.unportableReason)};`)
   fields.push(
@@ -624,7 +622,7 @@ function renderFileModule(
       .map(
         (container, index) =>
           `type ${containerName(index)} = { readonly type: ${JSON.stringify(container.type)}; readonly name: ${JSON.stringify(container.name)}; ` +
-          `readonly line: ${container.line}; readonly __inside: ${unionOf([...container.nodes.map(nodeName), ...container.containers.map(containerName)])} };\n`,
+          `readonly __inside: ${unionOf([...container.nodes.map(nodeName), ...container.containers.map(containerName)])} };\n`,
       )
       .join('')
     text += `type __EPContainers${i} = ${unionOf(entry.containers.map((_, index) => containerName(index)))};\n`

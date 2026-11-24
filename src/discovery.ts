@@ -51,9 +51,9 @@ export interface IndexedNode {
   readonly callee?: string
   readonly operator?: string
   readonly nth: number
-  /** The line the expression starts on, counted from 1. */
+  /** The line the expression starts on, counted from 1. For `execution-points list`: a visitor is not handed it. */
   readonly line: number
-  /** The expression's source on one line: see `excerpt`. */
+  /** The expression's source on one line: see `excerpt`. For the listing as well. */
   readonly text: string
   /** For a call made on an object, that object's source on one line: `cache` in `cache.get(key)`. */
   readonly object?: string
@@ -71,7 +71,7 @@ export interface IndexedContainer {
   readonly type: 'Function' | 'Class' | 'VariableDeclarator'
   /** The name it is declared under; a function or class assigned to a constant has the constant's name, an anonymous one has none. */
   readonly name: string
-  /** The line it starts on, counted from 1. */
+  /** The line it starts on, counted from 1. For the listing, as an expression's line is. */
   readonly line: number
   /** The selectable expressions inside it, however deep, as indexes into the file's nodes. */
   readonly nodes: readonly number[]

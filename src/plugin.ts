@@ -127,8 +127,8 @@ export function executionPoints(options: ExecutionPointsOptions = {}): Execution
         register: uniqueName(code, '__epRegister'),
         file: uniqueName(code, '__epFile'),
       }
-      // What a visitor is handed for each expression when the test runs.
-      const metadata = entry.nodes.map(({ id: nodeId, kind, inFunction, callee, operator, object, nth, line, text }) => ({
+      // What a visitor is handed when the test runs: what the code calls things, and nothing about where they are written.
+      const metadata = entry.nodes.map(({ id: nodeId, kind, inFunction, callee, operator, object, nth }) => ({
         id: nodeId,
         kind,
         inFunction,
@@ -136,13 +136,12 @@ export function executionPoints(options: ExecutionPointsOptions = {}): Execution
         ...(operator !== undefined ? { operator } : {}),
         ...(object !== undefined ? { object } : {}),
         nth,
-        line,
-        text,
       }))
+      const containers = entry.containers.map(({ type, name, nodes, containers: inner }) => ({ type, name, nodes, containers: inner }))
       const homes = entry.nodes.map((node) => node.home)
       const header =
         `import { invoke as ${names.invoke}, registerFile as ${names.register} } from ${JSON.stringify(runtimeModule)};\n` +
-        `const ${names.file} = ${names.register}(${JSON.stringify(entry.relativeFile)}, ${JSON.stringify(metadata)}, ${JSON.stringify(homes)}, ${JSON.stringify(entry.containers)});\n`
+        `const ${names.file} = ${names.register}(${JSON.stringify(entry.relativeFile)}, ${JSON.stringify(metadata)}, ${JSON.stringify(homes)}, ${JSON.stringify(containers)});\n`
 
       return instrument(code, file, entry, header, names)
     },

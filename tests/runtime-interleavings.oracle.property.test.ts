@@ -351,7 +351,7 @@ oracleProperty({
       const ids = callees.map((callee) => `${file}#work:CallExpression:${callee}:0`)
       registerFile(
         file,
-        ids.map((id, index) => ({ id, kind: 'CallExpression' as const, inFunction: 'work', callee: callees[index]!, nth: 0, line: 1, text: '' })),
+        ids.map((id, index) => ({ id, kind: 'CallExpression' as const, inFunction: 'work', callee: callees[index]!, nth: 0 })),
         [1, 1, 1],
       )
       const [step, other, idle] = callees.map(

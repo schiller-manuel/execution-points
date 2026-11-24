@@ -48,11 +48,11 @@
     "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
   },
   {
-    "id": "one-selection-per-expression-whatever-it-captures",
+    "id": "the-first-way-decides-the-captures",
     "source": "src/runtime.ts",
-    "find": "[JSON.stringify([selection.id, selection.captureNames]), selection]",
-    "replace": "[selection.id, selection]",
-    "intent": "two handlers that select one expression with different captures count as one selection",
+    "find": "captureNames: [...new Set(selected.flatMap((selection) => selection.captureNames))]",
+    "replace": "captureNames: selected[0]!.captureNames",
+    "intent": "an expression reached on several ways keeps the captures of the first way only (until 2026-11-24 this entry was 'one selection per expression whatever it captures', and passed every oracle: F18)",
     "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
   },
   {
@@ -150,5 +150,77 @@
     "replace": "        segment(vlq(0) + vlq(lineOf[from]! - lastLine) + vlq(0 - lastColumn))\n        lastLine = lineOf[from]!\n        lastColumn = 0\n",
     "intent": "the source map sends every copied token to the start of its line (in the place of the first review's wrong version 4)",
     "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "the-last-way-decides-the-captures",
+    "source": "src/runtime.ts",
+    "find": "captureNames: [...new Set(selected.flatMap((selection) => selection.captureNames))]",
+    "replace": "captureNames: selected.at(-1)!.captureNames",
+    "intent": "an expression reached on several ways keeps the captures of the last way only",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
+  },
+  {
+    "id": "different-captures-are-two-selections",
+    "source": "src/runtime.ts",
+    "find": "new Set(selected.map((selection) => selection.id)).size",
+    "replace": "new Set(selected.map((selection) => JSON.stringify([selection.id, selection.captureNames]))).size",
+    "intent": "one expression selected with a different capture on each way counts as two matches (the behavior before F18 was fixed)",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
+  },
+  {
+    "id": "a-local-captured-on-two-ways-is-read-twice",
+    "source": "src/runtime.ts",
+    "find": "captureNames: [...new Set(selected.flatMap((selection) => selection.captureNames))]",
+    "replace": "captureNames: selected.flatMap((selection) => selection.captureNames)",
+    "intent": "the captures of all ways are joined without dropping a name that two ways captured",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
+  },
+  {
+    "id": "captures-merge-across-expressions",
+    "source": "src/runtime.ts",
+    "find": "const matched = new Set(selected.map((selection) => selection.id)).size",
+    "replace": "const matched = Math.min(1, new Set(selected.map((selection) => selection.id)).size)",
+    "intent": "several expressions that the handlers return are taken as one selection, the first, with the captures of all",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
+  },
+  {
+    "id": "the-plugin-registers-the-line-and-text-again",
+    "source": "src/plugin.ts",
+    "find": "({ id: nodeId, kind, inFunction, callee, operator, object, nth }) => ({\n        id: nodeId,",
+    "replace": "({ id: nodeId, kind, inFunction, callee, operator, object, nth, line, text }) => ({\n        line,\n        text,\n        id: nodeId,",
+    "intent": "a visitor is handed each expression's line and text when the test runs, which the compiler does not know",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
+  },
+  {
+    "id": "the-plugin-registers-a-container-with-its-line",
+    "source": "src/plugin.ts",
+    "find": "JSON.stringify(containers)});",
+    "replace": "JSON.stringify(entry.containers)});",
+    "intent": "a visitor is handed each container's line when the test runs",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
+  },
+  {
+    "id": "the-registry-gives-an-expression-its-line-again",
+    "source": "src/contracts.ts",
+    "find": "    `readonly nth: ${node.nth};`,\n  ]",
+    "replace": "    `readonly nth: ${node.nth};`,\n    `readonly line: ${node.line};`,\n  ]",
+    "intent": "the compiler lets a visitor compare an expression's line",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
+  },
+  {
+    "id": "the-registry-gives-an-expression-its-text-again",
+    "source": "src/contracts.ts",
+    "find": "    `readonly nth: ${node.nth};`,\n  ]",
+    "replace": "    `readonly nth: ${node.nth};`,\n    `readonly text: ${JSON.stringify(node.text)};`,\n  ]",
+    "intent": "the compiler lets a visitor compare an expression's text",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
+  },
+  {
+    "id": "the-registry-gives-a-container-its-line-again",
+    "source": "src/contracts.ts",
+    "find": "`readonly __inside: ${unionOf(",
+    "replace": "`readonly line: ${container.line}; readonly __inside: ${unionOf(",
+    "intent": "the compiler lets a visitor compare a container's line",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
   }
 ]

@@ -115,7 +115,7 @@ oracleProperty({
       copiesRuns += 1
       const file = `copies-${copiesRuns}.ts`
       const id = `${file}#n0`
-      const nodes = [{ id, kind: 'CallExpression' as const, inFunction: 'work', callee: 'send', nth: 0, line: 1, text: '' }]
+      const nodes = [{ id, kind: 'CallExpression' as const, inFunction: 'work', callee: 'send', nth: 0 }]
       const flags = registering.registerFile(file, nodes, [1])
       const others = await Promise.all(COPIES.map(load))
       const flagsAreShared = others.every((runtime) => runtime.registerFile(file, nodes, [1]) === flags)

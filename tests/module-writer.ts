@@ -2,6 +2,10 @@
  * Modules written from a tree, for the oracles that ask where an expression stands. The writer
  * knows what is inside what because it put it there, and where each line is because it wrote
  * the lines. It never parses.
+ *
+ * Two readers use it. The listing (`indexTargetFile`, `execution-points list`) owes each
+ * expression's place: `owed`. A visitor is handed no place, only what the code calls things and
+ * what lies inside what: `handed`.
  */
 /** A call, optionally on an object and optionally written over several lines. */
 export interface Call {
@@ -92,18 +96,27 @@ export function writeModule(history: ContainerHistory) {
   const containers: Array<OwedContainer> = []
   // The containers that are open while a line is written, innermost last.
   const open: Array<OwedContainer> = []
+  // What lies inside each container, as the things themselves.
+  const inside = new Map<OwedContainer, { nodes: Array<OwedNode>; containers: Array<OwedContainer> }>()
   const keyOfContainer = (c: OwedContainer) => `${c.type} ${c.name} @${c.line}`
 
   const enter = (type: string, name: string, line: number): OwedContainer => {
     const container: OwedContainer = { type, name, line, nodes: [], containers: [] }
-    for (const outer of open) outer.containers.push(keyOfContainer(container))
+    for (const outer of open) {
+      outer.containers.push(keyOfContainer(container))
+      inside.get(outer)!.containers.push(container)
+    }
+    inside.set(container, { nodes: [], containers: [] })
     containers.push(container)
     open.push(container)
     return container
   }
   const note = (node: OwedNode) => {
     nodes.push(node)
-    for (const outer of open) outer.nodes.push(`${node.line}:${node.callee ?? node.operator}`)
+    for (const outer of open) {
+      outer.nodes.push(`${node.line}:${node.callee ?? node.operator}`)
+      inside.get(outer)!.nodes.push(node)
+    }
   }
   const oneLine = (written: ReadonlyArray<string>) => {
     const text = written.map((line) => line.trim()).join(' ')
@@ -201,7 +214,7 @@ export function writeModule(history: ContainerHistory) {
   for (const item of history.body) statement(item, '')
 
   const source = (history.bom ? '﻿' : '') + lines.join(history.crlf ? '\r\n' : '\n') + (history.crlf ? '\r\n' : '\n')
-  return { source, nodes, containers }
+  return { source, nodes, containers, inside }
 }
 
 export const byPlace = (a: { line: number; text?: string; type?: string }, b: { line: number; text?: string; type?: string }) =>
@@ -225,6 +238,80 @@ export function owed(history: ContainerHistory) {
       .sort(byPlace),
   }
 }
+
+/** An expression as a visitor reads it: what the code calls it, and nothing about where it is written. */
+export interface HandedNode {
+  kind: string
+  callee?: string
+  operator?: string
+  object?: string
+  /** Every property the node has. */
+  fields: Array<string>
+}
+export interface HandedContainer {
+  type: string
+  name: string
+  /** Every property the container has. */
+  fields: Array<string>
+  /** The expressions inside, each as `keyOfHandedNode` writes it. */
+  nodes: Array<string>
+  /** The containers inside, each as `keyOfHandedContainer` writes it. */
+  containers: Array<string>
+}
+
+type Named = Pick<HandedNode, 'kind' | 'callee' | 'operator' | 'object'>
+
+/** An expression without its place: its kind, its callee or operator, and the object it is called on. */
+export const keyOfHandedNode = ({ kind, callee, operator, object }: Named): string =>
+  `${kind} ${callee ?? operator ?? ''}${object === undefined ? '' : ` on ${object}`}`
+
+/** A container without its place: its type, its name, and the expressions inside it, which tell two of one name apart. */
+export const keyOfHandedContainer = (type: string, name: string, nodes: ReadonlyArray<Named>): string =>
+  `${type} ${name} [${nodes.map(keyOfHandedNode).sort().join(', ')}]`
+
+const byText = (a: object, b: object) => JSON.stringify(a).localeCompare(JSON.stringify(b))
+
+/**
+ * What a module owes a visitor when the test runs. An expression has an id, the function it is
+ * in and its number there, its kind, its callee or operator, and the object a member call is
+ * made on; a container has its type, its name, and what is inside it. Neither has a line or a
+ * text.
+ */
+export function handed(history: ContainerHistory): { nodes: Array<HandedNode>; containers: Array<HandedContainer> } {
+  const { nodes, containers, inside } = writeModule(history)
+  const keys = nodes.map(keyOfHandedNode)
+  const twice = keys.find((key, index) => keys.indexOf(key) !== index)
+  if (twice !== undefined) throw new Error(`${history.name}: two expressions read as "${twice}", so nothing but their place tells them apart.`)
+  const keyOf = (container: OwedContainer) => keyOfHandedContainer(container.type, container.name, inside.get(container)!.nodes)
+  return {
+    nodes: nodes
+      .map(({ kind, callee, operator, object }) => ({
+        kind,
+        ...(callee !== undefined ? { callee } : {}),
+        ...(operator !== undefined ? { operator } : {}),
+        ...(object !== undefined ? { object } : {}),
+        fields: ['id', 'inFunction', 'kind', 'nth', ...(callee !== undefined ? ['callee'] : []), ...(operator !== undefined ? ['operator'] : []), ...(object !== undefined ? ['object'] : [])].sort(),
+      }))
+      .sort(byText),
+    // Only a container with an expression inside is registered, and an empty one inside it is not either.
+    containers: containers
+      .filter((container) => inside.get(container)!.nodes.length > 0)
+      .map((container) => ({
+        type: container.type,
+        name: container.name,
+        fields: ['containers', 'name', 'nodes', 'type'],
+        nodes: inside.get(container)!.nodes.map(keyOfHandedNode).sort(),
+        containers: inside
+          .get(container)!
+          .containers.filter((inner) => inside.get(inner)!.nodes.length > 0)
+          .map(keyOf)
+          .sort(),
+      }))
+      .sort(byText),
+  }
+}
+
+export const sortHanded = <T extends object>(items: ReadonlyArray<T>): Array<T> => [...items].sort(byText)
 
 export const CONTAINER_HISTORIES: ReadonlyArray<ContainerHistory> = [
   { name: 'call-at-the-top', states: ['no-container'], body: [call('a')] },

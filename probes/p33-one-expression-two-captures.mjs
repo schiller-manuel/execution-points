@@ -1,5 +1,8 @@
 // Probe (end to end, real tsc and Vitest): one expression that two containers lead to, selected
 // with a different capture on each way. What does the compiler make of it, and what the runtime?
+// This was F18: until 2026-11-24 the compiler accepted the second case and the runtime refused it
+// as two matches, and in the third the compiler gave the point no local at all. Now one expression
+// is one selection that captures what any way captured, on both sides.
 import { consumer, tail } from './e2e.mjs'
 
 const src = `export function outer(list: string[], prefix: string) {
@@ -23,6 +26,24 @@ test('runs', () => {
 })
 test('runs', () => {
   expect(point.withReplacement(({ locals, original }) => locals.prefix + '|' + locals.each + '|' + original(), () => outer(['a'], 'x'))).toEqual(['x|a|xa'])
+})`,
+  'the node on one way, a capture on the other': `const point = select('src/app.ts', {
+  Function: (fn) => fn.traverse({ BinaryExpression: (sum) => (fn.name === 'outer' ? sum : sum.capture('each')) }),
+})
+test('runs', () => {
+  expect(point.withReplacement(({ locals, original }) => locals.each + '|' + original(), () => outer(['a'], 'x'))).toEqual(['a|xa'])
+})`,
+  'captures that overlap': `const point = select('src/app.ts', {
+  Function: (fn) => fn.traverse({ BinaryExpression: (sum) => (fn.name === 'outer' ? sum.capture('list', 'prefix') : sum.capture('prefix', 'each')) }),
+})
+test('runs', () => {
+  expect(point.withReplacement(({ locals, original }) => [Object.keys(locals).sort().join(), locals.list.length, locals.prefix, locals.each, original()].join('|'), () => outer(['a'], 'x'))).toEqual(['each,list,prefix|1|x|a|xa'])
+})`,
+  'a local that no way captured': `const point = select('src/app.ts', {
+  Function: (fn) => fn.traverse({ BinaryExpression: (sum) => (fn.name === 'outer' ? sum.capture('prefix') : sum.capture('each')) }),
+})
+test('runs', () => {
+  expect(point.withReplacement(({ locals, original }) => locals.list + '|' + original(), () => outer(['a'], 'x'))).toEqual(['undefined|xa'])
 })`,
 }
 for (const [label, body] of Object.entries(cases)) {

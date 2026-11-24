@@ -17,23 +17,31 @@
  * point.withReplacement(async ({ original }) => (await original()) + 1, action) // compiles: db.get(key) is a Promise<number>
  * // fn.name === 'chekout'          → TS2367: no function of that name is inside Cart
  * // a handler that returns `fn`    → does not compile: a container is no selection
+ * // call.line, call.text, fn.line  → TS2339: a node does not say where it is written
+ * // call.capture('key') on one way to a call, call.capture('each') on another
+ * //                                → compiles, and locals has both key and each
  * ```
  *
  * A visitor that walks inward is only worth having if the compiler follows it: the handler of
  * the selected expression is typed by that expression, and a name that is not there is an error
  * before the test runs. Does the compiler still know the expression after two steps of
- * `traverse`? Does a call that two functions lead to count as one?
+ * `traverse`? Does a call that two functions lead to count as one, and which locals does its
+ * handler have when each way captured another?
  *
  * For every visitor object over the registry of a target module, a handler is given exactly the
  * nodes of its type that lie in scope (the file, or the inside of the container traversed), so
- * comparing a `name`, `callee`, `object`, `text` or `line` with a value that no such node has is
- * a compile error; the selected point has the type of the one expression the handlers return,
- * through any depth of `traverse`, and an expression reached through several containers is one
- * expression; no expression, or more than one, is a compile error when the point is used; a
- * handler that returns a container, and a key that is no node type, do not compile; and the
- * callback form sees the same new properties (Decision by Manuel Schiller (GitHub
- * schiller-manuel), 2026-11-24: "Nested traversal, keep callback too"; `probes/p30` is the
- * measurement that the compiler follows `traverse` and does not follow a parent chain).
+ * comparing a `name`, `callee` or `object` with a value that no such node has is a compile
+ * error; a node carries what the code calls things and not where it is written, so reading
+ * `line` or `text` of an expression, or `line` of a container, is a compile error; the selected
+ * point has the type of the one expression the handlers return, through any depth of
+ * `traverse`; an expression reached on several ways is one expression, whose locals are those
+ * that a handler captured on any of the ways; no expression, or more than one, is a compile
+ * error when the point is used; a handler that returns a container, and a key that is no node
+ * type, do not compile; and the callback form sees the same properties (Decisions by Manuel
+ * Schiller (GitHub schiller-manuel), 2026-11-24: "Nested traversal, keep callback too"; keep
+ * `object`, drop `line` and `text` from the selectors; an expression selected on several ways
+ * with a different capture on each is one selection that captures all of them. `probes/p30` is
+ * the measurement that the compiler follows `traverse` and does not follow a parent chain).
  *
  * The model is a table of what each snippet must do. The snippets differ in one thing each from
  * the first, which compiles.
@@ -208,19 +216,97 @@ void point`,
     rejectedWith: (text) => text.includes('nope'),
   },
   {
-    name: 'by-text-at-the-top',
-    states: ['compiles', 'top-of-file'],
+    name: 'by-object-at-the-top',
+    states: ['compiles', 'top-of-file', 'typed-by-the-expression'],
+    // One call in the file is made on `db`.
     code: `${header}
-const point = select(${file}, { CallExpression: (call) => call.text === 'cache.get(each)' && call })
-point.withReplacement(({ original }) => original(), () => 0)`,
+const point = select(${file}, { CallExpression: (call) => call.object === 'db' && call })
+point.withReplacement(async ({ original }) => (await original()) + 1, () => 0)`,
   },
   {
-    name: 'text-that-no-expression-has',
+    name: 'object-that-no-call-in-the-file-has',
     states: ['rejected', 'top-of-file', 'name-not-inside'],
     code: `${header}
-const point = select(${file}, { CallExpression: (call) => call.text === 'cache.get(other)' && call })
+const point = select(${file}, { CallExpression: (call) => call.object === 'store' && call })
 void point`,
     rejectedWith: (_text, codes) => codes.includes(2367),
+  },
+  {
+    name: 'a-call-has-no-text',
+    states: ['rejected', 'top-of-file', 'not-on-the-node'],
+    code: `${header}
+const point = select(${file}, { CallExpression: (call) => call.text === 'cache.get(each)' && call })
+void point`,
+    rejectedWith: (text, codes) => codes.includes(2339) && text.includes("'text'"),
+  },
+  {
+    name: 'a-call-has-no-line',
+    states: ['rejected', 'top-of-file', 'not-on-the-node'],
+    code: `${header}
+const point = select(${file}, { CallExpression: (call) => call.line === 18 && call })
+void point`,
+    rejectedWith: (text, codes) => codes.includes(2339) && text.includes("'line'"),
+  },
+  {
+    name: 'a-function-has-no-line',
+    states: ['rejected', 'one-step', 'not-on-the-node'],
+    code: `${header}
+const point = select(${file}, { Function: (fn) => fn.line === 22 && fn.traverse({ BinaryExpression: (sum) => sum }) })
+void point`,
+    rejectedWith: (text, codes) => codes.includes(2339) && text.includes("'line'"),
+  },
+  {
+    name: 'two-ways-capture-differently',
+    states: ['compiles', 'two-steps', 'several-ways-to-one-expression', 'captured', 'captures-differ'],
+    // Order's checkout and the callback inside it both lead to cache.get(each); each way captures another local.
+    code: `${header}
+const point = select(${file}, {
+  Class: (cls) => cls.name === 'Order' && cls.traverse({
+    Function: (fn) => fn.traverse({
+      CallExpression: (call) => call.callee === 'get' && (fn.name === 'checkout' ? call.capture('key') : call.capture('each')),
+    }),
+  }),
+})
+point.withReplacement(({ locals, original }) => {
+  const key: string = locals.key
+  const each: string = locals.each
+  void [key, each]
+  return original()
+}, () => 0)`,
+  },
+  {
+    name: 'captured-on-one-way-only',
+    states: ['compiles', 'two-steps', 'several-ways-to-one-expression', 'captured', 'captures-differ', 'a-way-without-a-capture'],
+    code: `${header}
+const point = select(${file}, {
+  Class: (cls) => cls.name === 'Order' && cls.traverse({
+    Function: (fn) => fn.traverse({
+      CallExpression: (call) => call.callee === 'get' && (fn.name === 'checkout' ? call : call.capture('each')),
+    }),
+  }),
+})
+point.withReplacement(({ locals, original }) => {
+  const each: string = locals.each
+  void each
+  return original()
+}, () => 0)`,
+  },
+  {
+    name: 'a-local-that-no-way-captured',
+    states: ['rejected', 'two-steps', 'several-ways-to-one-expression', 'captured', 'captures-differ', 'a-way-without-a-capture'],
+    code: `${header}
+const point = select(${file}, {
+  Class: (cls) => cls.name === 'Order' && cls.traverse({
+    Function: (fn) => fn.traverse({
+      CallExpression: (call) => call.callee === 'get' && (fn.name === 'checkout' ? call : call.capture('each')),
+    }),
+  }),
+})
+point.withReplacement(({ locals, original }) => {
+  void locals.key
+  return original()
+}, () => 0)`,
+    rejectedWith: (text, codes) => codes.includes(2339) && text.includes("'key'"),
   },
   {
     name: 'handler-returns-the-container',
@@ -246,12 +332,20 @@ const point = select(${file}, (n) => n.callee === 'get' && n.object === 'db' && 
 point.withReplacement(async ({ original }) => (await original()) + 1, () => 0)`,
   },
   {
-    name: 'callback-form-sees-the-line',
-    states: ['compiles', 'callback-form'],
+    name: 'callback-form-has-no-line',
+    states: ['rejected', 'callback-form', 'not-on-the-node'],
     code: `${header}
 const point = select(${file}, (n) => n.line === 23 && n)
-const n: number = point.withReplacement(({ original }) => original() + 1, () => 0)
-void n`,
+void point`,
+    rejectedWith: (text, codes) => codes.includes(2339) && text.includes("'line'"),
+  },
+  {
+    name: 'callback-form-has-no-text',
+    states: ['rejected', 'callback-form', 'not-on-the-node'],
+    code: `${header}
+const point = select(${file}, (n) => n.text === 'a + b' && n)
+void point`,
+    rejectedWith: (text, codes) => codes.includes(2339) && text.includes("'text'"),
   },
 ]
 
@@ -263,11 +357,11 @@ oracleProperty({
   owns: ['dist/runtime.d.mts', 'src/contracts.ts#renderFileModule'],
   law: {
     statement:
-      'For every visitor object over the registry of a target module, a handler is given exactly the nodes of its type that lie in scope (the file, or the inside of the container traversed), so comparing a name, callee, object, text or line with a value that no such node has is a compile error; the selected point has the type of the one expression the handlers return, through any depth of traverse, and an expression reached through several containers is one expression; no expression, or more than one, is a compile error when the point is used; a handler that returns a container, and a key that is no node type, do not compile; and the callback form sees the same new properties.',
+      'For every visitor object over the registry of a target module, a handler is given exactly the nodes of its type that lie in scope (the file, or the inside of the container traversed), so comparing a name, callee or object with a value that no such node has is a compile error; a node carries what the code calls things and not where it is written, so reading line or text of an expression, or line of a container, is a compile error; the selected point has the type of the one expression the handlers return, through any depth of traverse; an expression reached on several ways is one expression, whose locals are those that a handler captured on any of the ways; no expression, or more than one, is a compile error when the point is used; a handler that returns a container, and a key that is no node type, do not compile; and the callback form sees the same properties.',
     authority:
-      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24, on the selector API: "Nested traversal, keep callback too". probes/p30-what-the-compiler-can-follow.mjs measures that the compiler follows traverse and does not follow a parent chain.',
+      'Decisions by Manuel Schiller (GitHub schiller-manuel), 2026-11-24. On the selector API: "Nested traversal, keep callback too". On its properties: keep `object`, drop `line` and `text` from the selectors. On captures: an expression selected on several ways with a different capture on each is one selection that captures all of them. probes/p30-what-the-compiler-can-follow.mjs measures that the compiler follows traverse and does not follow a parent chain.',
     limits:
-      'Eighteen snippets against one target module of two classes, three methods, a callback, a function and two constants, checked through TypeScript 7.1 semantic diagnostics. A rejected snippet is checked for the diagnostic that says why, by code or by the text it must contain, not for its position.',
+      'Twenty-five snippets against one target module of two classes, three methods, a callback, a function and two constants, checked through TypeScript 7.1 semantic diagnostics. A rejected snippet is checked for the diagnostic that says why, by code or by the text it must contain, not for its position. The compiler types the locals from what the handlers can return, so a capture on a way that the code never takes is in the type and not in the handler\'s locals when the test runs.',
   },
   histories: {
     enumerated: VISITOR_CASES.map(({ name, states }) => ({ name, states })),
@@ -285,6 +379,9 @@ oracleProperty({
       'none',
       'several-ways-to-one-expression',
       'captured',
+      'captures-differ',
+      'a-way-without-a-capture',
+      'not-on-the-node',
       'not-a-selection',
     ],
   },
@@ -320,6 +417,20 @@ oracleProperty({
       history: { enumerated: 'function-name-that-is-not-inside' },
       corrupt: (trace) =>
         trace.map((o) => (o.checkpoint === 'snippet' ? { ...o, value: { compiles: true, saysWhy: true, registryErrors: [] } } : o)),
+    },
+    {
+      name: 'a-node-says-which-line-it-is-on',
+      law: 'snippet',
+      history: { enumerated: 'callback-form-has-no-line' },
+      corrupt: (trace) =>
+        trace.map((o) => (o.checkpoint === 'snippet' ? { ...o, value: { compiles: true, saysWhy: true, registryErrors: [] } } : o)),
+    },
+    {
+      name: 'the-capture-of-one-way-is-lost',
+      law: 'snippet',
+      history: { enumerated: 'captured-on-one-way-only' },
+      corrupt: (trace) =>
+        trace.map((o) => (o.checkpoint === 'snippet' ? { ...o, value: { compiles: false, saysWhy: true, registryErrors: [] } } : o)),
     },
     {
       name: 'the-selected-expression-is-not-known',

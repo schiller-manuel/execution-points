@@ -17,10 +17,6 @@ export interface NodeDescriptor {
   readonly operator?: string
   /** For a call made on an object, that object as written: `cache` in `cache.get(key)`. */
   readonly object?: string
-  /** The line the expression starts on, counted from 1. */
-  readonly line: number
-  /** The expression as `execution-points list` prints it: on one line, cut to 72 characters. */
-  readonly text: string
   readonly result: unknown
   readonly locals: object
 }
@@ -30,8 +26,6 @@ export interface ContainerDescriptor {
   readonly type: 'Function' | 'Class' | 'VariableDeclarator'
   /** The name it is declared under. A function or class assigned to a constant has the constant's name; an anonymous one has `''`. */
   readonly name: string
-  /** The line it starts on, counted from 1. */
-  readonly line: number
   /** What lies inside it, however deep. It exists in the types alone and types the visitor of `traverse`. */
   readonly __inside: unknown
 }
@@ -239,10 +233,13 @@ type CleanReturn<R> = Exclude<R, undefined | void | null | false>
 type ExtractNode<R> =
   CleanReturn<R> extends infer Item ? (Item extends { readonly __node: infer N extends NodeDescriptor } ? N : never) : never
 
-type ExtractCapturedLocals<R> =
-  CleanReturn<R> extends CapturedSelection<infer N, infer Keys>
-    ? { [K in Keys[number] & keyof N['locals']]: N['locals'][K] }
-    : {}
+/** The names that `Item` captures: of all the selections a visitor can return, the ones any of them captures. */
+type CapturedNames<Item> = Item extends CapturedSelection<NodeDescriptor, infer Keys> ? Keys[number] : never
+
+/** One expression is one selection however many ways lead to it, and it has every local that a way captured. */
+type ExtractCapturedLocals<R> = {
+  [K in CapturedNames<CleanReturn<R>> & keyof ExtractNode<R>['locals']]: ExtractNode<R>['locals'][K]
+}
 
 type SelectFromNodes<N extends NodeDescriptor, Captured extends object> = [N] extends [never]
   ? {
@@ -250,7 +247,7 @@ type SelectFromNodes<N extends NodeDescriptor, Captured extends object> = [N] ex
     }
   : IsUnion<N> extends true
     ? {
-        readonly __selectionError: 'Selector matched multiple expressions: __matched lists them. Compare more of the node (kind, callee, operator, object, inFunction, line), or look inside one function or class with traverse().'
+        readonly __selectionError: 'Selector matched multiple expressions: __matched lists them. Compare more of the node (kind, callee, operator, object, inFunction, nth), or look inside one function or class with traverse().'
         readonly __matched: N['id']
       }
     : // An expression whose type cannot be written has an opaque result in the registry, which only
@@ -925,17 +922,17 @@ export function select(file: string, visitor: ((node: never) => unknown) | objec
             return selectedBy((visitor as (node: VisitedNode) => unknown)(node), node)
           })
         : visit(visitor as Handlers, nodes.keys(), containers.keys())
-    // An expression that several containers lead to is still one expression.
-    const matches = [...new Map(selected.map((selection) => [JSON.stringify([selection.id, selection.captureNames]), selection])).values()]
-    if (matches.length !== 1) {
+    const matched = new Set(selected.map((selection) => selection.id)).size
+    if (matched !== 1) {
       throw new Error(
-        `[execution-points] Visitor for "${file}" must match exactly 1 expression; matched ${matches.length}.` +
+        `[execution-points] Visitor for "${file}" must match exactly 1 expression; matched ${matched}.` +
           (strays > 0
             ? ` For ${strays} of the file's nodes it returned something that is not the node: return the node it was given, node.capture(...), what node.traverse(...) returned, or nothing.`
             : ''),
       )
     }
-    cached = matches[0]!
+    // An expression that several ways lead to is one selection, and it captures what any of them captured.
+    cached = { id: selected[0]!.id, captureNames: [...new Set(selected.flatMap((selection) => selection.captureNames))] }
     return cached
   }
 

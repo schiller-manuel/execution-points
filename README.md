@@ -55,7 +55,7 @@ const result = quotePoint.withReplacement(
 )
 ```
 
-- `node` is a discriminated union of every selectable expression in `'examples/checkout.ts'` (`kind`, `callee`, `operator`, `object`, `inFunction`, `nth`, `line`, `text`, `id`). `callee` and `operator` are mutually exclusive (`operator?: undefined` on calls, `callee?: undefined` on binary expressions), so `node.callee === 'send' && node` narrows cleanly without checking `node.kind`.
+- `node` is a discriminated union of every selectable expression in `'examples/checkout.ts'` (`kind`, `callee`, `operator`, `object`, `inFunction`, `nth`, `id`). `callee` and `operator` are mutually exclusive (`operator?: undefined` on calls, `callee?: undefined` on binary expressions), so `node.callee === 'send' && node` narrows cleanly without checking `node.kind`.
 - Returning 0 nodes or 2+ nodes (ambiguous match) is rejected at compile time (multi-match errors list the matched node IDs under `__matched`).
 - **Keep selectors minimal:** omit `inFunction` (and `nth`) whenever `callee` or `operator` is already unique in the file. Filtering on `inFunction` only when disambiguating multiple sites prevents a test from breaking (`matched 0`) when a call moves into an extracted private helper.
 - `.capture(...)` autocompletes every in-scope local at that expression and rejects unknown binding names at compile time. At runtime, a name the expression cannot see makes the evaluation throw an error that lists the locals there are. Calling `.capture()` with no arguments types `locals` as `{}`.
@@ -83,18 +83,19 @@ const readingForRaw = select('examples/profile.ts', {
 
 | Key | The handler is called for | Properties to compare |
 | --- | --- | --- |
-| `CallExpression` | every selectable call in scope | `callee`, `object` (what the call is made on, as written: `cache` in `cache.get(key)`), `line`, `text`, `nth` |
-| `BinaryExpression` | every selectable binary operation | `operator`, `line`, `text`, `nth` |
-| `ConditionalExpression` | every selectable ternary | `line`, `text`, `nth` |
-| `Function` | every function, method, accessor, constructor and arrow function with a selectable expression inside it | `name`, `line` |
-| `Class` | every class with one inside it | `name`, `line` |
-| `VariableDeclarator` | every `const`, `let` or `var` name whose initializer has one inside it | `name`, `line` |
+| `CallExpression` | every selectable call in scope | `callee`, `object` (what the call is made on, as written: `cache` in `cache.get(key)`), `nth` |
+| `BinaryExpression` | every selectable binary operation | `operator`, `nth` |
+| `ConditionalExpression` | every selectable ternary | `nth` |
+| `Function` | every function, method, accessor, constructor and arrow function with a selectable expression inside it | `name` |
+| `Class` | every class with one inside it | `name` |
+| `VariableDeclarator` | every `const`, `let` or `var` name whose initializer has one inside it | `name` |
 
 - In scope means: the whole file for the visitor given to `select`, and everything inside the container, however deep, for the visitor given to its `traverse`. A call inside a callback inside a method is inside the method and inside the class.
 - A handler for an expression returns the node (or `node.capture(...)`) to select it. A handler for a container returns `container.traverse(visitor)`. Anything else selects nothing.
 - `Function` and `Class` are Babel's alias keys: one key for every kind of function, one for every kind of class. A function or class assigned to a constant has the constant's name, as `fn.name` has in JavaScript; an anonymous one has `''`.
-- `text` is the expression on one line, as `execution-points list` prints it; `line` counts from 1. Both tie a test to the source text, so use them when nothing else tells two expressions apart.
-- The compiler follows every step. A handler is typed with exactly the nodes in its scope, so `fn.name === 'chekout'` is a compile error when no such function is inside, and the selected point has the type of the one expression that is left. Selecting none, or more than one, is a compile error when the point is used, as with the callback form. An expression that two functions lead to is still one expression.
+- A node says what the code calls things, and not where it is written: it has no line and no source text, so a test does not break when a line is added above the expression or its arguments are reformatted. `npx execution-points list` prints both for every expression, to find it by. When nothing else tells two expressions apart, `nth` does: it counts the expressions that have the same `kind`, the same `callee` or `operator` and the same `inFunction`, in the order they are written, from 0.
+- The compiler follows every step. A handler is typed with exactly the nodes in its scope, so `fn.name === 'chekout'` is a compile error when no such function is inside, and the selected point has the type of the one expression that is left. Selecting none, or more than one, is a compile error when the point is used, as with the callback form.
+- An expression that several ways lead to is still one expression. A call inside a callback inside `checkout` is reached through `checkout` and through the callback, so a `Function` handler without a name check finds it twice, and it counts once. If the handler captures on each way, the point has every local that any way captured: `fn.name === 'checkout' ? call.capture('key') : call.capture('each')` gives a handler both `locals.key` and `locals.each`.
 
 Only properties that sit directly on the node can be compared, in both forms. A Babel `path` would let you write `path.node.callee.object.name` or `path.findParent(...)`, but TypeScript does not narrow a value through a nested property or a callback, so the compiler would no longer know which expression was selected (`node probes/p30-what-the-compiler-can-follow.mjs`). `traverse` is the step it does follow.
 

@@ -15,7 +15,7 @@
 // The wrong implementations of the runtime, discovery and the plugin are in
 // `checks/wrong-versions/`, in the gap check's own format:
 //
-//   pnpm exec oracle-gaps --package . --source src/runtime.ts,src/discovery.ts,src/plugin.ts \
+//   pnpm exec oracle-gaps --package . --source src/runtime.ts,src/discovery.ts,src/plugin.ts,src/contracts.ts \
 //     --seed 42 --mutants checks/wrong-versions --only authored:live-getters,authored:frozen-clones,…
 import { spawnSync } from 'node:child_process'
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -69,6 +69,13 @@ const mutants = [
   ['interleavings takes one point', 'argument-kinds', `declare function interleavings(points: readonly Waitable[],`, `declare function interleavings(points: readonly Waitable[] | Waitable,`],
   ['interleavings takes any object', 'argument-kinds', `declare function interleavings(points: readonly Waitable[],`, `declare function interleavings(points: object,`],
   ['order.run takes a value', 'argument-kinds', `run<Result>(action: () => Result | PromiseLike<Result>): Promise<Result>;`, `run<Result>(action: Result | PromiseLike<Result>): Promise<Result>;`],
+  // what a visitor is handed, and what a point captures when several ways lead to its expression
+  ['a capture counts only when every way captures', 'visitor', `type ExtractCapturedLocals<R> = { [K in CapturedNames<CleanReturn<R>> & keyof ExtractNode<R>['locals']]: ExtractNode<R>['locals'][K]; };`, `type ExtractCapturedLocals<R> = CleanReturn<R> extends CapturedSelection<infer N, infer Keys> ? { [K in Keys[number] & keyof N['locals']]: N['locals'][K]; } : {};`],
+  ['a point has every local of its expression, captured or not', 'visitor', `type ExtractCapturedLocals<R> = { [K in CapturedNames<CleanReturn<R>> & keyof ExtractNode<R>['locals']]: ExtractNode<R>['locals'][K]; };`, `type ExtractCapturedLocals<R> = ExtractNode<R>['locals'];`],
+  ['no capture made in a visitor reaches the point', 'visitor', `type ExtractCapturedLocals<R> = { [K in CapturedNames<CleanReturn<R>> & keyof ExtractNode<R>['locals']]: ExtractNode<R>['locals'][K]; };`, `type ExtractCapturedLocals<R> = {};`],
+  ['an expression is handed with a line', 'visitor', `'__unportable' | '__unportableLocals'> & {\n  readonly __node: N;`, `'__unportable' | '__unportableLocals'> & {\n  readonly line: number;\n  readonly __node: N;`],
+  ['an expression is handed with its text', 'visitor', `'__unportable' | '__unportableLocals'> & {\n  readonly __node: N;`, `'__unportable' | '__unportableLocals'> & {\n  readonly text: string;\n  readonly __node: N;`],
+  ['a container is handed with a line', 'visitor', `{\n  readonly type: Type;\n}> & Traversable;`, `{\n  readonly type: Type;\n}> & Traversable & { readonly line: number };`],
   // the type-level wrong versions of the first review (FINDINGS.md, "What the gap check does not show")
   ['capture always types locals as {}', 'older law', `SelectablePoint<N, { [P in K]: N['locals'][P]; }>;`, `SelectablePoint<N, {}>;`],
   ['a context loses Readonly<> around its locals', 'older law', `readonly locals: Readonly<Locals>;\n  /** Evaluate`, `readonly locals: Locals;\n  /** Evaluate`],

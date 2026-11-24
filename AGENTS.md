@@ -21,6 +21,13 @@ and runnable, and continue discussing unresolved API choices with the user.
   narrows through nothing else (`probes/p30-what-the-compiler-can-follow.mjs`);
   the compiler knowing which expression was selected is what types the
   handler.
+- A node carries what the code calls things: `kind`, `callee`, `operator`,
+  `object` (what a call is made on), `inFunction`, `nth`, and a container's
+  `name`. It carries nothing about where it is written: no `line` and no
+  `text`, on expressions or on containers. Those belong to
+  `execution-points list`, which prints them for finding an expression.
+- An expression that several ways lead to is one selection, and its point
+  captures every local that a handler captured on any of the ways.
 - Leave authored application source unchanged; instrument it during tests.
 - Run application code and replacement callbacks in the same Node test worker.
 - Use ordinary TypeScript files and virtual compiler projections for types.
