@@ -222,5 +222,29 @@
     "replace": "`readonly line: ${container.line}; readonly __inside: ${unionOf(",
     "intent": "the compiler lets a visitor compare a container's line",
     "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
+  },
+  {
+    "id": "point-capture-adds-to-the-visitor-capture",
+    "source": "src/runtime.ts",
+    "find": "createInstallation(selected.id, handler, captureNames ?? selected.captureNames, options)",
+    "replace": "createInstallation(selected.id, handler, [...new Set([...selected.captureNames, ...(captureNames ?? [])])], options)",
+    "intent": "capture() on the point adds to what the visitor captured instead of replacing it",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
+  },
+  {
+    "id": "point-capture-is-ignored-when-the-visitor-captured",
+    "source": "src/runtime.ts",
+    "find": "createInstallation(selected.id, handler, captureNames ?? selected.captureNames, options)",
+    "replace": "createInstallation(selected.id, handler, selected.captureNames.length ? selected.captureNames : (captureNames ?? []), options)",
+    "intent": "a capture made in the visitor wins over capture() on the point",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
+  },
+  {
+    "id": "strays-are-counted-as-matches",
+    "source": "src/runtime.ts",
+    "find": "const matched = new Set(selected.map((selection) => selection.id)).size",
+    "replace": "const matched = new Set(selected.map((selection) => selection.id)).size + strays",
+    "intent": "something returned that is no selection counts as a match",
+    "author": "written by hand on 2026-11-24 in the session that also wrote the oracles for these rules (self-generated)"
   }
 ]

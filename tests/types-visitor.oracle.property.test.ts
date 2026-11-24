@@ -306,7 +306,8 @@ point.withReplacement(({ locals, original }) => {
   void locals.key
   return original()
 }, () => 0)`,
-    rejectedWith: (text, codes) => codes.includes(2339) && text.includes("'key'"),
+    // Saying why includes saying what there is: the locals the point does have, written out.
+    rejectedWith: (text, codes) => codes.includes(2339) && text.includes("'key'") && text.includes('{ each: string; }'),
   },
   {
     name: 'handler-returns-the-container',

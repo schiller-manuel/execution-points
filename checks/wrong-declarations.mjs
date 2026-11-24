@@ -29,6 +29,9 @@ const declarations = join(repo, 'dist/runtime.d.mts')
 const config = join(repo, 'vitest.point.config.mjs')
 const original = readFileSync(declarations, 'utf8')
 
+/** The locals a point has from the captures made in its visitor, as the build writes the type. */
+const CAPTURED_LOCALS = `type ExtractCapturedLocals<R> = ExtractNode<R> extends (infer N extends NodeDescriptor) ? { [K in CapturedNames<CleanReturn<R>> & keyof N['locals']]: N['locals'][K]; } : never;`
+
 // [what is wrong, the law that owes a rejection, the text to replace (it must occur once), its replacement]
 const mutants = [
   // values
@@ -70,9 +73,10 @@ const mutants = [
   ['interleavings takes any object', 'argument-kinds', `declare function interleavings(points: readonly Waitable[],`, `declare function interleavings(points: object,`],
   ['order.run takes a value', 'argument-kinds', `run<Result>(action: () => Result | PromiseLike<Result>): Promise<Result>;`, `run<Result>(action: Result | PromiseLike<Result>): Promise<Result>;`],
   // what a visitor is handed, and what a point captures when several ways lead to its expression
-  ['a capture counts only when every way captures', 'visitor', `type ExtractCapturedLocals<R> = { [K in CapturedNames<CleanReturn<R>> & keyof ExtractNode<R>['locals']]: ExtractNode<R>['locals'][K]; };`, `type ExtractCapturedLocals<R> = CleanReturn<R> extends CapturedSelection<infer N, infer Keys> ? { [K in Keys[number] & keyof N['locals']]: N['locals'][K]; } : {};`],
-  ['a point has every local of its expression, captured or not', 'visitor', `type ExtractCapturedLocals<R> = { [K in CapturedNames<CleanReturn<R>> & keyof ExtractNode<R>['locals']]: ExtractNode<R>['locals'][K]; };`, `type ExtractCapturedLocals<R> = ExtractNode<R>['locals'];`],
-  ['no capture made in a visitor reaches the point', 'visitor', `type ExtractCapturedLocals<R> = { [K in CapturedNames<CleanReturn<R>> & keyof ExtractNode<R>['locals']]: ExtractNode<R>['locals'][K]; };`, `type ExtractCapturedLocals<R> = {};`],
+  ['a capture counts only when every way captures', 'visitor', CAPTURED_LOCALS, `type ExtractCapturedLocals<R> = CleanReturn<R> extends CapturedSelection<infer N, infer Keys> ? { [K in Keys[number] & keyof N['locals']]: N['locals'][K]; } : {};`],
+  ['a point has every local of its expression, captured or not', 'visitor', CAPTURED_LOCALS, `type ExtractCapturedLocals<R> = ExtractNode<R>['locals'];`],
+  ['no capture made in a visitor reaches the point', 'visitor', CAPTURED_LOCALS, `type ExtractCapturedLocals<R> = {};`],
+  ['the error for a local that is not captured names a type and not the locals', 'visitor', CAPTURED_LOCALS, `type ExtractCapturedLocals<R> = { [K in CapturedNames<CleanReturn<R>> & keyof ExtractNode<R>['locals']]: ExtractNode<R>['locals'][K]; };`],
   ['an expression is handed with a line', 'visitor', `'__unportable' | '__unportableLocals'> & {\n  readonly __node: N;`, `'__unportable' | '__unportableLocals'> & {\n  readonly line: number;\n  readonly __node: N;`],
   ['an expression is handed with its text', 'visitor', `'__unportable' | '__unportableLocals'> & {\n  readonly __node: N;`, `'__unportable' | '__unportableLocals'> & {\n  readonly text: string;\n  readonly __node: N;`],
   ['a container is handed with a line', 'visitor', `{\n  readonly type: Type;\n}> & Traversable;`, `{\n  readonly type: Type;\n}> & Traversable & { readonly line: number };`],

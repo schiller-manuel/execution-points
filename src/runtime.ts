@@ -236,10 +236,15 @@ type ExtractNode<R> =
 /** The names that `Item` captures: of all the selections a visitor can return, the ones any of them captures. */
 type CapturedNames<Item> = Item extends CapturedSelection<NodeDescriptor, infer Keys> ? Keys[number] : never
 
-/** One expression is one selection however many ways lead to it, and it has every local that a way captured. */
-type ExtractCapturedLocals<R> = {
-  [K in CapturedNames<CleanReturn<R>> & keyof ExtractNode<R>['locals']]: ExtractNode<R>['locals'][K]
-}
+/**
+ * One expression is one selection however many ways lead to it, and it has every local that a way
+ * captured. The conditional is for whoever reads a compile error: through it the compiler prints
+ * the locals themselves, where it would print this type's name for a mapped type written directly.
+ */
+type ExtractCapturedLocals<R> =
+  ExtractNode<R> extends infer N extends NodeDescriptor
+    ? { [K in CapturedNames<CleanReturn<R>> & keyof N['locals']]: N['locals'][K] }
+    : never
 
 type SelectFromNodes<N extends NodeDescriptor, Captured extends object> = [N] extends [never]
   ? {
