@@ -83,6 +83,8 @@ export interface NodeReading {
   opaque: boolean | null
   /** The string-keyed members of the declared result type; null when unportable. */
   resultMembers: Array<string> | null
+  /** Whether a value of the expression's own type would pass for the declared result. */
+  acceptsOriginal: boolean
   locals: Record<string, Fit>
   /** The locals of the plan that the expression itself refers to. */
   mentioned: Array<string>
@@ -97,6 +99,10 @@ export interface RegistryReading {
   projectErrors: Array<string>
   /** The file keys of `ExecutionPointFileRegistry`. */
   files: Array<string>
+  /** How many copies of private types the registry declares: its `__EP_*` interfaces. */
+  copies: number
+  /** How many constants the registry declares to compute symbol keys from. */
+  keyConstants: number
   /** One reading for each node the registry declares, by node id. */
   nodes: Record<string, NodeReading>
 }
@@ -225,6 +231,8 @@ export interface ReadOptions {
   extraFiles?: Readonly<Record<string, string>>
   /** Leave the registry out, to read the project as it is before the mapper ran. */
   withoutRegistry?: boolean
+  /** The project's configuration file, when it is not `tsconfig.json`. */
+  tsconfig?: string
   /**
    * Pairs of slots to relate. A slot is a node id for its result, or
    * `id|name` for one of its locals. Each pair asks whether the type the
@@ -255,7 +263,7 @@ export function compileRegistry(
   const registryFile = join(root, 'points.ep.ts')
   const witnessFile = join(root, '__registry_witness.ts')
   const extra = Object.entries(options.extraFiles ?? {}).map(([relative, text]) => [join(root, relative), text] as const)
-  const config = api.parseConfigFile(join(root, 'tsconfig.json'))
+  const config = api.parseConfigFile(join(root, options.tsconfig ?? 'tsconfig.json'))
   const virtual: Array<readonly [string, string]> = [
     [join(root, 'node_modules/execution-points-prototype/package.json'), libraryPackage],
     [join(root, 'node_modules/execution-points-prototype/src/runtime.d.ts'), runtimeTypes],
@@ -345,7 +353,8 @@ export function compileRegistry(
         }
         const unportableLocals: Record<string, string> = {}
         for (const property of typeOfProperty(checker, member, '__unportableLocals')?.getProperties() ?? []) {
-          unportableLocals[property.name] = String(checker.getTypeOfSymbol(property).value)
+          const reasonOfLocal = checker.getTypeOfSymbol(property)
+          unportableLocals[property.name] = reasonOfLocal.flags & TypeFlags.StringLiteral ? String(reasonOfLocal.value) : ''
         }
         const result = typeOfProperty(checker, member, 'result')!
         const original = checker.getTypeAtLocation(expression)
@@ -356,8 +365,10 @@ export function compileRegistry(
           result: reason ? null : fitOf(checker, result, original, rootKey),
           opaque: reason
             ? !(result.flags & (TypeFlags.Any | TypeFlags.Unknown | TypeFlags.Never)) &&
-              [original, ...writable].every((source) => !checker.isTypeAssignableTo(source, result))
+              // An expression TypeScript has no type for is `any`, which passes for everything.
+              [original, ...writable].every((source) => Boolean(source.flags & TypeFlags.Any) || !checker.isTypeAssignableTo(source, result))
             : null,
+          acceptsOriginal: checker.isTypeAssignableTo(original, result),
           resultMembers: reason
             ? null
             : result
@@ -376,7 +387,15 @@ export function compileRegistry(
       const target = declaredAt.get(to)
       return Boolean(source && target && checker.isTypeAssignableTo(source, target))
     })
-    return { reading: { registryErrors, projectErrors, files: files.sort(), nodes }, extraErrors, relations }
+    let copies = 0
+    let keyConstants = 0
+    for (const statement of program.getSourceFile(registryFile)?.statements ?? []) {
+      if (statement.kind === SyntaxKind.InterfaceDeclaration && statement.name.text.startsWith('__EP_')) copies += 1
+      if (statement.kind === SyntaxKind.VariableStatement && statement.declarationList.declarations[0].name.text.startsWith('__ep_key_')) {
+        keyConstants += 1
+      }
+    }
+    return { reading: { registryErrors, projectErrors, files: files.sort(), copies, keyConstants, nodes }, extraErrors, relations }
   } finally {
     snapshot.dispose()
   }

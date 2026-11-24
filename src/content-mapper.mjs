@@ -23,10 +23,10 @@ const FEATURE_DEFINITION = 8
  * `diagnostics` names everything that is wrong, at the text that is wrong.
  * `fatal` is set when the content is not a JSON object at all.
  */
-export function parseManifest(content, manifestFile, root = path.dirname(manifestFile)) {
+export function parseManifest(content, manifestFile, root) {
   const text = content ?? ''
   const body = text.trim()
-  const manifest = { tsconfig: undefined, targets: [], diagnostics: [], fatal: false }
+  const manifest = { targets: [], diagnostics: [] }
   const report = (code, messageText, start = 0, length = text.length) => {
     manifest.diagnostics.push({ messageText, start, length, code })
   }
@@ -55,7 +55,7 @@ export function parseManifest(content, manifestFile, root = path.dirname(manifes
     const properties = new Map(lease.sourceFile.statements[0].expression.properties.map((property) => [property.name.text, property]))
     for (const [key, property] of properties) {
       if (key !== 'targets' && key !== 'tsconfig') {
-        report(90102, `Unknown key ${JSON.stringify(key)} in ${path.basename(manifestFile)}. The keys are "targets" and "tsconfig".`, ...at(property.name))
+        report(90102, `Unknown key ${JSON.stringify(key)}. The keys of a manifest are "targets" and "tsconfig".`, ...at(property.name))
       }
     }
 
@@ -184,7 +184,7 @@ function formatFrame(payload) {
   return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'), body])
 }
 
-export function handleInputChunk(state, chunk, write = (frame) => process.stdout.write(frame)) {
+export function handleInputChunk(state, chunk, write) {
   state.buffer = Buffer.concat([state.buffer, chunk])
   for (;;) {
     const headerEnd = state.buffer.indexOf('\r\n\r\n')
@@ -213,7 +213,7 @@ export function handleInputChunk(state, chunk, write = (frame) => process.stdout
     try {
       write(formatFrame({ jsonrpc: '2.0', id: message.id, result: handler(message.params) }))
     } catch (err) {
-      write(formatFrame({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: String(err?.message ?? err) } }))
+      write(formatFrame({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: String(err) } }))
     }
   }
 }
@@ -222,7 +222,7 @@ export function handleInputChunk(state, chunk, write = (frame) => process.stdout
 if (import.meta.main) {
   const stdioState = { buffer: Buffer.alloc(0) }
   process.stdin.on('data', (chunk) => {
-    handleInputChunk(stdioState, chunk)
+    handleInputChunk(stdioState, chunk, (frame) => process.stdout.write(frame))
   })
   process.stdin.on('end', () => {
     sharedApi?.close()

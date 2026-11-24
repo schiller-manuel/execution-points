@@ -402,7 +402,9 @@ export function get(u: string) {
     files: {
       'src/app.ts': `
 export const tag: unique symbol = Symbol()
-function bag(): { [Symbol.iterator](): Iterator<number>; readonly [tag]: string; size: number } {
+const hidden: unique symbol = Symbol()
+export const keys = { hidden } as const
+function bag(): { [Symbol.iterator](): Iterator<number>; readonly [tag]: string; [hidden]?: boolean; size: number } {
   return null as never
 }
 function own(k: typeof tag) { return k }
@@ -513,6 +515,41 @@ export function up(s: string, id: \`id-\${number}\`) {
 `,
     },
   },
+  {
+    // A private class with public members only is copied; its static side is `typeof`, not the instance.
+    name: 'private-class-and-its-static-side',
+    states: ['typeof-class-or-enum'],
+    files: {
+      'src/app.ts': `
+class Plain { id = 'p'; static make() { return new Plain() } greet() { return this.id } }
+function ctor(): typeof Plain { return Plain }
+function inst(): Plain { return new Plain() }
+export function run() {
+  const C = ctor()
+  const p = inst()
+  return C.make().greet() + p.id
+}
+`,
+    },
+  },
+  {
+    // Two instantiations of one private generic type are two types.
+    name: 'private-generic-types',
+    states: ['private-generic-type'],
+    files: {
+      'src/app.ts': `
+interface Box<T> { value: T; next?: Box<T> }
+function text(): Box<string> { return { value: 'a' } }
+function count(): Box<number> { return { value: 1 } }
+function join(a: Box<string>, b: Box<number>) { return a.value + String(b.value) }
+export function run() {
+  const a = text()
+  const b = count()
+  return join(a, b)
+}
+`,
+    },
+  },
 ]
 
 oracleProperty({
@@ -524,7 +561,7 @@ oracleProperty({
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the generated registry compiled as .ts beside the target has no diagnostics of its own, and each node’s result and locals are mutually assignable with the type TypeScript gives the original expression. README.md:7 and README.md:61 state the same promise.',
     limits:
-      'The histories are twelve fixtures in three projects, one for each set of compiler options, each with every node checked: 38 Node built-in calls, enum members, project globals, ambient declarations, symbol keys, private aliases, class and enum objects, a package, a byte-order mark, exact optional members, and template types. A local the expression does not mention is compared with its declared type.',
+      'The histories are fourteen fixtures in three projects, one for each set of compiler options, each with every node checked: 38 Node built-in calls, enum members, project globals, ambient declarations, symbol keys, private aliases, class and enum objects, a private class with its static side, private generic types, a package, a byte-order mark, exact optional members, and template types. A local the expression does not mention is compared with its declared type.',
   },
   histories: {
     enumerated: combine(FIT_FIXTURES),
@@ -538,6 +575,7 @@ oracleProperty({
       'symbol-keyed-member',
       'alias-of-library-type',
       'typeof-class-or-enum',
+      'private-generic-type',
       'type-from-package',
       'byte-order-mark',
       'exact-optional',
@@ -684,6 +722,31 @@ export function work(both: A & B, either: A | B, flags: boolean | undefined) {
 }`,
     },
   },
+  {
+    // A type that refers to itself without a name of its own: the result of a function that returns itself.
+    name: 'recursive-anonymous-type',
+    states: ['composite-types'],
+    files: {
+      'src/app.ts': `
+function chain() { return { next: chain, value: 1 } }
+export function work() { return chain().value }`,
+    },
+  },
+  {
+    // Object literals in the target must not pass for the probe's own.
+    name: 'object-literals-beside-the-expressions',
+    states: ['member-modifiers'],
+    files: {
+      'src/app.ts': `
+function target(o: object) { return Object.keys(o).length }
+export function work(opts: { a: number }) {
+  const empty = {}
+  const merged = { ...opts }
+  const plain = { __execution_point_probe: 1 }
+  return target(empty) + target(merged) + target({}) + target({ ...opts }) + plain.__execution_point_probe
+}`,
+    },
+  },
 ]
 
 oracleProperty({
@@ -695,7 +758,7 @@ oracleProperty({
     authority:
       'README.md:172 ("emit virtual ExecutionPointFileRegistry") and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-22: emit any, tuple elementFlags, and IndexInfo.valueType. Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the comparison is mutual assignability with the type TypeScript gives the original expression, in place of the emitted text.',
     limits:
-      'Local generic type parameters without concrete instantiations and inline objects with more than 24 properties are not emitted; histories are bounded-exhaustive over seven modules of type constructs in one project. The readonly and ? modifiers are compared three levels deep.',
+      'Local generic type parameters without concrete instantiations and inline objects with more than 24 properties are not emitted; histories are bounded-exhaustive over nine modules of type constructs in one project. The readonly and ? modifiers are compared three levels deep.',
   },
   histories: {
     enumerated: combine(CONSTRUCT_FIXTURES),
@@ -805,6 +868,20 @@ const NARROWING_FIXTURES: ReadonlyArray<ProjectHistory> = [
     `
   return user ? send(user.id) : send(kind === 'a' ? kind : 'other')`,
   ),
+  // The probe wraps an expression in parentheses of its own; left open, they would take in what follows.
+  narrowingProject(
+    'inside-an-object-literal-and-an-array',
+    'narrowed-inside-a-literal',
+    `
+  const o = { a: send(kind), b: kind === 'a' ? send(kind) : send(kind) }
+  return [send(o.a), kind === 'b' ? send(kind) : send(kind)].join(o.b)`,
+  ),
+  narrowingProject(
+    'inside-a-template-and-nested-calls',
+    'narrowed-inside-a-literal',
+    `
+  return \`\${send(kind)}-\${kind === 'a' ? send(send(kind)) : send(kind)}\` + send(kind === 'b' ? kind + '1' : kind === 'c' ? kind : 'x')`,
+  ),
 ]
 
 oracleProperty({
@@ -827,6 +904,7 @@ oracleProperty({
       'narrowed-in-nested-call',
       'narrowed-in-case-clause',
       'narrowed-by-enclosing-conditional',
+      'narrowed-inside-a-literal',
     ],
   },
   label: (history) => history.name,
@@ -1157,6 +1235,100 @@ function target(): typeof privSym { return privSym }
 export function work() { return String(target()) }`,
     { publicMembers: [] },
   ),
+  identity(
+    'reachable-through-one-element-tuple',
+    'named-by-export-anchored-path',
+    true,
+    false,
+    `
+interface Leaf { code: number }
+function target(): Leaf { return { code: 1 } }
+export function work(): [Leaf] { return [target()] }`,
+  ),
+  identity(
+    'reachable-through-parameter-array-promise-and-nullable',
+    'named-by-export-anchored-path',
+    true,
+    false,
+    `
+interface Leaf { code: number }
+function target(): Leaf { return { code: 1 } }
+export function work(all: Array<Promise<Leaf | null>>) { return all.length + target().code }`,
+  ),
+  identity(
+    'private-type-one-step-too-deep-through-a-parameter',
+    'copied-structurally',
+    false,
+    false,
+    `
+interface Leaf { code: number }
+function target(): Leaf { return { code: 1 } }
+export function work(all: Array<Promise<{ leaf: Leaf } | null>>) { return all.length + target().code }`,
+  ),
+  identity(
+    'private-type-behind-a-library-collection',
+    'copied-structurally',
+    false,
+    false,
+    `
+interface Leaf { code: number }
+function target(): Leaf { return { code: 1 } }
+export function work(): Map<string, Leaf> { return new Map([['a', target()]]) }`,
+  ),
+  identity(
+    'reachable-through-object-with-24-properties',
+    'named-by-export-anchored-path',
+    true,
+    false,
+    `
+interface Leaf { code: number }
+function target(): Leaf { return { code: 1 } }
+export function work(): { ${Array.from({ length: 23 }, (_, index) => `p${index}: number`).join('; ')}; leaf: Leaf } { return null as never }
+export function use() { return target().code }`,
+  ),
+  identity(
+    'private-type-behind-object-with-25-properties',
+    'copied-structurally',
+    false,
+    false,
+    `
+interface Leaf { code: number }
+function target(): Leaf { return { code: 1 } }
+export function work(): { ${Array.from({ length: 23 }, (_, index) => `p${index}: number`).join('; ')}; p23: number; leaf: Leaf } { return null as never }
+export function use() { return target().code }`,
+  ),
+  identity(
+    'private-type-behind-a-symbol-keyed-member',
+    'copied-structurally',
+    false,
+    false,
+    `
+interface Leaf { code: number }
+function target(): Leaf { return { code: 1 } }
+export const holder = { [Symbol.iterator]: (): Leaf => target() }
+export function work() { return 1 }`,
+  ),
+  identity(
+    'private-class-with-public-members-only',
+    'copied-structurally',
+    false,
+    false,
+    `
+class Plain { id = "p"; greet() { return this.id } }
+function target(): Plain { return new Plain() }
+export function work() { return target().greet() }`,
+  ),
+  identity(
+    'static-side-of-a-reachable-private-class',
+    'copied-structurally',
+    false,
+    false,
+    `
+class Engine { rpm = 0; static make() { return new Engine() } }
+function target(): typeof Engine { return Engine }
+export function build(): Engine { return target().make() }
+export function work() { return 1 }`,
+  ),
 ]
 
 /** The result of every `target()` call, as TypeScript relates it to the original. */
@@ -1166,7 +1338,10 @@ const identityView = (reading: RegistryReading) => ({
   targets: Object.fromEntries(
     Object.entries(reading.nodes)
       .filter(([id]) => id.includes(':target:'))
-      .map(([id, node]) => [id, { unportable: node.unportable, result: node.result, members: node.resultMembers }]),
+      .map(([id, node]) => [
+        id,
+        { unportable: node.unportable, result: node.result, members: node.resultMembers, acceptsOriginal: node.acceptsOriginal },
+      ]),
   ),
 })
 
@@ -1184,7 +1359,7 @@ oracleProperty({
     authority:
       'README.md:172 ("Export-reachable private types (Quote, User, Order) preserve exact identity via export-anchored paths; unreachable private types emit structural or unique-symbol-branded helpers.") and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: any emitted name must mean, where the registry is compiled, the same type it means in the target; this replaces the rule that ambient types get their bare qualified name whatever wraps their declaration.',
     limits:
-      'An export-anchored path is searched four steps deep through non-generic, single-signature functions, promise results, array elements, nullable unions, and objects with up to 24 properties. Sameness is the identity of the type in one TypeScript program; a branded copy is checked for not being assignable in either direction and for keeping exactly the public members.',
+      'An export-anchored path is searched four steps deep through non-generic, single-signature functions, promise results, array elements, nullable unions, and objects the module declares with up to 24 properties. Sameness is the identity of the type in one TypeScript program; a branded copy is checked for not being assignable in either direction and for keeping exactly the public members.',
   },
   histories: {
     enumerated: combine(IDENTITY_FIXTURES),
@@ -1193,8 +1368,9 @@ oracleProperty({
   label: (history) => history.name,
   // A name denotes the declaration itself, so TypeScript finds the same type.
   // A structural copy is another type that is mutually assignable. A brand
-  // makes the copy assignable in neither direction, and the copy lists the
-  // members a handler may read.
+  // makes the copy assignable in neither direction, so that nothing but
+  // original() and the locals produce it, and the copy lists the members a
+  // handler may read.
   model: (history, trace) => ({
     registryErrors: [],
     projectErrors: [],
@@ -1209,6 +1385,8 @@ oracleProperty({
               unportable: null,
               result: fixture.nameable ? 'same' : fixture.nominal ? 'not assignable' : 'equivalent',
               members: !fixture.nameable && fixture.nominal ? [...fixture.publicMembers!].sort() : null,
+              // A brand is what keeps a look-alike, even the original value, from passing for the copy.
+              acceptsOriginal: fixture.nameable || !fixture.nominal,
             },
           ]
         }),
@@ -1239,7 +1417,7 @@ oracleProperty({
       law: 'export-paths-and-helpers',
       history: { enumerated: 'default-options' },
       corrupt: corruptRegistry((value) => {
-        value.targets[nodeOf(value.targets, 'private-class-with-private-members')].result = 'equivalent'
+        value.targets[nodeOf(value.targets, 'private-enum')].acceptsOriginal = true
         return value
       }),
     },
@@ -1265,6 +1443,10 @@ interface SharedCopyHistory extends ProjectHistory {
   same: ReadonlyArray<readonly [from: string, to: string]>
   /** Pairs the source gives two different nominal private types of equal shape. */
   distinct: ReadonlyArray<readonly [from: string, to: string]>
+  /** How many private types of the source can be copied. */
+  copies: number
+  /** How many different symbols key a member of those types. */
+  symbolKeys: number
 }
 
 const SHARED_COPY_HISTORIES: ReadonlyArray<SharedCopyHistory> = [
@@ -1275,16 +1457,20 @@ const SHARED_COPY_HISTORIES: ReadonlyArray<SharedCopyHistory> = [
       'src/app.ts': `
 class Vault { private secret = 1; id = "v" }
 class Safe { private secret = 1; id = "v" }
+class Cell<T> { private sealed = true; constructor(public value: T) {} }
 enum Phase { Idle, Busy }
 function makeVault(): Vault { return new Vault() }
 function makeSafe(): Safe { return new Safe() }
 function phase(): Phase { return Phase.Idle }
-function use(v: Vault, s: Safe, p: Phase) { return v.id + s.id + String(p) }
+function cellOfText(): Cell<string> { return new Cell('a') }
+function cellOfCount(): Cell<number> { return new Cell(1) }
+function use(v: Vault, s: Safe, p: Phase, c: Cell<string>) { return v.id + s.id + String(p) + c.value }
 export function work() {
   const v = makeVault()
   const s = makeSafe()
   const p = phase()
-  return use(v, s, p)
+  const c = cellOfText()
+  return use(v, s, p, c) + String(cellOfCount().value)
 }
 `,
     },
@@ -1292,31 +1478,84 @@ export function work() {
       ['src/app.ts#work:CallExpression:makeVault:0', 'src/app.ts#work:CallExpression:use:0|v'],
       ['src/app.ts#work:CallExpression:use:0|v', 'src/app.ts#work:CallExpression:makeVault:0'],
       ['src/app.ts#work:CallExpression:phase:0', 'src/app.ts#work:CallExpression:use:0|p'],
+      ['src/app.ts#work:CallExpression:cellOfText:0', 'src/app.ts#work:CallExpression:use:0|c'],
     ],
     distinct: [
       ['src/app.ts#work:CallExpression:makeVault:0', 'src/app.ts#work:CallExpression:makeSafe:0'],
       ['src/app.ts#work:CallExpression:use:0|s', 'src/app.ts#work:CallExpression:use:0|v'],
+      // Two instantiations of one private generic class are two types.
+      ['src/app.ts#work:CallExpression:cellOfText:0', 'src/app.ts#work:CallExpression:cellOfCount:0'],
+      ['src/app.ts#work:CallExpression:cellOfCount:0', 'src/app.ts#work:CallExpression:use:0|c'],
     ],
+    // Vault, Safe, Phase, Cell<string>, and Cell<number>.
+    copies: 5,
+    symbolKeys: 0,
   },
   {
-    // F16: a type that cannot be copied must not leave its helper's name behind.
+    // F16: a type that cannot be copied must not leave its helper's name behind,
+    // nor the names of what was declared for it before it failed.
     name: 'wide-private-interface-used-twice',
-    states: ['type-that-cannot-be-copied'],
+    states: ['type-that-cannot-be-copied', 'copy-declared-then-taken-back'],
     files: {
       'src/app.ts': `
 interface Wide { ${Array.from({ length: 25 }, (_, index) => `p${index}: number`).join('; ')} }
 interface Holder { wide: Wide; name: string }
 interface Loop { back: Loop; wide: Wide }
+interface Inner { v: number }
+interface Outer { inner: Inner; wide: Wide }
+interface Sequence { [Symbol.iterator](): Iterator<boolean> }
+interface Keyed { sequence: Sequence; wide: Wide }
+interface Numbers { [Symbol.iterator](): Iterator<number>; n: number }
+interface Words { [Symbol.iterator](): Iterator<string> }
 function make(): Wide { return {} as Wide }
 function hold(): Holder { return {} as Holder }
 function loop(): Loop { return {} as Loop }
+function outer(): Outer { return {} as Outer }
+function inner(): Inner { return { v: 1 } }
+function keyed(): Keyed { return {} as Keyed }
+function numbers(): Numbers { return {} as Numbers }
+function words(): Words { return {} as Words }
 export function a() { return make().p0 }
 export function b() { const w = make(); return hold().name + loop().wide.p1 + w.p2 }
 export function c() { return hold().name + loop().wide.p1 }
+export function d() {
+  const o = outer()
+  const k = keyed()
+  return inner().v + numbers().n + [...words()].length + [...numbers()].length + o.inner.v + k.wide.p0
+}
 `,
     },
     same: [],
     distinct: [],
+    // Inner, Numbers, and Words; Wide and everything that holds a Wide cannot be copied,
+    // and Sequence is only ever declared for Keyed, which is taken back with its key constant.
+    copies: 3,
+    symbolKeys: 1,
+  },
+  {
+    // The same names are worked out once, however often a type is used.
+    name: 'types-used-many-times',
+    states: ['type-used-many-times'],
+    files: {
+      'src/app.ts': `
+interface Item { id: string; next?: Item }
+interface Bag { [Symbol.iterator](): Iterator<Item>; first: Item; last: Item }
+interface Leaf { v: number }
+type Row = [${Array.from({ length: 40 }, () => 'Item, Date, Map<string, Item>, Bag, Leaf').join(', ')}]
+interface Tree { left: Tree; right: Tree; up: Tree; down: Tree; leaf: Leaf }
+function row(): Row { return null as never }
+export function tree(): Tree { return null as never }
+export function work(r: Row) {
+  const again = row()
+  return again.length + r.length
+}
+`,
+    },
+    same: [['src/app.ts#work:CallExpression:row:0', 'src/app.ts#work:CallExpression:row:0|r']],
+    distinct: [],
+    // Item and Bag; Tree and Leaf are reached through the exported tree().
+    copies: 2,
+    symbolKeys: 1,
   },
 ]
 
@@ -1325,15 +1564,21 @@ oracleProperty({
   owns: ['src/contracts.mjs#createTypeEmitter', 'src/contracts.mjs#generateFileRegistryModule'],
   law: {
     statement:
-      'For every private module-scope type, every result and local of that type refers to one copy, so a value of the type read from a local or returned by original() is accepted wherever the type is expected; two different nominal private types get two brands; and a type that cannot be copied leaves no name behind.',
+      'For every private module-scope type, every result and local of that type refers to one copy, declared once, so a value of the type read from a local or returned by original() is accepted wherever the type is expected; two different nominal private types get two brands; and a type that cannot be copied leaves no name behind.',
     authority:
       'README.md:172 ("unreachable private types emit structural or unique-symbol-branded helpers") and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the registry compiled as .ts beside the target has no diagnostics of its own.',
     limits:
-      'Checked on a private class used as a result and as a local, two private classes of equal shape, a private enum, and three interfaces that cannot be copied because one has more than 24 properties.',
+      'Checked on a private class used as a result and as a local, two private classes of equal shape, a private enum, interfaces that cannot be copied because one has more than 24 properties, and a tuple that uses five types forty times each. The copies are counted as the __EP_* interfaces the registry declares.',
   },
   histories: {
     enumerated: SHARED_COPY_HISTORIES,
-    states: ['one-copy-for-result-and-local', 'two-brands-for-two-types', 'type-that-cannot-be-copied'],
+    states: [
+      'one-copy-for-result-and-local',
+      'two-brands-for-two-types',
+      'type-that-cannot-be-copied',
+      'copy-declared-then-taken-back',
+      'type-used-many-times',
+    ],
   },
   label: (history) => history.name,
   // The source uses one type for both slots of a `same` pair, so TypeScript
@@ -1343,6 +1588,8 @@ oracleProperty({
     projectErrors: [],
     same: history.same.map(() => true),
     distinct: history.distinct.map(() => false),
+    copies: history.copies,
+    keyConstants: history.symbolKeys,
   }),
   driver: (history, observe) => {
     for (const state of history.states) observe('reach', state)
@@ -1356,6 +1603,8 @@ oracleProperty({
         projectErrors: reading.projectErrors,
         same: relations.slice(0, history.same.length),
         distinct: relations.slice(history.same.length),
+        copies: reading.copies,
+        keyConstants: reading.keyConstants,
       })
     } catch (error) {
       observe('crash', error instanceof Error ? error.message : String(error))
@@ -1370,6 +1619,12 @@ oracleProperty({
       law: 'one-copy-per-private-type',
       history: { enumerated: 'private-class-as-result-and-as-local' },
       corrupt: corruptRegistry((value) => ({ ...value, same: value.same.map(() => false) })),
+    },
+    {
+      name: 'a-copy-for-every-use',
+      law: 'one-copy-per-private-type',
+      history: { enumerated: 'types-used-many-times' },
+      corrupt: corruptRegistry((value) => ({ ...value, copies: 80 })),
     },
     {
       name: 'a-helper-name-without-a-definition',
@@ -1401,7 +1656,16 @@ interface ParityHistory extends ProjectHistory {
   unwritableLocals: Readonly<Record<string, ReadonlyArray<string>>>
   /** Pairs of expressions of such a type: the result of one must not pass for the other's. */
   distinctResults?: ReadonlyArray<readonly [from: string, to: string]>
+  /** What the reason for such an expression has to name, by its function or its callee. */
+  reasonsName?: Readonly<Record<string, string>>
+  /** What the reason for such a local has to name, by the local. */
+  localReasonsName?: Readonly<Record<string, string>>
+  /** The project has errors of its own, as a project has while it is being edited. */
+  brokenProject?: boolean
 }
+
+/** Whether a reason names what the history says it has to; a reason nothing is said about passes. */
+const says = (reason: string | null, expected: string | undefined) => expected === undefined || Boolean(reason?.includes(expected))
 
 const PARITY_HISTORIES: ReadonlyArray<ParityHistory> = [
   {
@@ -1426,8 +1690,8 @@ export class Box { get value() { return send(3) } method() { return (() => send(
   },
   {
     name: 'several-files-in-one-plan',
-    states: ['several-files', 'global-script-skipped', 'file-without-expressions'],
-    targets: ['src/b.ts', 'src/a.ts', 'src/script.ts', 'src/empty.ts'],
+    states: ['several-files', 'global-script-skipped', 'file-without-expressions', 'unloadable-file-skipped'],
+    targets: ['src/b.ts', 'src/a.ts', 'src/script.ts', 'src/empty.ts', 'src/notes.txt'],
     listed: ['src/a.ts', 'src/b.ts'],
     unwritableResultsIn: [],
     unwritableLocals: {},
@@ -1436,6 +1700,8 @@ export class Box { get value() { return send(3) } method() { return (() => send(
       'src/b.ts': `export function b(n: number) { return n * 2 }\n`,
       'src/script.ts': `function script(n: number) { return n + 1 }\n`,
       'src/empty.ts': `export const value = 1\n`,
+      // TypeScript source in a file that TypeScript does not load.
+      'src/notes.txt': `export function note(n: number) { return n + 1 }\n`,
     },
   },
   {
@@ -1443,7 +1709,9 @@ export class Box { get value() { return send(3) } method() { return (() => send(
     states: ['unportable-result', 'unportable-local'],
     listed: ['src/app.ts'],
     unwritableResultsIn: ['genericCaller', 'pick'],
-    unwritableLocals: { genericCaller: ['x'], pick: ['k', 'o'], keys: ['k', 'kk', 'o'] },
+    unwritableLocals: { genericCaller: ['x'], pick: ['k', 'o'], keys: ['k', 'kk', 'o'], withGenericLocal: ['pass'] },
+    reasonsName: { genericCaller: 'U', pick: 'T[K]' },
+    localReasonsName: { x: 'U', k: 'K', kk: 'keyof T', o: 'T', pass: 'T' },
     distinctResults: [
       ['src/app.ts#genericCaller:CallExpression:identity:0', 'src/app.ts#pick:ConditionalExpression:?:0'],
       ['src/app.ts#pick:ConditionalExpression:?:0', 'src/app.ts#genericCaller:CallExpression:identity:0'],
@@ -1458,6 +1726,10 @@ export function keys<T, K extends keyof T>(o: T, k: K, flag: boolean) {
   const kk: keyof T = k
   return flag ? 1 : 2
 }
+export function withGenericLocal(n: number) {
+  const pass = <T>(x: T) => x
+  return n + 1
+}
 `,
     },
   },
@@ -1467,6 +1739,7 @@ export function keys<T, K extends keyof T>(o: T, k: K, flag: boolean) {
     listed: ['src/app.ts'],
     unwritableResultsIn: ['genericOnly'],
     unwritableLocals: { genericOnly: ['x'] },
+    reasonsName: { genericOnly: 'U' },
     files: {
       'src/app.ts': `
 function identity<T>(v: T): T { return v }
@@ -1482,6 +1755,8 @@ export function genericOnly<U>(x: U) { return identity(x) }
     // `Symbol()` here has the type of the local unique symbol it initializes.
     unwritableCallees: ['Symbol'],
     unwritableLocals: { work: ['localAliasObj', 'localObj', 'localSym', 'localEnum'], localResult: ['Inner', 'make'] },
+    reasonsName: { localResult: 'Inner', Symbol: 'localSym' },
+    localReasonsName: { localObj: 'LocalOnly', localAliasObj: 'LocalAlias', localSym: 'localSym', make: 'Inner', Inner: 'Inner' },
     files: {
       'src/app.ts': `
 function target(): number { return 42 }
@@ -1511,6 +1786,8 @@ export function localResult() {
     unwritableResultsIn: [],
     unwritableCallees: ['make', 'wideResult'],
     unwritableLocals: { wideLocal: ['w'] },
+    reasonsName: { make: 'too many properties', wideResult: 'too many properties' },
+    localReasonsName: { w: 'too many properties' },
     files: {
       'src/app.ts': `
 interface Wide { ${Array.from({ length: 25 }, (_, index) => `p${index}: number`).join('; ')} }
@@ -1520,6 +1797,50 @@ function fits(): Fits { return {} as Fits }
 function wideResult() { return make() }
 function wideLocal(w: Wide, f: Fits) { return fits().p0 + f.p1 + w.p2 }
 export function entry() { return String(wideResult()) + String(wideLocal({} as Wide, {} as Fits)) }
+`,
+    },
+  },
+  {
+    // A member of a private enum has no name; neither has a member keyed by a private symbol,
+    // nor one whose symbol key no declaration writes out.
+    name: 'private-enum-member-and-unnamed-symbol-keys',
+    states: ['unportable-result', 'private-enum-member', 'unnamed-symbol-key'],
+    listed: ['src/app.ts'],
+    unwritableResultsIn: [],
+    unwritableCallees: ['member', 'keyed', 'mapped'],
+    unwritableLocals: {},
+    reasonsName: { member: 'P.A', keyed: 'member [secret] is not exported', mapped: 'keys the member [shown]' },
+    files: {
+      'src/app.ts': `
+enum P { A, B }
+declare const secret: unique symbol
+export declare const shown: unique symbol
+function member(): P.A { return P.A }
+function keyed(): { [secret]: number } { return { [secret]: 1 } }
+function mapped(): { [K in typeof shown]: string } { return { [shown]: 'a' } }
+export function work() { return String(member()) + String(keyed()[secret]) + mapped()[shown] }
+`,
+    },
+  },
+  {
+    // While a project is being edited it has errors, and TypeScript has no type for what depends on them.
+    name: 'expression-typed-by-a-missing-import',
+    states: ['unportable-result', 'unportable-local', 'project-with-errors'],
+    listed: ['src/app.ts'],
+    brokenProject: true,
+    unwritableResultsIn: ['unknownCall'],
+    unwritableLocals: { work: ['g'] },
+    reasonsName: { unknownCall: 'could not determine' },
+    localReasonsName: { g: 'could not determine' },
+    files: {
+      'src/app.ts': `
+import { gone } from './missing'
+function ok(n: number) { return n + 1 }
+export function work(n: number) {
+  const g = gone
+  return ok(n)
+}
+export function unknownCall() { return gone() }
 `,
     },
   },
@@ -1534,7 +1855,7 @@ oracleProperty({
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: disjoint callee/operator discriminators and compile/runtime parity for unportable expressions. README.md:173 ("Global scripts are skipped."). Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: a local whose type cannot be written carries the reason. Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: an expression whose type cannot be written stays selectable with an opaque result type that only original() can produce; this replaces result: never.',
     limits:
-      'Applies to CallExpression, BinaryExpression, and ConditionalExpression nodes indexed by discovery.mjs. The reason is checked for being present, not for its wording. Opaque means: not any, unknown, or never, and not assignable from the expression’s own type, from {}, or from string; whether select() accepts such a node is the type layer’s law.',
+      'Applies to CallExpression, BinaryExpression, and ConditionalExpression nodes indexed by discovery.mjs. The reason is checked for being present and for naming the type or the cause that the history states, not word for word. Opaque means: not any, unknown, or never, and not assignable from the expression’s own type, from {}, or from string; whether select() accepts such a node is the type layer’s law.',
   },
   histories: {
     enumerated: PARITY_HISTORIES,
@@ -1550,6 +1871,10 @@ oracleProperty({
       'unportable-local',
       'unportable-only-file',
       'local-type-omitted',
+      'unloadable-file-skipped',
+      'private-enum-member',
+      'unnamed-symbol-key',
+      'project-with-errors',
     ],
   },
   label: (history) => history.name,
@@ -1560,7 +1885,7 @@ oracleProperty({
   // reason.
   model: (history, trace) => ({
     registryErrors: [],
-    projectErrors: [],
+    projectCompiles: !history.brokenProject,
     files: [...history.listed].sort(),
     oneResultPassesForAnother: (history.distinctResults ?? []).map(() => false),
     nodes: Object.fromEntries(
@@ -1582,6 +1907,7 @@ oracleProperty({
                 operator: node.operator ?? ABSENT,
               },
               unportable: unwritable,
+              reasonsNameTheirSubject: true,
               result: unwritable ? 'opaque' : 'fits',
               fitsOfLocals: true,
               locals: node.captures.filter((name) => !hidden.includes(name)).sort(),
@@ -1597,7 +1923,7 @@ oracleProperty({
       observe,
       (reading, relations) => ({
       registryErrors: reading.registryErrors,
-      projectErrors: reading.projectErrors,
+      projectCompiles: reading.projectErrors.length === 0,
       files: reading.files,
       oneResultPassesForAnother: relations,
       nodes: Object.fromEntries(
@@ -1606,6 +1932,13 @@ oracleProperty({
           {
             descriptor: node.descriptor,
             unportable: node.unportable !== null && node.unportable.length > 0,
+            reasonsNameTheirSubject:
+              says(
+                node.unportable,
+                node.unportable === null
+                  ? undefined
+                  : (history.reasonsName?.[String(node.descriptor.inFunction)] ?? history.reasonsName?.[String(node.descriptor.callee)]),
+              ) && Object.entries(node.unportableLocals).every(([name, reason]) => says(reason, history.localReasonsName?.[name])),
             result: node.opaque === null ? fitsOf(node.result) : node.opaque ? 'opaque' : 'a type a test can write',
             // As for narrowing: a local is compared where the expression itself refers to it.
             fitsOfLocals: Object.entries(node.locals).every(([name, fit]) => !node.mentioned.includes(name) || fitsOf(fit) === 'fits'),
@@ -1642,6 +1975,15 @@ oracleProperty({
       }),
     },
     {
+      name: 'a-reason-that-names-nothing',
+      law: 'disjoint-fields-and-unportable-parity',
+      history: { enumerated: 'expressions-typed-by-a-type-parameter' },
+      corrupt: corruptRegistry((value) => {
+        value.nodes[Object.keys(value.nodes).find((id) => id.includes('#pick:'))!].reasonsNameTheirSubject = false
+        return value
+      }),
+    },
+    {
       name: 'a-local-dropped-without-a-reason',
       law: 'disjoint-fields-and-unportable-parity',
       history: { enumerated: 'types-declared-inside-a-function' },
@@ -1663,8 +2005,43 @@ oracleProperty({
 // Law C4: empty plans and a warm program that is reused while nothing changes
 // ---------------------------------------------------------------------------
 
-const CACHE_SCENARIOS = ['empty-plan', 'unchanged-sources-reuse-the-warm-program'] as const
+const CACHE_SCENARIOS = [
+  'empty-plan',
+  'a-plan-ahead-of-the-disk',
+  'unchanged-sources-reuse-the-warm-program',
+  'the-only-imported-file-changes',
+  'a-target-outside-the-tsconfig-joins-the-plan',
+] as const
 type CacheScenario = (typeof CACHE_SCENARIOS)[number]
+
+interface TrackedSnapshot {
+  isDisposed: () => boolean
+  dispose: () => void
+}
+
+/**
+ * Run `run` and count the TypeScript snapshots that the oracle's API created
+ * during it, the ones an update returns included, that are still open.
+ */
+function countingOpenSnapshots<T>(run: () => T): { value: T; open: number } {
+  const created: Array<TrackedSnapshot> = []
+  const track = (snapshot: any) => {
+    created.push(snapshot)
+    const update = snapshot.update
+    Object.defineProperty(snapshot, 'update', { configurable: true, value: (...args: Array<unknown>) => track(update.apply(snapshot, args)) })
+    return snapshot
+  }
+  const create = api.createSnapshot
+  Object.defineProperty(api, 'createSnapshot', { configurable: true, value: (...args: Array<unknown>) => track((create as any).apply(api, args)) })
+  try {
+    const value = run()
+    return { value, open: created.filter((snapshot) => !snapshot.isDisposed()).length }
+  } finally {
+    Object.defineProperty(api, 'createSnapshot', { configurable: true, value: create })
+  }
+}
+
+const IMPORTING_TARGET = `import { loadLimit } from './limits'\nexport function work(n: number) { return n < loadLimit() }\n`
 
 oracleProperty({
   id: 'contracts-incremental-snapshot-cache',
@@ -1673,65 +2050,118 @@ oracleProperty({
     statement:
       'For every target plan and snapshot cache, generateFileRegistryModule returns an empty ExecutionPointFileRegistry when plan.files is empty or contains only global scripts, reuses cache.snapshot when sources are unchanged, and updates cache.snapshot incrementally when target sources change.',
     authority:
-      'README.md:173 ("Targets are TypeScript modules configured in points.ep. Global scripts are skipped.") and README.md:167 ("updates incrementally via snapshot.update(...) on file saves.").',
+      'README.md:173 ("Targets are TypeScript modules configured in points.ep. Global scripts are skipped.") and README.md:167 ("updates incrementally via snapshot.update(...) on file saves."). Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the warm registry equals the cold one after every edit.',
     limits:
-      'Cache reuse requires matching rootFiles and compilerOptions. Global scripts are covered by the parity law, and updates by the warm-equals-cold law.',
+      'Cache reuse requires matching rootFiles and compilerOptions. Global scripts are covered by the parity law, and sequences of edits by the warm-equals-cold law. A snapshot counts as released when TypeScript reports it disposed.',
   },
   histories: {
     enumerated: CACHE_SCENARIOS.map((scenario) => ({ scenario })),
-    states: ['empty-plan-rendered', 'warm-program-reused'],
+    states: ['empty-plan-rendered', 'plan-ahead-of-disk', 'warm-program-reused', 'only-import-edited', 'plan-outgrew-the-tsconfig'],
   },
   label: (history) => history.scenario,
-  model: (history: { scenario: CacheScenario }) =>
-    history.scenario === 'empty-plan'
-      ? { files: [], registryErrors: [], registryFiles: [] }
-      : { reusedWhileUnchanged: true, replacedAfterEdit: true, sameTextWhileUnchanged: true },
+  // A call without a cache leaves no snapshot open. A call with one leaves
+  // exactly the warm program, which stays the same object until something
+  // changed, and is released when it is replaced.
+  model: (history: { scenario: CacheScenario }) => {
+    switch (history.scenario) {
+      case 'empty-plan':
+        return { registryErrors: [], registryFiles: [], snapshotsLeftOpen: 0 }
+      case 'a-plan-ahead-of-the-disk':
+        return { registryErrors: [], fits: true, calls: ['later'] }
+      case 'unchanged-sources-reuse-the-warm-program':
+        return {
+          reusedWhileUnchanged: true,
+          sameTextWhileUnchanged: true,
+          replacedAfterEdit: true,
+          replacedProgramReleased: true,
+          snapshotsLeftOpenByWarmRuns: 1,
+          snapshotsLeftOpenByAColdRun: 0,
+        }
+      case 'the-only-imported-file-changes':
+        return { warmEqualsCold: true }
+      case 'a-target-outside-the-tsconfig-joins-the-plan':
+        return { warmEqualsCold: true, files: ['other/extra.ts', 'src/app.ts'], registryErrors: [], previousProgramReleased: true }
+    }
+  },
   driver: (history, observe) => {
     const root = createProject({
-      'src/app.ts': 'function target(): number { return 1 }\nexport function work() { return target() }\n',
+      'src/app.ts': IMPORTING_TARGET,
+      'src/limits.ts': `export function loadLimit(): number { return 5 }\n`,
+      'other/extra.ts': `export function extra(n: number) { return n * 2 }\n`,
     })
+    const cache: { snapshot?: TrackedSnapshot } = {}
+    const generate = (targets: ReadonlyArray<string>, warm: boolean) => {
+      const plan = buildTargetPlan({ root, targets, api }) as Plan
+      const { text } = generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api, ...(warm ? { cache } : {}) })
+      return { plan, text }
+    }
     try {
       if (history.scenario === 'empty-plan') {
         observe('reach', 'empty-plan-rendered')
         const plan = { root, tsconfig: join(root, 'tsconfig.json'), files: [] }
-        const result = generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api })
-        const { reading } = compileRegistry(api, root, result.text, plan)
+        const { value, open } = countingOpenSnapshots(() => generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api }))
+        const { reading } = compileRegistry(api, root, value.text, plan)
+        observe('registry', { registryErrors: reading.registryErrors, registryFiles: reading.files, snapshotsLeftOpen: open })
+        return
+      }
+      if (history.scenario === 'a-plan-ahead-of-the-disk') {
+        // The plan holds each target as it was read for it; the registry is of that text, whatever the disk holds by then.
+        observe('reach', 'plan-ahead-of-disk')
+        const ahead = `function later(): string { return 'x' }\nexport function work(n: number) { return later() }\n`
+        const file = join(root, 'src/app.ts')
+        const plan = buildTargetPlan({ root, targets: ['src/app.ts'], overrides: new Map([[file, ahead]]), api }) as Plan
+        const { text } = generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api })
+        writeFileSync(file, ahead)
+        const { reading } = compileRegistry(api, root, text, plan)
         observe('registry', {
-          files: result.files,
           registryErrors: reading.registryErrors,
-          registryFiles: reading.files,
+          fits: Object.values(reading.nodes).every((node) => fitsOf(node.result) === 'fits'),
+          calls: Object.values(reading.nodes).map((node) => node.descriptor.callee),
         })
         return
       }
-      observe('reach', 'warm-program-reused')
-      const cache: { snapshot?: { dispose: () => void } } = {}
-      try {
-        const generate = () =>
-          generateFileRegistryModule(buildTargetPlan({ root, targets: ['src/app.ts'], api }), {
-            fromFile: join(root, 'points.ep'),
-            api,
-            cache,
-          }).text
-        const first = generate()
-        const warm = cache.snapshot
-        const second = generate()
-        const reusedWhileUnchanged = cache.snapshot === warm
-        writeFileSync(
-          join(root, 'src/app.ts'),
-          'function target(): string { return "x" }\nexport function work() { return target() }\n',
-        )
-        generate()
-        observe('registry', {
-          reusedWhileUnchanged,
-          replacedAfterEdit: cache.snapshot !== warm,
-          sameTextWhileUnchanged: first === second,
+      if (history.scenario === 'unchanged-sources-reuse-the-warm-program') {
+        observe('reach', 'warm-program-reused')
+        const warmRuns = countingOpenSnapshots(() => {
+          const first = generate(['src/app.ts'], true).text
+          const warm = cache.snapshot!
+          const second = generate(['src/app.ts'], true).text
+          const reusedWhileUnchanged = cache.snapshot === warm
+          writeFileSync(join(root, 'src/app.ts'), `${IMPORTING_TARGET}export const more = 1\n`)
+          generate(['src/app.ts'], true)
+          return {
+            reusedWhileUnchanged,
+            sameTextWhileUnchanged: first === second,
+            replacedAfterEdit: cache.snapshot !== warm,
+            replacedProgramReleased: warm.isDisposed(),
+          }
         })
-      } finally {
-        cache.snapshot?.dispose()
+        const coldRun = countingOpenSnapshots(() => generate(['src/app.ts'], false))
+        observe('registry', { ...warmRuns.value, snapshotsLeftOpenByWarmRuns: warmRuns.open, snapshotsLeftOpenByAColdRun: coldRun.open })
+        return
       }
+      if (history.scenario === 'the-only-imported-file-changes') {
+        observe('reach', 'only-import-edited')
+        generate(['src/app.ts'], true)
+        writeFileSync(join(root, 'src/limits.ts'), `export function loadLimit(): string { return '5' }\n`)
+        observe('registry', { warmEqualsCold: generate(['src/app.ts'], true).text === generate(['src/app.ts'], false).text })
+        return
+      }
+      observe('reach', 'plan-outgrew-the-tsconfig')
+      generate(['src/app.ts'], true)
+      const previous = cache.snapshot!
+      const warm = generate(['src/app.ts', 'other/extra.ts'], true)
+      const { reading } = compileRegistry(api, root, warm.text, warm.plan)
+      observe('registry', {
+        warmEqualsCold: warm.text === generate(['src/app.ts', 'other/extra.ts'], false).text,
+        files: reading.files,
+        registryErrors: reading.registryErrors,
+        previousProgramReleased: previous.isDisposed(),
+      })
     } catch (error) {
       observe('crash', error instanceof Error ? error.message : String(error))
     } finally {
+      cache.snapshot?.dispose()
       removeProject(root)
     }
   },
@@ -1742,6 +2172,135 @@ oracleProperty({
       law: 'incremental-snapshot-cache',
       history: { enumerated: 'unchanged-sources-reuse-the-warm-program' },
       corrupt: corruptRegistry((value) => ({ ...value, reusedWhileUnchanged: false })),
+    },
+    {
+      name: 'a-snapshot-nobody-released',
+      law: 'incremental-snapshot-cache',
+      history: { enumerated: 'unchanged-sources-reuse-the-warm-program' },
+      corrupt: corruptRegistry((value) => ({ ...value, snapshotsLeftOpenByAColdRun: 2 })),
+    },
+    {
+      name: 'old-types-after-the-only-import-changed',
+      law: 'incremental-snapshot-cache',
+      history: { enumerated: 'the-only-imported-file-changes' },
+      corrupt: corruptRegistry((value) => ({ ...value, warmEqualsCold: false })),
+    },
+  ],
+})
+
+// ---------------------------------------------------------------------------
+// Cost: what is worked out once is asked of TypeScript once
+// ---------------------------------------------------------------------------
+
+/** An API of its own that counts its requests, so that no other history's requests are counted. */
+const countingApi = new API({ cwd: repoRoot, collectTiming: true })
+afterAll(() => {
+  countingApi.close()
+})
+
+/** How many requests one registry of one module costs. */
+function requestsFor(source: string): number {
+  const root = createProject({ 'src/app.ts': source })
+  try {
+    const plan = buildTargetPlan({ root, targets: ['src/app.ts'], api: countingApi })
+    const before = countingApi.getTimingInfo().totals.requestCount
+    generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api: countingApi })
+    return countingApi.getTimingInfo().totals.requestCount - before
+  } finally {
+    removeProject(root)
+  }
+}
+
+const repeated = (count: number, text: string) => Array.from({ length: count }, () => text).join(', ')
+
+const COST_SOURCES = {
+  /** A row of `uses` elements; named types when `named`, primitives of the same number otherwise. */
+  row: (uses: number, named: boolean) => `
+interface Item { id: string }
+interface Leaf { v: number }
+type Row = [${repeated(uses, named ? 'Item, Date, Leaf' : 'string, number, boolean')}]
+function row(): Row { return null as never }
+export function leaf(): Leaf { return null as never }
+export function work(r: Row) { const again = row(); return again.length + r.length }
+`,
+  /** A module with `exports` exported functions in which `privates` private types are looked up. */
+  module: (exports: number, privates: number) => `
+${Array.from({ length: privates }, (_, i) => `interface P${i} { v${i}: number }\nfunction make${i}(): P${i} { return null as never }`).join('\n')}
+${Array.from({ length: exports }, (_, i) => `export function e${i}(n: number): string { return String(n) }`).join('\n')}
+export function work() { return [${Array.from({ length: privates }, (_, i) => `make${i}()`).join(', ')}].length }
+`,
+  /** An export-reachable type with `members` members that refer to the type itself. */
+  tree: (members: number) => `
+interface Leaf { v: number }
+interface Tree { ${Array.from({ length: members }, (_, i) => `r${i}: Tree`).join('; ')}; leaf: Leaf }
+function leafOf(): Leaf { return null as never }
+export function tree(): Tree { return null as never }
+export function work() { return leafOf().v }
+`,
+}
+
+oracleProperty({
+  id: 'contracts-cost-of-names',
+  owns: ['src/contracts.mjs#createTypeEmitter', 'src/contracts.mjs#buildExportIndex'],
+  law: {
+    statement:
+      'For every type, the requests the generator makes to TypeScript for its name do not grow with how often the type is used; for every module, its exports are walked once however many private types are looked up in it; and for every export-reachable type, each member is read once.',
+    authority:
+      'FINDINGS.md, "What held": regenerating the registry for 160 target files takes about 0.2 s. The three caches change no result, so cost is their only promise, and @tanstack/oracles owes a cost law to a branch that exists only for speed (oracle-property.ts, `work`; maintainer decision of that package, 2026-11-12). These histories talk to a TypeScript server, which the built-in work bound does not judge, so the count of requests is observed instead.',
+    limits:
+      'Three relations between counts of requests, each over one module: a row of 15 or 60 elements, 1 or 21 exports with 1 or 3 private types, and a type with 2, 4, or 8 members that refer to itself. Time is not measured.',
+  },
+  histories: {
+    enumerated: [{ relation: 'uses' as const }, { relation: 'module-walks' as const }, { relation: 'member-reads' as const }],
+    states: ['type-used-often', 'several-private-types-in-one-module', 'self-referring-members'],
+  },
+  label: (history) => history.relation,
+  // Each relation compares differences, so no count is predicted: only that a
+  // cost which is paid once does not show up again in the difference.
+  model: (history) => {
+    switch (history.relation) {
+      case 'uses':
+        return { namedTypesCostTheSameAtEveryLength: true }
+      case 'module-walks':
+        return { moreExportsCostTheSameForMorePrivateTypes: true }
+      case 'member-reads':
+        return { twiceTheMembersCostTwiceTheReads: true }
+    }
+  },
+  driver: (history, observe) => {
+    try {
+      if (history.relation === 'uses') {
+        observe('reach', 'type-used-often')
+        const few = requestsFor(COST_SOURCES.row(5, true)) - requestsFor(COST_SOURCES.row(5, false))
+        const many = requestsFor(COST_SOURCES.row(20, true)) - requestsFor(COST_SOURCES.row(20, false))
+        observe('registry', { namedTypesCostTheSameAtEveryLength: few === many })
+      } else if (history.relation === 'module-walks') {
+        observe('reach', 'several-private-types-in-one-module')
+        const forOne = requestsFor(COST_SOURCES.module(21, 1)) - requestsFor(COST_SOURCES.module(1, 1))
+        const forThree = requestsFor(COST_SOURCES.module(21, 3)) - requestsFor(COST_SOURCES.module(1, 3))
+        observe('registry', { moreExportsCostTheSameForMorePrivateTypes: forOne === forThree })
+      } else {
+        observe('reach', 'self-referring-members')
+        const [two, four, eight] = [2, 4, 8].map((members) => requestsFor(COST_SOURCES.tree(members))) as [number, number, number]
+        observe('registry', { twiceTheMembersCostTwiceTheReads: eight - four === 2 * (four - two) })
+      }
+    } catch (error) {
+      observe('crash', error instanceof Error ? error.message : String(error))
+    }
+  },
+  check: judge('cost-of-names'),
+  calibrations: [
+    {
+      name: 'a-name-asked-for-at-every-use',
+      law: 'cost-of-names',
+      history: { enumerated: 'uses' },
+      corrupt: corruptRegistry(() => ({ namedTypesCostTheSameAtEveryLength: false })),
+    },
+    {
+      name: 'a-walk-that-visits-a-type-again-and-again',
+      law: 'cost-of-names',
+      history: { enumerated: 'member-reads' },
+      corrupt: corruptRegistry(() => ({ twiceTheMembersCostTwiceTheReads: false })),
     },
   ],
 })

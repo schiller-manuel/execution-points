@@ -47,7 +47,7 @@ function analyze(overrides = new Map()) {
     // The registry is compiled as `.ts` where the content mapper's output is compiled, beside points.ep,
     // so that an error inside the registry itself is one of the diagnostics below (skipLibCheck hides a .d.ts).
     const virtualRegistryFile = join(root, 'points.ep.ts')
-    const { text: registryText } = generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api, overrides })
+    const { text: registryText } = generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api })
     const tsCfg = existsSync(plan.tsconfig) ? api.parseConfigFile(plan.tsconfig) : undefined
     const compilerOptions = {
       strict: true,

@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
-import path from 'node:path'
 import MagicString from 'magic-string'
-import { API, ElementFlags, NodeBuilderFlags, ObjectFlags, SymbolFlags, TypeFlags } from 'typescript/sync'
+import { ElementFlags, NodeBuilderFlags, ObjectFlags, SymbolFlags, TypeFlags } from 'typescript/sync'
 import { createFileSystemLayer } from 'typescript/fs'
 import { SyntaxKind } from 'typescript/ast'
 
@@ -40,19 +39,13 @@ function projectNested(source, nodes, prefixOf, suffixOf) {
   return out.toString()
 }
 
-const resolveAlias = (checker, sym) => (sym.flags & SymbolFlags.Alias ? checker.getAliasedSymbol(sym) : sym)
+const isInsideLocalScope = (node) => Boolean(node.parent) && (localScopes.has(node.parent.kind) || isInsideLocalScope(node.parent))
 
-function hasLocalDeclaration(sym) {
-  return sym.declarations.some((h) => {
-    for (let p = h.resolve().parent; p && p.kind !== SyntaxKind.SourceFile; p = p.parent) {
-      if (localScopes.has(p.kind)) return true
-    }
-    return false
-  })
-}
+/** Declared inside a function or block: no name outside that scope reaches it. */
+const hasLocalDeclaration = (sym) => sym.declarations.some((h) => isInsideLocalScope(h.resolve()))
 
 const isPrivateDeclaration = (d) =>
-  d.name?.kind === SyntaxKind.PrivateIdentifier ||
+  d.name.kind === SyntaxKind.PrivateIdentifier ||
   Boolean(d.modifiers?.some((m) => m.kind === SyntaxKind.PrivateKeyword || m.kind === SyntaxKind.ProtectedKeyword))
 
 const isPrivateMember = (prop) => prop.declarations.some((h) => isPrivateDeclaration(h.resolve()))
@@ -76,18 +69,16 @@ function buildExportIndex(checker, moduleSymbol, moduleRef, identify) {
     if (depth <= 4 && !seen.has(type.id)) { seen.add(type.id); queue.push({ type, expr, depth }) }
   }
 
-  for (const exported of checker.getExportsOfModule(moduleSymbol)) {
-    const target = resolveAlias(checker, exported)
-    if (target.flags & SymbolFlags.Value) enqueue(checker.getTypeOfSymbol(target), `${moduleRef}.${exported.name}`, 0)
-  }
+  // An export that is only a type has no value type, and the walk finds nothing in it.
+  for (const exported of checker.getExportsOfModule(moduleSymbol)) enqueue(checker.getTypeOfSymbol(exported), `${moduleRef}.${exported.name}`, 0)
 
   for (const { type, expr, depth } of queue) {
     const alias = type.getAliasSymbol()
     const sym = type.getSymbol()
     const args = type.isTypeReference() ? checker.getTypeArguments(type) : []
-    const record = (named) => { const id = identify(named); if (!paths.has(id)) paths.set(id, expr) }
-    if (alias && !type.getAliasTypeArguments().length && declaredHere(alias)) record(alias)
-    if (sym && (sym.flags & declaredFlags || type.flags & TypeFlags.UniqueESSymbol) && declaredHere(sym) && !args.length) record(sym)
+    // Each type is visited once, at its shallowest, so each name gets one path.
+    if (alias && !type.getAliasTypeArguments().length && declaredHere(alias)) paths.set(identify(alias), expr)
+    if (sym && (sym.flags & declaredFlags || type.flags & TypeFlags.UniqueESSymbol) && declaredHere(sym) && !args.length) paths.set(identify(sym), expr)
 
     if (type.flags & TypeFlags.Union) {
       const defined = type.getTypes().filter((m) => !(m.flags & (TypeFlags.Null | TypeFlags.Undefined)))
@@ -130,15 +121,12 @@ function buildExportIndex(checker, moduleSymbol, moduleRef, identify) {
  * one the registry declares itself.
  */
 function createTypeEmitter(api, checker, anchor, shared) {
-  const scope = ++shared.emitters
-  const names = new Map()
-  const identities = new Map()
+  // Type ids belong to one program, and the registry is read from two.
+  const scope = ++shared.counter
+  const known = new Map()
 
-  /** Stable across programs: a probe file shifts positions, not names. */
-  const identify = (sym) => {
-    if (!identities.has(sym.id)) identities.set(sym.id, `${sym.declarations[0].path}:${checker.getFullyQualifiedName(sym)}`)
-    return identities.get(sym.id)
-  }
+  /** A private type's identity in every program of the project: a probe file shifts positions, not names. */
+  const identify = (sym) => `${sym.declarations[0].path}:${checker.getFullyQualifiedName(sym)}`
 
   const write = (type) => {
     const node = checker.typeToTypeNode(type, anchor, writeFlags)
@@ -162,40 +150,46 @@ function createTypeEmitter(api, checker, anchor, shared) {
     return found?.id === sym.id
   }
 
-  /** TypeScript's own name for the type that `sym` declares, when the registry can use it. */
-  const nameOf = (sym, type, valueSide) => {
-    const key = `${sym.id}:${valueSide}`
-    if (!names.has(key)) {
-      const subject = type.flags & TypeFlags.UniqueESSymbol ? type : valueSide ? checker.getTypeOfSymbol(sym) : checker.getDeclaredTypeOfSymbol(sym)
-      const name = write(subject)
-      names.set(key, name && (name.includes('import(') || resolvesFromRegistry(name, sym, subject)) ? name : undefined)
+  /** The export-anchored path to a private type, from the module that declares it. */
+  const exportPath = (sym, identity) => {
+    const file = sym.declarations[0].path
+    if (!shared.exportPaths.has(file)) {
+      const moduleSymbol = checker.getSymbolOfSourceFile(file)
+      const moduleRef = moduleSymbol && write(checker.getTypeOfSymbol(moduleSymbol))
+      shared.exportPaths.set(file, moduleRef ? buildExportIndex(checker, moduleSymbol, moduleRef, identify) : new Map())
     }
-    return names.get(key)
+    return shared.exportPaths.get(file).get(identity)
   }
 
-  const exportPath = (sym) => {
-    const id = identify(sym)
-    for (const { path: file } of sym.declarations) {
-      if (!shared.exportPaths.has(file)) {
-        const moduleSymbol = checker.getSymbolOfSourceFile(file)
-        const moduleRef = moduleSymbol && write(checker.getTypeOfSymbol(moduleSymbol))
-        shared.exportPaths.set(file, moduleRef ? buildExportIndex(checker, moduleSymbol, moduleRef, identify) : new Map())
+  /**
+   * How the registry refers to the type `sym` declares, worked out once per
+   * symbol: TypeScript's own name when the registry can use it, else an
+   * export-anchored path, else nothing but the identity a copy is filed under.
+   */
+  const describe = (sym, type, valueSide) => {
+    const key = `${sym.id}:${valueSide}`
+    if (!known.has(key)) {
+      const subject = type.flags & TypeFlags.UniqueESSymbol ? type : valueSide ? checker.getTypeOfSymbol(sym) : checker.getDeclaredTypeOfSymbol(sym)
+      const name = write(subject)
+      if (name && (name.includes('import(') || resolvesFromRegistry(name, sym, subject))) {
+        known.set(key, { name })
+      } else {
+        const identity = identify(sym)
+        known.set(key, { identity, name: valueSide ? undefined : exportPath(sym, identity) })
       }
-      const found = shared.exportPaths.get(file).get(id)
-      if (found) return found
     }
-    return undefined
+    return known.get(key)
   }
 
   const list = (types, loc, seen) => types.map((item) => emit(item, loc, new Set(seen)))
 
+  // A generic signature fails where its type parameter is written.
   function emitSig(sig, loc, seen, prefix, arrow) {
-    if (sig.getTypeParameters().length) throw new Error('Generic function-valued captures are not supported.')
     const parameters = sig.getParameters()
     const params = parameters.map((p, i) => {
-      const declaration = p.valueDeclaration?.resolve()
+      const declaration = p.valueDeclaration.resolve()
       if (sig.hasRestParameter && i === parameters.length - 1) return `...${p.name}: ${emit(checker.getTypeOfSymbol(p), loc, new Set(seen))}`
-      const optional = declaration?.questionToken || declaration?.initializer ? '?' : ''
+      const optional = declaration.questionToken || declaration.initializer ? '?' : ''
       return `${p.name}${optional}: ${emit(checker.getParameterType(sig, i), loc, new Set(seen))}`
     })
     return `${prefix}(${params.join(', ')})${arrow}${emit(sig.getReturnType(), loc, new Set(seen))}`
@@ -204,9 +198,9 @@ function createTypeEmitter(api, checker, anchor, shared) {
   /** A member's key. A symbol key needs a constant of that symbol's type to compute it from. */
   function keyOf(prop, loc) {
     if (!String(prop.escapedName).startsWith('__@')) return JSON.stringify(prop.name)
-    const name = prop.declarations[0]?.resolve().name
-    if (name?.kind !== SyntaxKind.ComputedPropertyName) throw new Error('A symbol-keyed member has no declaration that names its key.')
-    const keyType = checker.getTypeAtLocation(name.expression)
+    const computed = prop.declarations.map((h) => h.resolve().name).find((name) => name.kind === SyntaxKind.ComputedPropertyName)
+    if (!computed) throw new Error(`No declaration names the symbol that keys the member ${checker.symbolToString(prop)}.`)
+    const keyType = checker.getTypeAtLocation(computed.expression)
     const key = reference(keyType.getSymbol(), keyType, false, [], loc, new Set())
     if (!key) throw new Error(`The symbol that keys the member ${checker.symbolToString(prop)} is not exported.`)
     const id = `key:${key}`
@@ -242,22 +236,22 @@ function createTypeEmitter(api, checker, anchor, shared) {
    * back, and later uses fail the same way instead of naming nothing.
    */
   function emitHelper(id, baseName, type, loc, nominal) {
-    const known = shared.helpers.get(id)
-    if (known instanceof Error) throw known
-    if (known) return known
+    const declared = shared.helpers.get(id)
+    if (declared instanceof Error) throw declared
+    if (declared) return declared
     const mark = shared.log.length
     const index = ++shared.counter
-    const safe = baseName.replace(/[^A-Za-z0-9_]/g, '_')
-    const name = `__EP_${safe}_${index}`
-    const entry = { id, text: '' }
+    const name = `__EP_${baseName}_${index}`
     shared.helpers.set(id, name)
-    shared.log.push(entry)
     try {
       const members = type.isObjectType() ? emitMembers(type, loc, new Set([type.id])) : []
-      const brand = `__ep_brand_${safe}_${index}`
-      entry.text = nominal
-        ? `declare const ${brand}: unique symbol;\ninterface ${name} {\n  readonly [${brand}]: never;\n  ${members.join('\n  ')}\n}`
-        : `interface ${name} {\n  ${members.join('\n  ')}\n}`
+      const brand = `__ep_brand_${index}`
+      shared.log.push({
+        id,
+        text: nominal
+          ? `declare const ${brand}: unique symbol;\ninterface ${name} {\n  readonly [${brand}]: never;\n  ${members.join('\n  ')}\n}`
+          : `interface ${name} {\n  ${members.join('\n  ')}\n}`,
+      })
       return name
     } catch (error) {
       for (const undone of shared.log.splice(mark)) shared.helpers.delete(undone.id)
@@ -268,13 +262,12 @@ function createTypeEmitter(api, checker, anchor, shared) {
 
   /** A name or an export-anchored path for the type `sym` declares, with its type arguments. */
   function reference(sym, type, valueSide, args, loc, seen) {
-    const name = nameOf(sym, type, valueSide) ?? (valueSide || args.length ? undefined : exportPath(sym))
+    const { name } = describe(sym, type, valueSide)
     return name && (args.length ? `${name}<${list(args, loc, seen).join(', ')}>` : name)
   }
 
   function emit(type, loc, seen = new Set()) {
     if (type.isErrorType()) throw new Error('TypeScript could not determine this type.')
-    if (type.isTypeParameter()) throw new Error(`The type parameter ${checker.typeToString(type)} is local to a generic scope.`)
     if (type.isIntrinsicType()) return type.intrinsicName
     if (!(type.flags & TypeFlags.EnumLiteral)) {
       if (type.isStringLiteralType() || type.isNumberLiteralType() || type.isBooleanLiteralType()) return JSON.stringify(type.value)
@@ -311,9 +304,13 @@ function createTypeEmitter(api, checker, anchor, shared) {
       const args = !declared ? type.getAliasTypeArguments() : type.isTypeReference() ? checker.getTypeArguments(type) : []
       const named = reference(sym, type, valueSide, args, loc, seen)
       if (named) return named
-      if (sym.flags & SymbolFlags.EnumMember) throw new Error(`The enum member ${checker.symbolToString(sym)} belongs to an enum that is not exported.`)
-      const nominal = Boolean(declared) && (Boolean(type.flags & TypeFlags.UniqueESSymbol) || isNominalUnexported(sym, type))
-      if (!valueSide && (nominal || !args.length)) return emitHelper(identify(sym), sym.name, type, loc, nominal)
+      if (sym.flags & SymbolFlags.EnumMember) throw new Error(`The enum member ${checker.typeToString(type)} belongs to an enum that is not exported.`)
+      if (!valueSide) {
+        // One copy for each instantiation of a private type.
+        const nominal = Boolean(declared) && (Boolean(type.flags & TypeFlags.UniqueESSymbol) || isNominalUnexported(sym, type))
+        const { identity } = describe(sym, type, valueSide)
+        return emitHelper(args.length ? `${identity}<${list(args, loc, seen).join(', ')}>` : identity, sym.name, type, loc, nominal)
+      }
     }
 
     if (type.isObjectType()) {
@@ -321,38 +318,30 @@ function createTypeEmitter(api, checker, anchor, shared) {
       seen.add(type.id)
       return `{ ${emitMembers(type, loc, seen).join(' ')} }`
     }
+    // A type parameter, or a type computed from one, means something only inside its generic scope.
     throw new Error(`The type ${checker.typeToString(type)} cannot be written outside its declaration.`)
   }
 
   return { emit }
 }
 
-/** The result type of an expression whose own type cannot be written: a different type for every node id. */
-const OPAQUE =
-  'declare const __ep_opaque: unique symbol;\n' +
-  '/** Stands for a type that cannot be written outside its declaration. Only original() gives a value of it. */\n' +
-  'interface __EPOpaque<Id extends string> {\n  readonly [__ep_opaque]: Id;\n}'
-
-let defaultApi
-const getDefaultApi = () => (defaultApi ??= new API())
 const readFile = (file) => { try { return readFileSync(file, 'utf8') } catch { return undefined } }
 /** TypeScript drops a byte-order mark when it reads a file, so text handed to it must not carry one. */
 const withoutMark = (text) => (text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
 
 /**
  * The TypeScript program the registry is read from: the project's own files
- * (from its tsconfig, without content-mapped `.ep` files), the targets, and an
- * empty module at the registry's place. With a `cache`, the program of the
- * last call is kept and brought up to date with the disk.
+ * (from its tsconfig), the targets, and an empty module at the registry's
+ * place. With a `cache`, the program of the last call is kept and brought up
+ * to date with the disk.
  */
-function openAnalysis(plan, registryFile, api, cache, overrides) {
+function openAnalysis(plan, registryFile, api, cache) {
   const anchorFile = `${registryFile}.ts`
   const config = existsSync(plan.tsconfig) ? api.parseConfigFile(plan.tsconfig) : undefined
-  const compilerOptions = { strict: true, ...config?.options }
-  const supplied = new Map([[anchorFile, 'export {}\n']])
-  for (const entry of plan.files) supplied.set(entry.file, withoutMark(entry.source))
-  for (const [file, text] of overrides) if (!file.endsWith('.ep')) supplied.set(file, withoutMark(text))
-  const rootFiles = [...new Set([...supplied.keys(), ...(config?.fileNames ?? []).filter((file) => !file.endsWith('.ep'))])].sort()
+  const compilerOptions = config?.options ?? {}
+  // The targets are handed over as the plan read them, so that its positions hold.
+  const supplied = new Map([[anchorFile, 'export {}\n'], ...plan.files.map((entry) => [entry.file, withoutMark(entry.source)])])
+  const rootFiles = [...new Set([...supplied.keys(), ...(config?.fileNames ?? [])])].sort()
   const key = JSON.stringify({ rootFiles, compilerOptions })
 
   let snapshot
@@ -378,32 +367,23 @@ function openAnalysis(plan, registryFile, api, cache, overrides) {
   const program = snapshot.getProgram(programId)
   // Every file of the project that the program read from disk can change the registry.
   const inputs = program.getSourceFileNames().filter((file) => !file.includes('/node_modules/') && file !== anchorFile)
-  if (cache) {
-    Object.assign(cache, {
-      key,
-      snapshot,
-      programId,
-      sources: supplied,
-      inputs: new Map(inputs.filter((file) => !supplied.has(file)).map((file) => [file, readFile(file)])),
-    })
-  }
+  if (cache) Object.assign(cache, { key, snapshot, programId, sources: supplied, inputs: new Map(inputs.map((file) => [file, readFile(file)])) })
   return { snapshot, program, anchorFile, inputs }
 }
 
 /**
  * Analyze all target files in a plan and generate the virtual
- * `declare module 'execution-points-prototype'` ExecutionPointFileRegistry.
- * Returns its `text`, the registry keys in `files`, where each file's nodes
- * are in the text (`spans`), and the files the result was read from (`inputs`).
+ * `declare module 'execution-points-prototype'` ExecutionPointFileRegistry
+ * for the manifest `fromFile`. Returns its `text`, where each file's nodes are
+ * in the text (`spans`), and the files the result was read from (`inputs`).
  */
-export function generateFileRegistryModule(plan, { fromFile, api = getDefaultApi(), cache, overrides = new Map() } = {}) {
-  if (!plan.files.length) return { ...renderFileModule([], []), files: [], inputs: [] }
+export function generateFileRegistryModule(plan, { fromFile, api, cache }) {
+  if (!plan.files.length) return { ...renderFileModule([], []), inputs: [] }
 
-  const { snapshot, program, anchorFile, inputs } = openAnalysis(plan, fromFile ?? path.join(plan.root, 'points.ep'), api, cache, overrides)
-  let probeSnapshot
+  const { snapshot, program, anchorFile, inputs } = openAnalysis(plan, fromFile, api, cache)
   try {
     const checker = program.getProject().checker
-    const shared = { log: [], helpers: new Map(), exportPaths: new Map(), counter: 0, emitters: 0 }
+    const shared = { log: [], helpers: new Map(), exportPaths: new Map(), counter: 0 }
     const emitter = createTypeEmitter(api, checker, program.getSourceFile(anchorFile), shared)
 
     // Phase 1: result types, read from the unchanged targets.
@@ -422,7 +402,7 @@ export function generateFileRegistryModule(plan, { fromFile, api = getDefaultApi
 
       const nodes = entry.nodes.map((node, i) => {
         const expression = expressions[i]
-        const emitted = { ...node, unportableReason: null, locals: {}, unportableLocals: {} }
+        const emitted = { ...node, locals: {}, unportableLocals: {} }
         try {
           emitted.result = emitter.emit(types[i], expression)
         } catch (error) {
@@ -430,7 +410,6 @@ export function generateFileRegistryModule(plan, { fromFile, api = getDefaultApi
           // Its type cannot be written, so it gets one of its own that only original() produces.
           emitted.unportableReason = error.message
           emitted.result = `__EPOpaque<${JSON.stringify(node.id)}>`
-          shared.opaque = true
         }
         // An assertion call narrows only as a statement of its own, so its probe must not wrap it.
         emitted.isStatement =
@@ -443,30 +422,27 @@ export function generateFileRegistryModule(plan, { fromFile, api = getDefaultApi
 
     // Phase 2: the narrowed type of each local, read from a copy of the target
     // that mentions every local right before the expression.
-    const probes = files
-      .filter(({ probed }) => probed.length)
-      .map(({ entry, probed }) => [
-        entry.file,
-        withoutMark(
-          projectNested(
-            entry.source,
-            probed,
-            (node) => {
-              const mentions = `{ __execution_point_probe__: 0, ${node.captures.map((name) => `${JSON.stringify(name)}: ${name}`).join(', ')} }`
-              return node.isStatement ? `void ${mentions}; ` : `(void ${mentions}, (`
-            },
-            (node) => (node.isStatement ? '' : '))'),
-          ),
+    const probes = files.map(({ entry, probed }) => [
+      entry.file,
+      withoutMark(
+        projectNested(
+          entry.source,
+          probed,
+          (node) => {
+            const mentions = `{ __execution_point_probe__: 0, ${node.captures.map((name) => `${JSON.stringify(name)}: ${name}`).join(', ')} }`
+            return node.isStatement ? `void ${mentions}; ` : `(void ${mentions}, (`
+          },
+          (node) => (node.isStatement ? '' : '))'),
         ),
-      ])
-    if (probes.length) {
-      probeSnapshot = snapshot.update({ fileSystem: createFileSystemLayer(probes), ensurePrograms: [program.id] })
+      ),
+    ])
+    const probeSnapshot = snapshot.update({ fileSystem: createFileSystemLayer(probes), ensurePrograms: [program.id] })
+    try {
       const probeProgram = probeSnapshot.getProgram(program.id)
       const probeChecker = probeProgram.getProject().checker
       const probeEmitter = createTypeEmitter(api, probeChecker, probeProgram.getSourceFile(anchorFile), shared)
 
       for (const { entry, probed } of files) {
-        if (!probed.length) continue
         // The probes of a file appear in the order of its nodes.
         const mentions = []
         walk(probeProgram.getSourceFile(entry.file), (astNode) => {
@@ -487,20 +463,17 @@ export function generateFileRegistryModule(plan, { fromFile, api = getDefaultApi
           }
         })
       }
+    } finally {
+      probeSnapshot.dispose()
     }
 
-    const declarations = shared.log.map((entry) => entry.text)
-    if (shared.opaque) declarations.unshift(OPAQUE)
-    const rendered = renderFileModule(declarations, files.map(({ entry, nodes }) => [entry, nodes]))
-    return { ...rendered, files: files.map(({ entry }) => entry.relativeFile), inputs }
+    return { ...renderFileModule(shared.log.map((entry) => entry.text), files.map(({ entry, nodes }) => [entry, nodes])), inputs }
   } finally {
-    probeSnapshot?.dispose()
     if (!cache) snapshot.dispose()
   }
 }
 
-const typeLiteral = (entries) =>
-  `{ ${Object.entries(entries).sort(([a], [b]) => a.localeCompare(b)).map(([name, type]) => `readonly ${JSON.stringify(name)}: ${type};`).join(' ')} }`
+const typeLiteral = (entries) => `{ ${entries.map(([name, type]) => `readonly ${JSON.stringify(name)}: ${type};`).join(' ')} }`
 
 function renderNode(node) {
   const fields = [
@@ -512,22 +485,27 @@ function renderNode(node) {
     `readonly nth: ${node.nth};`,
   ]
   if (node.unportableReason) fields.push(`readonly __unportable: ${JSON.stringify(node.unportableReason)};`)
-  if (Object.keys(node.unportableLocals).length) {
-    fields.push(`readonly __unportableLocals: ${typeLiteral(Object.fromEntries(Object.entries(node.unportableLocals).map(([name, reason]) => [name, JSON.stringify(reason)])))};`)
-  }
-  fields.push(`readonly result: ${node.result};`, `readonly locals: ${typeLiteral(node.locals)}`)
+  fields.push(
+    `readonly __unportableLocals: ${typeLiteral(Object.entries(node.unportableLocals).map(([name, reason]) => [name, JSON.stringify(reason)]))};`,
+    `readonly result: ${node.result};`,
+    `readonly locals: ${typeLiteral(Object.entries(node.locals))}`,
+  )
   return `  | { ${fields.join(' ')} }`
 }
 
 /**
  * The registry module. Each file's nodes are a type alias declared outside the
  * `declare module` block, where a global name cannot bind to one of the
- * library's own exports.
+ * library's own exports. `__EPOpaque<Id>` is the result type of an expression
+ * whose own type cannot be written: a different type for every node id.
  */
 function renderFileModule(declarations, files) {
   let text =
     '// Virtual execution-points file schema (generated in memory by TypeScript 7.1 content mapper).\n' +
     "import type {} from 'execution-points-prototype';\n\n" +
+    'declare const __ep_opaque: unique symbol;\n' +
+    '/** Stands for a type that cannot be written outside its declaration. Only original() gives a value of it. */\n' +
+    'interface __EPOpaque<Id extends string> {\n  readonly [__ep_opaque]: Id;\n}\n\n' +
     declarations.map((declaration) => `${declaration}\n\n`).join('')
   const spans = files.map(([entry, nodes], i) => {
     const start = text.length

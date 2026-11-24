@@ -69,7 +69,7 @@ import { differs, oracleProperty, pass } from '@tanstack/oracles'
 import { generateFileRegistryModule } from '../src/contracts.mjs'
 import { handleInputChunk } from '../src/content-mapper.mjs'
 import { buildTargetPlan } from '../src/discovery.mjs'
-import { type Plan, compileRegistry, createProject, removeProject, repoRoot } from './registry-harness'
+import { type Plan, type RegistryReading, compileRegistry, createProject, removeProject, repoRoot } from './registry-harness'
 
 const api = new API({ cwd: repoRoot })
 afterAll(() => {
@@ -206,7 +206,8 @@ interface ManifestHistory {
 
 /** The project every manifest history runs in. */
 const MANIFEST_PROJECT = {
-  'src/app.ts': 'function sendQuote(): number { return 7 }\nexport function work() { return sendQuote() }\n',
+  // The name of Quote is an import relative to the manifest, so it holds only for the right manifest file.
+  'src/app.ts': 'export interface Quote { total: number }\nfunction sendQuote(): Quote { return { total: 7 } }\nexport function work() { return sendQuote() }\n',
   'src/extra.ts': 'function extraCall(): boolean { return true }\nexport function extra() { return extraCall() }\n',
   'src/lib/deep.ts': 'function deepCall(): string { return "d" }\nexport function deep() { return deepCall() }\n',
   'other.tsconfig.json': JSON.stringify({ compilerOptions: { strict: true, noEmit: true }, include: ['src/**/*.ts'] }),
@@ -385,6 +386,8 @@ oracleProperty({
       declaresRegistry: !history.refused,
       registryErrors: [],
       files,
+      closed: true,
+      sourceFilesLeftOpen: 0,
       mappings: owedMappings(history),
       watched: [
         ...new Set([
@@ -410,7 +413,7 @@ oracleProperty({
         fileName: join(root, 'points.ep'),
         content,
       })
-      callRpc('closeProject', { projectHandle: `manifest-${history.name}` })
+      const closed = callRpc('closeProject', { projectHandle: `manifest-${history.name}` })
       if (!response?.result || !opened?.result) {
         observe('crash', JSON.stringify(response?.error ?? opened?.error ?? 'no response'))
         return
@@ -433,6 +436,8 @@ oracleProperty({
         declaresRegistry: result.text.includes('interface ExecutionPointFileRegistry'),
         registryErrors: registry.registryErrors,
         files: registry.files,
+        closed: JSON.stringify(closed?.result) === '{}',
+        sourceFilesLeftOpen: sourceFilesOpen.size,
         // A segment is [virtualStart, virtualLength, originalStart, originalLength, kind, features].
         // Kind 1 maps the block as a whole; feature bit 8 is go-to-definition, and no bit means diagnostics only.
         mappings: result.mappings.map(([virtualStart, virtualLength, originalStart, originalLength, kind, features]) => ({
@@ -499,34 +504,54 @@ const LIFECYCLE_SCENARIOS = [
   'open-transform-edit-and-retransform',
   'imported-files-are-watched-and-refresh',
   'custom-manifest-close-and-reopen',
+  'config-with-another-name-and-no-config',
   'split-chunks-and-unknown-method-error',
 ] as const
 
 type LifecycleScenario = (typeof LIFECYCLE_SCENARIOS)[number]
 
 /**
- * Every TypeScript program the mapper builds, in order. `createSnapshot` is
- * wrapped for each API instance but the oracle's own; the client caches the
- * method on the instance at first use, so the wrapper is installed there too.
+ * What the mapper asks of TypeScript: every program it builds, every source
+ * file it parses and whether it gave it back, and how many API instances
+ * (each a TypeScript server process) it uses. The methods are wrapped for
+ * every API instance but the oracle's own; the client caches a method on the
+ * instance at first use, so the wrapper is installed there too.
  */
 const programsBuilt: Array<{ isDisposed: () => boolean }> = []
-const createSnapshotAccessor = Object.getOwnPropertyDescriptor(API.prototype, 'createSnapshot')!
-Object.defineProperty(API.prototype, 'createSnapshot', {
-  configurable: true,
-  get(this: API) {
-    const create = createSnapshotAccessor.get!.call(this)
-    if (this === api) return create
-    const counted = (...args: Array<unknown>) => {
-      const snapshot = create.apply(this, args)
-      programsBuilt.push(snapshot)
-      return snapshot
-    }
-    Object.defineProperty(this, 'createSnapshot', { configurable: true, value: counted })
-    return counted
-  },
-})
-afterAll(() => {
-  Object.defineProperty(API.prototype, 'createSnapshot', createSnapshotAccessor)
+const sourceFilesOpen = new Set<unknown>()
+const serversUsed = new Set<unknown>()
+function wrapApiMethod(method: 'createSnapshot' | 'createSourceFile', record: (result: any) => void) {
+  const accessor = Object.getOwnPropertyDescriptor(API.prototype, method)!
+  Object.defineProperty(API.prototype, method, {
+    configurable: true,
+    get(this: API) {
+      const call = accessor.get!.call(this)
+      if (this === api) return call
+      const wrapped = (...args: Array<unknown>) => {
+        serversUsed.add(this)
+        const result = call.apply(this, args)
+        record(result)
+        return result
+      }
+      Object.defineProperty(this, method, { configurable: true, value: wrapped })
+      return wrapped
+    },
+  })
+  afterAll(() => {
+    Object.defineProperty(API.prototype, method, accessor)
+  })
+}
+wrapApiMethod('createSnapshot', (snapshot) => programsBuilt.push(snapshot))
+wrapApiMethod('createSourceFile', (lease) => {
+  sourceFilesOpen.add(lease)
+  const dispose = lease.dispose
+  Object.defineProperty(lease, 'dispose', {
+    configurable: true,
+    value: () => {
+      sourceFilesOpen.delete(lease)
+      return dispose.call(lease)
+    },
+  })
 })
 
 /** Run a sequence and hand it the programs the mapper built during it. */
@@ -534,6 +559,13 @@ function countingPrograms<T>(run: (built: Array<{ isDisposed: () => boolean }>) 
   programsBuilt.length = 0
   return run(programsBuilt)
 }
+
+const everyNodeFits = (reading: RegistryReading) =>
+  Object.values(reading.nodes).every(
+    (node) =>
+      node.unportable === null &&
+      [node.result, ...Object.values(node.locals)].every((fit) => fit === 'same' || fit === 'equivalent'),
+  )
 
 const IMPORT_PROJECT = {
   'src/app.ts': `import { loadLimit } from './limits'\nexport function allowed(n: number, s: Shape) {\n  const limit = loadLimit()\n  return check(limit, s, n)\n}\nfunction check(...parts: unknown[]) { return parts }\n`,
@@ -559,7 +591,7 @@ oracleProperty({
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: after every sequence of edits to targets and to the files they import, the warm mapper’s registry equals a cold mapper’s registry, so the mapper watches those files too. README.md:167 ("A persistent typescript/sync snapshot ... updates incrementally via snapshot.update(...) on file saves"). Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23: Law M2.',
     limits:
-      'Malformed frames without a Content-Length header or JSON parse errors without an id are ignored; histories are bounded-exhaustive over four lifecycle sequences. The standard-input loop of the mapper process is not driven; importing the mapper is checked for attaching no listener.',
+      'Malformed frames without a Content-Length header or JSON parse errors without an id are ignored; histories are bounded-exhaustive over five lifecycle sequences. The standard-input loop of the mapper process is not driven; importing the mapper is checked for attaching no listener.',
   },
   histories: {
     enumerated: LIFECYCLE_SCENARIOS.map((scenario) => ({ scenario })),
@@ -568,6 +600,7 @@ oracleProperty({
       'refreshed-after-imported-file-edit',
       'refreshed-after-manifest-edit',
       'reopened-after-close',
+      'opened-with-another-config',
       'handled-framing-and-unknown-method',
     ],
   },
@@ -600,10 +633,12 @@ oracleProperty({
           registryErrors: [],
           fitsAfterEdits: true,
           programsBuilt: 1,
+          typescriptServers: 1,
         }
       case 'custom-manifest-close-and-reopen':
         return {
           customManifestWatched: ['src/extra.ts'],
+          calleesOfCustomManifest: ['extraCall'],
           missingTsconfigExcluded: true,
           calleesOfFirstManifest: ['firstCall'],
           calleesOfSecondManifest: ['extraCall', 'firstCall'],
@@ -612,8 +647,18 @@ oracleProperty({
           calleesAfterClose: ['subCall'],
           programsBuilt: 2,
         }
+      case 'config-with-another-name-and-no-config':
+        return {
+          // Only tsconfig.app.json loads the Node types that the target needs.
+          namedConfigIsUsed: true,
+          // With no configuration file, the working directory is the project and tsconfig.json its configuration.
+          watchedWithoutConfig: ['src/app.ts', 'tsconfig.json'],
+        }
       case 'split-chunks-and-unknown-method-error':
         return {
+          emptyHeaderSkipped: true,
+          repliesToNotifications: 0,
+          closingAnUnknownProjectAnswers: true,
           splitHeaderOk: true,
           splitBodyOk: true,
           unknownMethodJsonrpc: '2.0',
@@ -713,12 +758,9 @@ oracleProperty({
               identityChangedAfterAmbientEdit: afterImported.configIdentity !== afterAmbient.configIdentity,
               warmEqualsColdAfterEachEdit: [warmAfterImported === coldAfterImported, warmAfterAmbient === fresh.text],
               registryErrors: reading.registryErrors,
-              fitsAfterEdits: Object.values(reading.nodes).every(
-                (node) =>
-                  node.unportable === null &&
-                  [node.result, ...Object.values(node.locals)].every((fit) => fit === 'same' || fit === 'equivalent'),
-              ),
+              fitsAfterEdits: everyNodeFits(reading),
               programsBuilt: built.length,
+              typescriptServers: serversUsed.size,
             })
           })
         } finally {
@@ -736,7 +778,8 @@ oracleProperty({
           'src/app.ts': first,
           'src/extra.ts': extra,
           'points.ep': manifestOne,
-          'custom.ep': JSON.stringify({ targets: ['src/extra.ts'] }),
+          // A manifest in a directory of its own still names targets from the project root.
+          'config/custom.ep': JSON.stringify({ targets: ['src/extra.ts'] }),
         })
         const elsewhere = createProject({
           'sub.ts': 'function subCall(): number { return 1 }\nexport function s() { return subCall() }\n',
@@ -747,8 +790,16 @@ oracleProperty({
             const custom = callRpc('openProject', {
               projectHandle: 'proj-2',
               configFileName: join(root, 'nonexistent-tsconfig.json'),
-              options: { configFile: 'custom.ep' },
+              options: { configFile: 'config/custom.ep' },
             }).result
+            const calleesOfCustomManifest = callees(
+              root,
+              callRpc('transform', {
+                projectHandle: 'proj-2',
+                fileName: join(root, 'config/custom.ep'),
+                content: JSON.stringify({ targets: ['src/extra.ts'] }),
+              }).result.text,
+            )
             const customProgram = built[0]
             callRpc('closeProject', { projectHandle: 'proj-2' })
             const programReleasedOnClose = Boolean(customProgram?.isDisposed())
@@ -773,6 +824,7 @@ oracleProperty({
             const subPlan = buildTargetPlan({ root: elsewhere, targets: ['sub.ts'], api }) as Plan
             observe('lifecycle', {
               customManifestWatched: relativeTo(root, custom.watchedFiles),
+              calleesOfCustomManifest,
               missingTsconfigExcluded: !custom.watchedFiles.includes(join(root, 'nonexistent-tsconfig.json')),
               calleesOfFirstManifest: callees(root, firstText),
               calleesOfSecondManifest: callees(root, secondText),
@@ -791,6 +843,36 @@ oracleProperty({
         return
       }
 
+      if (history.scenario === 'config-with-another-name-and-no-config') {
+        observe('reach', 'opened-with-another-config')
+        const manifest = JSON.stringify({ targets: ['src/app.ts'] })
+        const root = createProject({
+          'src/app.ts': `export function tag() { return Buffer.from('x') }\n`,
+          'points.ep': manifest,
+        })
+        const base = JSON.parse(readFileSync(join(root, 'tsconfig.json'), 'utf8'))
+        write(root, 'tsconfig.app.json', JSON.stringify({ ...base, compilerOptions: { ...base.compilerOptions, types: ['node'] } }))
+        const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root)
+        try {
+          callRpc('openProject', { projectHandle: 'proj-app', configFileName: join(root, 'tsconfig.app.json') })
+          const text = callRpc('transform', { projectHandle: 'proj-app', fileName: join(root, 'points.ep'), content: manifest }).result
+            .text as string
+          callRpc('closeProject', { projectHandle: 'proj-app' })
+          const plan = buildTargetPlan({ root, targets: ['src/app.ts'], api }) as Plan
+          const { reading } = compileRegistry(api, root, text, plan, { tsconfig: 'tsconfig.app.json' })
+          const withoutConfig = callRpc('openProject', { projectHandle: 'proj-none', configFileName: '' }).result
+          callRpc('closeProject', { projectHandle: 'proj-none' })
+          observe('lifecycle', {
+            namedConfigIsUsed: reading.registryErrors.length === 0 && Object.keys(reading.nodes).length === 1 && everyNodeFits(reading),
+            watchedWithoutConfig: relativeTo(root, withoutConfig.watchedFiles),
+          })
+        } finally {
+          cwd.mockRestore()
+          removeProject(root)
+        }
+        return
+      }
+
       observe('reach', 'handled-framing-and-unknown-method')
       // What a fresh import of the mapper adds to standard input.
       const listeners = () => process.stdin.listenerCount('data') + process.stdin.listenerCount('end')
@@ -800,16 +882,23 @@ oracleProperty({
       const listenersAfterImport = listeners()
       // A header without a length, a frame that is not JSON, and a notification get no reply.
       const notification = Buffer.from(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }), 'utf8')
-      sendFramedPayloads([
+      const replies = sendFramedPayloads([
         Buffer.from('X-Ignore: 1\r\n\r\n', 'ascii'),
         Buffer.from('Content-Length: 3\r\n\r\n{x}', 'ascii'),
         Buffer.concat([Buffer.from(`Content-Length: ${notification.length}\r\n\r\n`, 'ascii'), notification]),
       ])
+      // A frame whose header is empty is skipped, and the request after it is answered.
+      sendFramedPayloads([Buffer.from('\r\n\r\n', 'ascii')])
+      const afterEmptyHeader = callRpc('initialize', { protocolVersion: 4 })
+      const closedUnknown = callRpc('closeProject', { projectHandle: 'never-opened' })
       const splitHeader = callRpc('initialize', { protocolVersion: 2 }, 8)
       const splitBody = callRpc('initialize', { protocolVersion: 3 }, 35)
       const unknown = callRpc('noSuchMethod', {})
       const internal = callRpc('transform', null)
       observe('lifecycle', {
+        emptyHeaderSkipped: afterEmptyHeader?.result?.protocolVersion === 4,
+        repliesToNotifications: replies.length,
+        closingAnUnknownProjectAnswers: JSON.stringify(closedUnknown?.result) === '{}',
         splitHeaderOk: splitHeader?.result?.protocolVersion === 2,
         splitBodyOk: splitBody?.result?.protocolVersion === 3,
         unknownMethodJsonrpc: unknown?.jsonrpc,
