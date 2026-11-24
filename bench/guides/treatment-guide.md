@@ -26,7 +26,8 @@ async function settle(turns = 20) {
 import { select } from 'execution-points-prototype'
 
 const point = select('src/example.ts', (node) => {
-  if (node.inFunction === 'myFn' && node.kind === 'CallExpression' && node.callee === 'helper') {
+  // Prefer minimal selectors: add `inFunction` or `nth` only if `callee` appears more than once
+  if (node.kind === 'CallExpression' && node.callee === 'helper') {
     return node.capture('id') // optional readonly local captures
   }
 })
@@ -45,7 +46,7 @@ await Promise.all([opA, opB])
 ## Rules & Limits
 - **Do not monkey-patch JavaScript or Node.js globals** (`Promise`, `MessageChannel`, `MessagePort`, `Map`, `EventTarget`, `globalThis`, `Object.defineProperty`, `Reflect.defineProperty`, `vi.stubGlobal`). Runtime guards and AST audits fail the run on any global patch.
 - **Do not add test-only hooks or extra exports** to production source files.
-- **Note on `select()`:** Selectors match exactly 1 expression; renaming a callee or adding a second call site causes a loud selection/compile error (`matched 0` / `matched 2`) rather than a silent pass.
+- **Note on `select()`:** Selectors match exactly 1 expression; keep them minimal (omit `inFunction` when `callee` is already unique in the file, and never bind `inFunction` to a helper you newly introduced). Renaming a callee or adding a second call site causes a loud selection/compile error (`matched 0` / `matched 2`) rather than a silent pass.
 - **Timeouts:** Automated grading runs regression tests with a 1,500 ms timeout on mutants/refactors and 5,000 ms on your own fix; avoid waiting on barriers that never fire.
 
 ## Validation Commands

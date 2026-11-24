@@ -56,6 +56,7 @@ const result = quotePoint.withReplacement(
 
 - `node` is a discriminated union of every selectable expression in `'examples/checkout.ts'` (`kind`, `inFunction`, `callee` / `operator`, `nth`).
 - Returning 0 nodes or 2+ nodes (ambiguous match) is rejected at compile time.
+- **Keep selectors minimal:** omit `inFunction` (and `nth`) whenever `kind` + `callee` is already unique in the file. Filtering on `inFunction` only when disambiguating multiple call sites prevents a test from breaking (`matched 0`) when a call moves into an extracted private helper.
 - `.capture(...)` autocompletes every in-scope local at that expression and rejects unknown binding names immediately.
 
 The replacement's result must match the selected expression's inferred type. A `Promise<number>` expression requires a `Promise<number>` replacement; a synchronous `Quote` expression requires a `Quote` replacement. The checker does not automatically unwrap promises.
@@ -158,7 +159,7 @@ TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfi
 2. **Index target ASTs with TypeScript 7.1 (`src/discovery.mjs`).** Walks each target module via `api.createSourceFile` to index selectable expressions (`CallExpression`, non-assignment `BinaryExpression`, `ConditionalExpression`) with enclosing function name, `callee`/`operator`, `nth`, and safe pre-expression local bindings.
 3. **Analyze with warm incremental snapshots (`src/contracts.mjs`).** A persistent `typescript/sync` snapshot analyzes target `.ts` files (excluding `.ep` and `contentMappers`, preventing recursion) and updates incrementally via `snapshot.update(...)` on file saves. Result types come from the unmodified target AST; narrowed local types come from a nested incremental probe.
 4. **Emit virtual file schema.** `transform("points.ep")` returns a virtual `.ts` file augmenting `ExecutionPointFileRegistry` with the discriminated union of each target file's nodes. Export-reachable private types (`Quote`, `User`, `Order`) preserve exact identity via export-anchored paths; unreachable private types emit structural or unique-symbol-branded helpers.
-5. **Native `tsc` and VS Code checking.** Both `select()` (control-flow narrowing) and `fromFile()` (fluent navigator) derive their full types directly from `ExecutionPointFileRegistry`—so editing tests never triggers the content mapper and updates on every keystroke (~4 ms).
+5. **Native `tsc` and VS Code checking.** `select()` (control-flow narrowing) derives its full types directly from `ExecutionPointFileRegistry`—so editing tests never triggers the content mapper and updates on every keystroke (~4 ms).
 
 ## Supported subset and limits
 
@@ -166,7 +167,7 @@ TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfi
 - Indexed target kinds are ordinary `CallExpression`, non-assignment `BinaryExpression`, and `ConditionalExpression` nodes (including nested expressions).
 - Reference-only positions and expressions containing `await`, `yield`, `super`, optional chains, dynamic `import()`, or direct `eval` are skipped.
 - Captures expose explicitly selected binding values via lazy thunks; objects retain normal mutability while the `locals` container is shallowly frozen with a null prototype.
-- The runtime uses Node `AsyncLocalStorage` with a zero-overhead `activeCount === 0` fast path when no replacement is active.
+- The runtime uses Node `AsyncLocalStorage` to isolate concurrent and nested async replacement scopes.
 
 ## Source layout
 
@@ -177,9 +178,9 @@ TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfi
 | `src/contracts.mjs` | Extract result types and narrowed locals via warm incremental snapshots and emit virtual `ExecutionPointFileRegistry`. |
 | `src/content-mapper.mjs` | TypeScript 7.1 STDIO JSON-RPC content mapper server. |
 | `src/plugin.mjs` | Instrument configured target modules and register node metadata through Vite (test files are untouched). |
-| `src/runtime.mjs` | `select()`, `fromFile()`, `registerFile()`, `invoke()`, and async-local scopes. |
-| `src/runtime.d.ts` | `ExecutionPointFileRegistry`, narrowing visitor `select()`, fluent navigator `fromFile()`, and `Point` types. |
-| `examples/` | Runnable applications and Vitest examples exercising both APIs. |
+| `src/runtime.mjs` | `select()`, `registerFile()`, `invoke()`, and async-local scopes. |
+| `src/runtime.d.ts` | `ExecutionPointFileRegistry`, narrowing visitor `select()`, and `Point` types. |
+| `examples/` | Runnable applications and Vitest examples. |
 | `checks/verify.mjs` | End-to-end `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and no-write verification. |
 
 The native compiler API is currently a beta dependency. See the [TypeScript 7.1 beta announcement](https://devblogs.microsoft.com/typescript/announcing-typescript-7-1-beta/) for its API model.
