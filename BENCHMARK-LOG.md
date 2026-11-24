@@ -213,3 +213,35 @@ Following the independent v2.2 audit (`bench-v2.2-audit.md`) and its addendum on
    - Added `createSleepMonitor()` inside `gradeTrialPhase` (flags `hostSleepDetected=true`, `infraFailure=true`, `ungradable=true` if wall-clock jumps >10s vs. monotonic time during grading), upgraded `caffeinate` to `-i -m -s` (while noting AC power + lid open is still required against battery clamshell sleep), moved all grading sandboxes under `runTmpRoot`, and added `node bench/run.mjs --regrade <runDir>`.
    - Normalized relative paths in `graderChecksum` (`V-07`), added `gitCommit`/`copilotVersion`/`graderChecksum` to `PROVENANCE_FIELDS`, added `runId` to `stratumKey` (`N-27`), added `shellWriteDenials` (`V-06`), excluded denied shell calls from `firstFailingTestIndex` (`V-03`), kept `include: [task.testRel]` strictly in grading sandboxes (`V-02`), and added paired ITT credit CIs (`G-9`) + a full gate-sensitivity table directly to `bench/analyze.mjs`.
    - Pre-registered `D-01`–`D-14` explicitly in `bench/PROTOCOL.md`.
+
+### 2026-11-24 — v2.3 Self-Test Verification (`da61474`)
+- `node bench/run.mjs --self-test` exited **`0`** (`G-8` fixed): **57/57** calibration variants (including `DSB` `DS-BYPASS` rejected and `CC3`/`T6`/`DS3`/`DB4`/`RS4`/`EO3`/`CM3` accepted), **16/16** single-bug mutants rejected by hidden oracle, **8/8** cheats rejected, **3/3** legal witnesses passed, **37/37** AST checks (including `D-12`). Relative-path `graderChecksum` verified deterministic (`63dd059ab3b1704f`).
+
+### 2026-11-24 — v2.3 Cheaper-Model × Varying-Reasoning Matrix (80 Started Trials / 40 Matched Blocks, `da61474`)
+*Run ID: `41f0877c-aafd-4ee1-ac5c-b0dfbec6d4da` · Output: `/Users/caligano/.ep-bench-results/v2-2026-11-24T09-15-06-057Z` (`report.html` generated) · Models: `gpt-6.2-sol:low`, `gpt-6.2-sol:medium`, `claude-haiku-5.5:low`, `claude-haiku-5.5:medium` · All 10 tasks · `--prompt-style symptom` · `--phase-split` · `--seed 101` · Built-in `caffeinate -i -m -s` on AC power.*
+
+- **Run health:** `80/80` started, `0` `not_started`, `0` `infraFailure`, `0` `hostSleepDetected`, `0` `ungradable`, `0` global monkey-patching, `80/80` hidden oracle passes (`40/40` Control, `40/40` Treatment). Total billed cost across all 80 trials: **`377.8` credits** (`~$3.78`, plus `4.4` cr preflight).
+
+#### Results by Stratum (`bench/analyze.mjs`)
+
+| Stratum | Blocks | Control `solved` | Treatment `solved` | Guided EP Uptake (Trt) | E9 FG (adq) | Paired ITT Credits `T − C` |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Stratum B (`io-seam`, 5 tasks)** | 20 | 19/20 (95.0%) | 18/20 (90.0%) | 9/20 (45.0%) | 0/40 vs. 0/36 | `-0.06 cr` · `1/2` discordant (`p = 1.0`) |
+| **Stratum C (`real-async`, 2 tasks)** | 8 | 4/8 (50.0%) | 6/8 (75.0%) | 2/8 (25.0%) | 0/8 vs. 0/12 | `-0.65 cr` · `2/0` discordant (`p = 0.5`) |
+| **Primary (Strata B + C equal-capability)** | **28** | **23/28 (82.1%)** | **24/28 (85.7%)** | **11/28 (39.3%)** | **0/48 vs. 0/48** | **`-0.23 cr [-0.70, +0.18]`** · `3/2` discordant, exact McNemar `p = 1.0`, Newcombe RD `+3.6pp [-13.1, +20.4]` |
+| **Stratum A (`closed-module`, 3 tasks, separate)** | **12** | **8/12 (66.7%)** | **11/12 (91.7%)** | **12/12 (100.0%)** | **0/17 vs. 0/27** | **`+0.52 cr [-0.11, +1.30]`** · `3/0` discordant, exact McNemar `p = 0.25`, descriptive Newcombe `+25.0pp [-0.7, +50.4]` |
+| **All 40 matched blocks (pooled)** | **40** | **31/40 (77.5%)** | **35/40 (87.5%)** | **23/40 (57.5%)** | **0/65 vs. 0/75** | **`+0.00 cr [-0.38, +0.38]`** · official `6/2` (`p = 0.289`), `noValidFixGate` `5/2` (`p = 0.453`), `allValidFixes` `4/3` (`p = 1.0`) |
+
+#### Per Model × Reasoning Breakdown
+
+| Model : Reasoning | All (10 blocks) | Strata B + C (7 blocks) | Stratum A (3 blocks) | Guided EP Uptake | Total Credits (C vs. T) |
+| --- | --- | --- | --- | --- | --- |
+| `gpt-6.2-sol:low` | C `8/10` vs. T `9/10` | C `6/7` vs. T `6/7` | C `2/3` vs. T `3/3` | 4/10 | `61.4` vs. `62.1` |
+| `gpt-6.2-sol:medium` | C `8/10` vs. T `10/10` | C `6/7` vs. T `7/7` | C `2/3` vs. T `3/3` | 4/10 | `103.2` vs. `99.2` |
+| `claude-haiku-5.5:low` | C `7/10` vs. T `7/10` | C `5/7` vs. T `5/7` | C `2/3` vs. T `2/3` | 7/10 | `9.8` vs. `11.1` |
+| `claude-haiku-5.5:medium` | C `8/10` vs. T `9/10` | C `6/7` vs. T `6/7` | C `2/3` vs. T `3/3` | 8/10 | `14.7` vs. `16.5` |
+
+#### Key Qualitative Findings (All 8 Discordant Pairs Inspected Line-by-Line)
+1. **Why both Control-only wins (`C-only`, `2/40`) happened:** Both occurred in `claude-haiku-5.5` (`stale-cache-seam:low`, `event-order:medium`). Haiku extracted a new private helper (`applyUpdate`, `applyUnlocked`) in its fix and wrote `select(..., n => n.inFunction === 'applyUpdate' ...)`—which then failed with `matched 0` (`loud_break`) on the unmodified baseline and on every independent valid fix! This is a real, concrete failure mode of AST-selected execution points when smaller models couple `inFunction` selectors to newly refactored helper names instead of existing expressions.
+2. **Why `D-14` (`passesAtLeastOneValidFix`) proved indispensable:** On `stale-cache | control | gpt-6.2-sol:medium`, Control rewrote production `yieldIo()` to `node:timers/promises.setImmediate`, mocked it, and wrapped `barrier.hit` in `expect(reached).toBe(true)` so the test threw an `AssertionError` (`true_red`) on the unmodified `MessageChannel` baseline instead of timing out! It fooled `noValidFixGate` (`true_red` on baseline + `2/2` mutants), and was caught cleanly by `passesAtLeastOneValidFix === false` (`0/5` independent valid fixes).
+3. **Where Treatment won (`6` T-only vs. `2` C-only):** `stale-cache` (`3/4` vs. `0/4` Control — every Control agent failed), `cancel-commit` (`2/4` vs. `0/4` Control — Control missed `CC-M1`), and `single-flight` (`4/4` vs. `3/4` Control). Across all 40 blocks, paired per-trial credits were dead even (`T − C = +0.00 cr [-0.38, +0.38]`).
