@@ -31,11 +31,10 @@ The package is currently named `execution-points-prototype`.
 import { select } from 'execution-points-prototype'
 import { checkout } from './checkout'
 
-const quotePoint = select('examples/checkout.ts', (node) => {
-  if (node.inFunction === 'checkout' && node.kind === 'CallExpression' && node.callee === 'send') {
-    return node.capture('region', 'user', 'attempt')
-  }
-})
+// Minimal selector: callee is unique in the file, so no kind or inFunction check is needed
+const quotePoint = select('examples/checkout.ts', (node) =>
+  node.callee === 'send' && node,
+).capture('region', 'user', 'attempt')
 
 const result = quotePoint.withReplacement(
   ({ locals }) => {
@@ -54,12 +53,12 @@ const result = quotePoint.withReplacement(
 )
 ```
 
-- `node` is a discriminated union of every selectable expression in `'examples/checkout.ts'` (`kind`, `inFunction`, `callee` / `operator`, `nth`).
-- Returning 0 nodes or 2+ nodes (ambiguous match) is rejected at compile time.
-- **Keep selectors minimal:** omit `inFunction` (and `nth`) whenever `kind` + `callee` is already unique in the file. Filtering on `inFunction` only when disambiguating multiple call sites prevents a test from breaking (`matched 0`) when a call moves into an extracted private helper.
-- `.capture(...)` autocompletes every in-scope local at that expression and rejects unknown binding names immediately.
+- `node` is a discriminated union of every selectable expression in `'examples/checkout.ts'` (`kind`, `inFunction`, `callee`, `operator`, `nth`, `id`). `callee` and `operator` are mutually exclusive (`operator?: undefined` on calls, `callee?: undefined` on binary expressions), so `node.callee === 'send' && node` narrows cleanly without checking `node.kind`.
+- Returning 0 nodes or 2+ nodes (ambiguous match) is rejected at compile time (multi-match errors list the matched node IDs under `__matched`).
+- **Keep selectors minimal:** omit `inFunction` (and `nth`) whenever `callee` or `operator` is already unique in the file. Filtering on `inFunction` only when disambiguating multiple sites prevents a test from breaking (`matched 0`) when a call moves into an extracted private helper.
+- `.capture(...)` autocompletes every in-scope local at that expression and rejects unknown binding names immediately. Calling `.capture()` with no arguments types `locals` as `{}`.
 
-The replacement's result must match the selected expression's inferred type. A `Promise<number>` expression requires a `Promise<number>` replacement; a synchronous `Quote` expression requires a `Quote` replacement. The checker does not automatically unwrap promises.
+The replacement's result must match the selected expression's inferred type. A `Promise<number>` expression requires a `Promise<number>` replacement; a synchronous `Quote` expression requires a `Quote` replacement; an `async` handler on a synchronous `void` expression is rejected at compile time. The checker does not automatically unwrap promises.
 
 ## When replacement happens
 

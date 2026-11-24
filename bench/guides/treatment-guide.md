@@ -20,17 +20,14 @@ async function settle(turns = 20) {
 ```
 
 ## Controlling Interleavings with `execution-points-prototype`
-`select(file, visitor)` targets any selectable expression in a configured target file (`inFunction`, `kind`, `callee` / `operator`, `nth`) without editing production code. `point.withReplacement(handler, action)` scopes interception to `action` and its `AsyncLocalStorage` descendants:
+`select(file, visitor)` targets any selectable expression in a configured target file (`callee`, `operator`, `inFunction`, `kind`, `nth`, `id`) without editing production code. `point.withReplacement(handler, action)` scopes interception to `action` and its `AsyncLocalStorage` descendants:
 
 ```ts
 import { select } from 'execution-points-prototype'
 
-const point = select('src/example.ts', (node) => {
-  // Prefer minimal selectors: add `inFunction` or `nth` only if `callee` appears more than once
-  if (node.kind === 'CallExpression' && node.callee === 'helper') {
-    return node.capture('id') // optional readonly local captures
-  }
-})
+// Prefer minimal selectors: add `inFunction` or `nth` only if `callee` appears more than once
+const point = select('src/example.ts', (node) => node.callee === 'helper' && node)
+  .capture('id') // optional readonly local captures
 
 const b = createBarrier()
 const opA = point.withReplacement(async ({ original }) => {

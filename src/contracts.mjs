@@ -504,14 +504,18 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
 
       for (let i = 0; i < exprs.length; i++) {
         const { node, expr } = exprs[i]
-        let resultTypeText
+        let resultTypeText = 'never'
+        let unportableReason = null
         try {
           resultTypeText = emitter.emit(exprTypes[i], expr)
-        } catch {
-          // Skip unportable expressions (e.g. unresolved local generic) instead of failing the file.
-          continue
+        } catch (error) {
+          // Preserve unportable expressions in the registry so compile-time match counts
+          // stay aligned with runtime descriptors, while marking them unselectable directly.
+          unportableReason = error instanceof Error ? error.message : 'Unportable expression type'
         }
-        const validLocals = node.captures.filter((name) => Boolean(baseChecker.resolveName(name, SymbolFlags.Value, expr)))
+        const validLocals = unportableReason
+          ? []
+          : node.captures.filter((name) => Boolean(baseChecker.resolveName(name, SymbolFlags.Value, expr)))
         const isStatementExpr =
           expr.parent?.kind === SyntaxKind.ExpressionStatement &&
           [
@@ -520,7 +524,7 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
             SyntaxKind.CaseClause,
             SyntaxKind.DefaultClause,
           ].includes(expr.parent.parent?.kind)
-        nodeMeta.set(node.id, { node, resultTypeText, probeNames: validLocals, isStatementExpr })
+        nodeMeta.set(node.id, { resultTypeText, unportableReason, probeNames: validLocals, isStatementExpr })
         activeNodes.push(node)
       }
       if (activeNodes.length) nodesByFile.set(entry.file, activeNodes)
@@ -528,10 +532,14 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
 
     // Phase 2: Nested incremental probe snapshot for exact narrowed local types
     const probeFiles = new Map()
+    const probeNodesByFile = new Map()
     for (const [file, activeNodes] of nodesByFile) {
+      const probeNodes = activeNodes.filter((node) => !nodeMeta.get(node.id).unportableReason)
+      if (!probeNodes.length) continue
+      probeNodesByFile.set(file, probeNodes)
       const projected = projectNested(
         originals.get(file),
-        activeNodes,
+        probeNodes,
         (node) => {
           const { probeNames, isStatementExpr } = nodeMeta.get(node.id)
           const captures = probeNames.map((n) => `${JSON.stringify(n)}: ${n}`).join(', ')
@@ -543,6 +551,7 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
       probeFiles.set(file, projected)
     }
 
+    const localsByNodeId = new Map()
     if (probeFiles.size > 0) {
       probeSnapshot = baseSnapshot.update({
         fileSystem: createFileSystemLayer([...probeFiles]),
@@ -552,7 +561,7 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
       const probeChecker = probeProgram.getProject().checker
       const probeEmitter = createTypeEmitter(api, probeChecker, probeProgram, registryRoot, shared)
 
-      for (const [file, activeNodes] of nodesByFile) {
+      for (const [file, probeNodes] of probeNodesByFile) {
         const sf = probeProgram.getSourceFile(file)
         const probeObjs = new Map()
         walk(sf, (astNode) => {
@@ -563,7 +572,7 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
         })
 
         const initProps = []
-        for (const node of activeNodes) {
+        for (const node of probeNodes) {
           const captureObj = probeObjs.get(markerName(node.id))
           if (captureObj) {
             for (const prop of captureObj.properties.slice(1)) {
@@ -574,7 +583,6 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
         const initTypes = initProps.length
           ? probeChecker.getTypeAtLocation(initProps.map((p) => p.initializer))
           : []
-        const localsByNodeId = new Map()
         for (let i = 0; i < initProps.length; i++) {
           const { nodeId, name, initializer } = initProps[i]
           try {
@@ -588,15 +596,21 @@ export function generateFileRegistryModule(plan, { fromFile, api: externalApi, c
             // Silently omit unportable locals for this node
           }
         }
-
-        const emittedNodes = activeNodes.map((node) => ({
-          ...node,
-          result: nodeMeta.get(node.id).resultTypeText,
-          locals: localsByNodeId.get(node.id) ?? {},
-        }))
-        const relFile = activeNodes[0].relativeFile
-        byFile.set(relFile, emittedNodes)
       }
+    }
+
+    for (const [, activeNodes] of nodesByFile) {
+      const emittedNodes = activeNodes.map((node) => {
+        const meta = nodeMeta.get(node.id)
+        return {
+          ...node,
+          result: meta.resultTypeText,
+          unportableReason: meta.unportableReason,
+          locals: localsByNodeId.get(node.id) ?? {},
+        }
+      })
+      const relFile = activeNodes[0].relativeFile
+      byFile.set(relFile, emittedNodes)
     }
 
     return { text: renderFileModule(shared.defs, byFile), files: [...byFile.keys()] }
@@ -623,12 +637,15 @@ function renderFileModule(helperDefs, byFile) {
         .join(' ')
       const extra =
         node.kind === 'CallExpression'
-          ? ` readonly callee: ${JSON.stringify(node.callee)};`
+          ? ` readonly callee: ${JSON.stringify(node.callee)}; readonly operator?: undefined;`
           : node.kind === 'BinaryExpression'
-            ? ` readonly operator: ${JSON.stringify(node.operator)};`
-            : ''
+            ? ` readonly operator: ${JSON.stringify(node.operator)}; readonly callee?: undefined;`
+            : ` readonly callee?: undefined; readonly operator?: undefined;`
+      const unportable = node.unportableReason
+        ? ` readonly __unportable: ${JSON.stringify(node.unportableReason)};`
+        : ''
       lines.push(
-        `      | { readonly id: ${JSON.stringify(node.id)}; readonly kind: ${JSON.stringify(node.kind)}; readonly inFunction: ${JSON.stringify(node.inFunction)};${extra} readonly nth: ${node.nth}; readonly result: ${node.result}; readonly locals: { ${localEntries} } }`,
+        `      | { readonly id: ${JSON.stringify(node.id)}; readonly kind: ${JSON.stringify(node.kind)}; readonly inFunction: ${JSON.stringify(node.inFunction)};${extra} readonly nth: ${node.nth};${unportable} readonly result: ${node.result}; readonly locals: { ${localEntries} } }`,
       )
     }
     if (!nodes.length) lines.push('      never')

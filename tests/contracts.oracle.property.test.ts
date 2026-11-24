@@ -55,13 +55,25 @@
  * files are present, and updates `cache.snapshot` incrementally when target
  * sources change (`README.md:171`).
  *
- * The model predicts the exact emitted result and local type strings, helper
- * interface declarations, and file keys for each target construct. The driver
- * runs `buildTargetPlan` and `generateFileRegistryModule` against a shared
- * TypeScript 7.1 `API` instance and records the parsed registry entries.
+ * For every selectable expression indexed in a target module,
+ * `generateFileRegistryModule` emits disjoint optional-undefined discriminator
+ * properties (`operator?: undefined` on `CallExpression`, `callee?: undefined`
+ * on `BinaryExpression`, both on `ConditionalExpression`) so minimal selectors
+ * narrow without requiring `kind`, and emits every unportable expression (such
+ * as calls referencing unresolved local type parameters) with
+ * `readonly __unportable: string; readonly result: never;` instead of silently
+ * omitting it, preserving compile-time and runtime match-count parity (Decision
+ * by Manuel Schiller (GitHub schiller-manuel), 2026-11-24).
  *
- * Types declared locally inside a function body or referencing unresolved local
- * type parameters cannot be named at module scope and are omitted.
+ * The model predicts the exact emitted result and local type strings, helper
+ * interface declarations, disjoint property markers, unportable markers, and
+ * file keys for each target construct. The driver runs `buildTargetPlan` and
+ * `generateFileRegistryModule` against a shared TypeScript 7.1 `API` instance
+ * and records the parsed registry entries.
+ *
+ * Local bindings whose type cannot be named at module scope are omitted from
+ * `locals`, while expressions whose result type cannot be named remain in the
+ * registry marked `__unportable`.
  */
 import { join } from 'node:path'
 import fc from 'fast-check'
@@ -819,7 +831,7 @@ export function work() { return target() }`
       const parsed = parseFirstNodeFromRegistry(text, 'target')
       observe('export-path', {
         result: parsed?.result ?? 'missing',
-        hasBrand: text.includes('unique symbol'),
+        hasBrand: text.includes(': unique symbol;'),
         hasHelperInterface: text.includes('interface __EP_'),
         leakedPrivateMember:
           text.includes('"secret"') || text.includes('"prot"') || text.includes('"#hash"'),
@@ -984,6 +996,141 @@ oracleProperty({
         trace.map((o) =>
           o.checkpoint === 'cache'
             ? { ...o, value: { ...(o.value as object), thirdUpdatedResult: 'number' } }
+            : o,
+        ),
+    },
+  ],
+})
+
+// ---------------------------------------------------------------------------
+// Law C5: Disjoint callee/operator fields and unportable-node parity
+// ---------------------------------------------------------------------------
+
+const PARITY_CASES = [
+  'call-has-operator-undefined',
+  'binary-has-callee-undefined',
+  'conditional-has-both-undefined',
+  'unportable-generic-result-emitted',
+  'unportable-only-file-emitted',
+] as const
+
+type ParityCase = (typeof PARITY_CASES)[number]
+
+interface ParityHistory {
+  parityCase: ParityCase
+}
+
+const enumeratedParityHistories: ReadonlyArray<ParityHistory> = PARITY_CASES.map((parityCase) => ({
+  parityCase,
+}))
+
+function parityModel(history: ParityHistory) {
+  switch (history.parityCase) {
+    case 'call-has-operator-undefined':
+      return { hasExpectedDisjointFields: true, emittedNodeCount: 1, unportableCount: 0 }
+    case 'binary-has-callee-undefined':
+      return { hasExpectedDisjointFields: true, emittedNodeCount: 1, unportableCount: 0 }
+    case 'conditional-has-both-undefined':
+      return { hasExpectedDisjointFields: true, emittedNodeCount: 1, unportableCount: 0 }
+    case 'unportable-generic-result-emitted':
+      return { hasExpectedDisjointFields: true, emittedNodeCount: 2, unportableCount: 1 }
+    case 'unportable-only-file-emitted':
+      return { hasExpectedDisjointFields: true, emittedNodeCount: 1, unportableCount: 1 }
+  }
+}
+
+oracleProperty({
+  id: 'contracts-disjoint-fields-and-unportable-parity',
+  owns: ['src/contracts.mjs#renderFileModule', 'src/contracts.mjs#generateFileRegistryModule'],
+  law: {
+    statement:
+      'For every selectable expression indexed in a target module, generateFileRegistryModule emits disjoint optional-undefined callee/operator properties by kind and emits unportable expressions with __unportable and result: never so compile-time node count equals runtime node count.',
+    authority:
+      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: disjoint callee/operator discriminators and compile/runtime parity for unportable expressions.',
+    limits: 'Applies to CallExpression, BinaryExpression, and ConditionalExpression nodes indexed by discovery.mjs.',
+  },
+  histories: {
+    enumerated: enumeratedParityHistories,
+    states: [
+      'disjoint-call-node',
+      'disjoint-binary-node',
+      'disjoint-conditional-node',
+      'unportable-node-emitted',
+      'unportable-only-file',
+    ],
+  },
+  label: (h) => h.parityCase,
+  model: (h) => parityModel(h),
+  driver: (history, observe) => {
+    try {
+      let src: string
+      let matcher: (line: string) => boolean
+      let checkDisjoint: (line: string) => boolean
+
+      if (history.parityCase === 'call-has-operator-undefined') {
+        observe('reach', 'disjoint-call-node')
+        src = 'function send(x: number) { return x }\nexport function work(n: number) { return send(n) }\n'
+        matcher = (l) => l.includes('readonly kind: "CallExpression";')
+        checkDisjoint = (l) =>
+          l.includes('readonly callee: "send";') && l.includes('readonly operator?: undefined;')
+      } else if (history.parityCase === 'binary-has-callee-undefined') {
+        observe('reach', 'disjoint-binary-node')
+        src = 'export function work(a: number, b: number) { return a + b }\n'
+        matcher = (l) => l.includes('readonly kind: "BinaryExpression";')
+        checkDisjoint = (l) =>
+          l.includes('readonly operator: "+";') && l.includes('readonly callee?: undefined;')
+      } else if (history.parityCase === 'conditional-has-both-undefined') {
+        observe('reach', 'disjoint-conditional-node')
+        src = 'export function work(ok: boolean) { return ok ? 1 : 2 }\n'
+        matcher = (l) => l.includes('readonly kind: "ConditionalExpression";')
+        checkDisjoint = (l) =>
+          l.includes('readonly callee?: undefined;') && l.includes('readonly operator?: undefined;')
+      } else if (history.parityCase === 'unportable-only-file-emitted') {
+        observe('reach', 'unportable-only-file')
+        src = `function identity<T>(v: T): T { return v }
+export function genericOnly<U>(x: U) { return identity(x) }
+`
+        matcher = (l) => l.includes('readonly callee: "identity";')
+        checkDisjoint = (l) => l.includes('readonly operator?: undefined;')
+      } else {
+        observe('reach', 'unportable-node-emitted')
+        src = `function identity<T>(v: T): T { return v }
+export function genericCaller<U>(x: U) { return identity(x) }
+export function concreteCaller() { return identity(1) }
+`
+        matcher = (l) => l.includes('readonly callee: "identity";')
+        checkDisjoint = (l) => l.includes('readonly operator?: undefined;')
+      }
+
+      const { text } = emitSingleFile('examples/c5-parity.ts', src)
+      const matchingLines = text.split('\n').filter(matcher)
+      const unportableLines = matchingLines.filter(
+        (l) => l.includes('readonly __unportable:') && l.includes('readonly result: never;'),
+      )
+
+      observe('parity', {
+        hasExpectedDisjointFields: matchingLines.length > 0 && matchingLines.every(checkDisjoint),
+        emittedNodeCount: matchingLines.length,
+        unportableCount: unportableLines.length,
+      })
+    } catch (err) {
+      observe('parity', { threw: err instanceof Error ? err.message : String(err) })
+    }
+  },
+  check: (_history, observations, expected) => {
+    const entry = observations.find((o) => o.checkpoint === 'parity')
+    if (!entry) return differs('parity', 'disjoint-fields-and-unportable-parity', undefined, expected) ?? pass
+    return differs('parity', 'disjoint-fields-and-unportable-parity', entry.value, expected) ?? pass
+  },
+  calibrations: [
+    {
+      name: 'missing-unportable-node',
+      law: 'disjoint-fields-and-unportable-parity',
+      history: { enumerated: 'unportable-generic-result-emitted' },
+      corrupt: (trace) =>
+        trace.map((o) =>
+          o.checkpoint === 'parity'
+            ? { ...o, value: { ...(o.value as object), emittedNodeCount: 1, unportableCount: 0 } }
             : o,
         ),
     },

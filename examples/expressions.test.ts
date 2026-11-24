@@ -2,17 +2,15 @@ import { expect, test } from 'vitest'
 import { select } from 'execution-points-prototype'
 import { invoice, remoteTotal } from './expressions'
 
-const sumPoint = select('examples/expressions.ts', (node) => {
-  if (node.inFunction === 'invoice' && node.kind === 'BinaryExpression' && node.operator === '+') {
-    return node.capture('base', 'fee')
-  }
-})
+// Minimal selectors: no kind or inFunction needed when operator/callee is unique
+const sumPoint = select('examples/expressions.ts', (node) => node.operator === '+' && node)
+  .capture('base', 'fee')
 
-const remotePoint = select('examples/expressions.ts', (node) => {
-  if (node.inFunction === 'remoteTotal' && node.kind === 'CallExpression' && node.callee === 'fetchTotal') {
-    return node.capture('id', 'source')
-  }
-})
+const remotePoint = select('examples/expressions.ts', (node) => node.callee === 'fetchTotal' && node)
+  .capture('id', 'source')
+
+// Resetting captures to empty via .capture() exposes an empty locals object ({})
+const noLocalsSumPoint = sumPoint.capture()
 
 test('replaces an arithmetic expression, not only a function call', () => {
   expect(invoice(10)).toBe(13)
@@ -22,6 +20,14 @@ test('replaces an arithmetic expression, not only a function call', () => {
     return original() * 2
   }, () => invoice(10))
   expect(result).toBe(26)
+})
+
+test('resets captured locals to empty with zero-arg .capture()', () => {
+  const result = noLocalsSumPoint.withReplacement(({ locals, original }) => {
+    expect(Object.keys(locals)).toEqual([])
+    return original() + 1
+  }, () => invoice(10))
+  expect(result).toBe(14)
 })
 
 test('preserves the Promise contract of an expression inside await', async () => {

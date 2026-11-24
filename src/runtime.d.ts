@@ -23,9 +23,22 @@ export interface Context<Result, Locals extends object> {
   readonly original: () => Result
 }
 
+/**
+ * Reject async handlers (returning Promise) on synchronous void expressions while
+ * preserving `any`, `undefined`, `Promise<void>`, and `return original()`.
+ */
+type HandlerResult<R> =
+  0 extends 1 & R
+    ? R
+    : [R] extends [void]
+      ? [void] extends [R]
+        ? void | undefined
+        : R
+      : R
+
 export interface Point<Result, Locals extends object> {
   withReplacement<T>(
-    handler: (context: Context<Result, Locals>) => Result,
+    handler: (context: Context<Result, Locals>) => HandlerResult<Result>,
     action: () => T,
   ): T
 }
@@ -33,7 +46,7 @@ export interface Point<Result, Locals extends object> {
 export interface SelectablePoint<N extends NodeDescriptor, Captured extends object = {}>
   extends Point<N['result'], Captured> {
   /** Explicitly capture one or more in-scope local bindings at this expression. */
-  capture<K extends keyof N['locals'] & string>(
+  capture<K extends keyof N['locals'] & string = never>(
     ...keys: readonly K[]
   ): SelectablePoint<
     N,
@@ -50,22 +63,27 @@ export interface CapturedSelection<
 }
 
 type VisitorNode<N extends NodeDescriptor> = N extends NodeDescriptor
-  ? Omit<N, 'result' | 'locals'> & {
+  ? Omit<N, 'result' | 'locals' | '__unportable'> & {
       readonly __node: N
-      capture<K extends keyof N['locals'] & string>(
+      capture<K extends keyof N['locals'] & string = never>(
         ...keys: readonly K[]
       ): CapturedSelection<N, readonly K[]>
     }
   : never
 
+type RegistryIsEmpty = keyof ExecutionPointFileRegistry extends never ? true : false
+
+type ExecutionPointsNotLoaded =
+  'ExecutionPointFileRegistry is empty. Ensure points.ep is included in tsconfig.json with contentMappers enabled, run tsc with --runExternalCode, and verify the package is inside the open workspace (TS18124).'
+
 type RegisteredTargetFile =
-  keyof ExecutionPointFileRegistry extends never
-    ? string
+  RegistryIsEmpty extends true
+    ? ExecutionPointsNotLoaded
     : keyof ExecutionPointFileRegistry & string
 
 type FileNodes<File extends string> =
   File extends keyof ExecutionPointFileRegistry
-    ? ExecutionPointFileRegistry[File] & NodeDescriptor
+    ? Extract<ExecutionPointFileRegistry[File], NodeDescriptor>
     : never
 
 type IsUnion<T, Copy = T> = [T] extends [never]
@@ -90,22 +108,34 @@ type ExtractCapturedLocals<R> =
     ? { readonly [K in Keys[number] & keyof N['locals']]: N['locals'][K] }
     : {}
 
-type SelectedPoint<R> =
-  [ExtractNode<R>] extends [never]
+type SelectFromNodes<N extends NodeDescriptor, Captured extends object> =
+  [N] extends [never]
     ? {
         readonly __selectionError: 'Visitor matched 0 expressions. Return a matching node from the callback.'
       }
-    : IsUnion<ExtractNode<R>> extends true
+    : IsUnion<N> extends true
       ? {
-          readonly __selectionError: 'Visitor matched multiple expressions. Narrow further by inFunction, kind, callee/operator, or nth.'
+          readonly __selectionError: 'Selector matched multiple expressions. Narrow further by callee/operator, inFunction, kind, or nth.'
+          readonly __matched: N['id']
         }
-      : SelectablePoint<ExtractNode<R>, ExtractCapturedLocals<R>>
+      : N extends { readonly __unportable: infer Reason extends string }
+        ? {
+            readonly __selectionError: `Matched expression "${N['id']}" has an unportable type and cannot be selected directly: ${Reason}`
+          }
+        : SelectablePoint<N, Captured>
+
+type SelectedPoint<R> =
+  RegistryIsEmpty extends true
+    ? Point<any, any>
+    : SelectFromNodes<ExtractNode<R>, ExtractCapturedLocals<R>>
 
 type VisitorReturn =
   | { readonly __node: NodeDescriptor }
   | CapturedSelection<NodeDescriptor, readonly string[]>
   | undefined
   | void
+  | false
+  | null
 
 /**
  * Select an expression in `file` using ordinary TypeScript control-flow narrowing
@@ -116,7 +146,7 @@ export declare function select<
   R extends VisitorReturn,
 >(
   file: File,
-  visitor: (node: VisitorNode<FileNodes<NoInfer<File>>>) => R,
+  visitor: (node: RegistryIsEmpty extends true ? any : VisitorNode<FileNodes<NoInfer<File>>>) => R,
 ): SelectedPoint<R>
 
 /** Internal transform entry points; application code does not call these. */

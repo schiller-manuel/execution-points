@@ -8,6 +8,9 @@ const quotePoint = select('examples/checkout.ts', (node) => {
   }
 })
 
+// Minimal selector without kind or inFunction: && short-circuit works directly on callee
+const minimalQuotePoint = select('examples/checkout.ts', (n) => n.callee === 'send' && n).capture('region', 'user')
+
 // Same target with a narrowed capture subset via chained .capture()
 const userOnlyQuotePoint = quotePoint.capture('user')
 
@@ -35,6 +38,17 @@ test('reads narrowed locals and skips the whole selected expression', () => {
 
   expect(result.quote.total).toBe(7)
   expect(result.attempt).toBe(0)
+  expect(events).toEqual([])
+})
+
+test('supports minimal callee selection without kind or inFunction', () => {
+  const result = minimalQuotePoint.withReplacement(({ locals }) => {
+    expect(locals.region).toBe('EU')
+    expect(locals.user.id).toBe('user-1')
+    return { total: 42, currency: 'EUR' }
+  }, () => checkout(order()))
+
+  expect(result.quote.total).toBe(42)
   expect(events).toEqual([])
 })
 

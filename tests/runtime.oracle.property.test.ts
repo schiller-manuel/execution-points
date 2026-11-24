@@ -32,7 +32,7 @@
  * active in the current async context, `invoke` evaluates `originalThunk()`
  * once, returns its result, and does not call `captureThunk` ("No replacement
  * is active | Evaluate the original expression normally. Do not read
- * captures.", `README.md:78`).
+ * captures.", `README.md:75`).
  *
  * For every `p.withReplacement(handler, action)` call, `withReplacement`
  * returns `action()`'s return value (or rethrows its error without swallowing
@@ -40,7 +40,7 @@
  * within `action` or any asynchronous descendant started in `action`'s async
  * context calls the innermost active `handler({ locals, original })` for
  * `p.id`, where each call to `original()` evaluates `originalThunk()` once
- * (`README.md:79-81`, `README.md:104-107`, `README.md:113`). When a ref-counted
+ * (`README.md:76-78`, `README.md:101`, `README.md:105`). When a ref-counted
  * counter gates `AsyncLocalStorage` and decrements as soon as `action` settles,
  * any async descendant that outlives `action` silently bypasses its replacement.
  *
@@ -49,8 +49,8 @@
  * the getter for each key in `keys` (supporting both function getters and
  * direct values, including keys such as `__proto__` and `toString`), and passes
  * a frozen `context` whose `locals` is a shallowly frozen, null-prototype
- * object mapping `keys` to their captured values (`README.md:85`,
- * `README.md:174`, `src/runtime.d.ts:32-37`).
+ * object mapping `keys` to their captured values (`README.md:82`,
+ * `src/runtime.d.ts:44-51`).
  *
  * For every file registration and `select(file, visitor)` call, `select`
  * resolves to the single node for which `visitor(node)` returns `node` or
@@ -112,7 +112,7 @@ oracleProperty({
     statement:
       'For every registered execution point p and every invoke(p.id, originalThunk, captureThunk) call where no enclosing synchronous or asynchronous p.withReplacement(handler, action) scope is active, invoke evaluates originalThunk() once, returns its result, and does not call captureThunk.',
     authority:
-      'README.md:78 ("No replacement is active | Evaluate the original expression normally. Do not read captures.") and README.md:107 ("Returning or throwing restores the surrounding synchronous context").',
+      'README.md:75 ("No replacement is active | Evaluate the original expression normally. Do not read captures.") and README.md:101 ("Returning or throwing restores the surrounding synchronous context").',
     limits:
       'Target modules must be registered before withReplacement runs; active replacement behavior is covered by runtime-replacement-scope.',
   },
@@ -333,9 +333,9 @@ oracleProperty({
     statement:
       'For every p.withReplacement(handler, action) call, withReplacement returns action()\'s result and every invoke(p.id, originalThunk, captureThunk) in action or in any asynchronous descendant created within action\'s async context calls the innermost active handler({ locals, original }), where each original() call evaluates originalThunk() once.',
     authority:
-      'README.md:79-81 ("Replacement returns a value | Use that value as the expression result. Replacement throws | Throw at the selected expression. Replacement calls original() | Evaluate the original expression") and README.md:104-107 ("async descendants retain the context in which they were created").',
+      'README.md:76-78 ("Replacement returns a value | Use that value as the expression result. Replacement throws | Throw at the selected expression. Replacement calls original() | Evaluate the original expression") and README.md:101 ("async descendants retain the context in which they were created").',
     limits:
-      'original() evaluates originalThunk on every call without memoization (README.md:113); async descendants are tested across microtask (Promise.resolve) and macrotask (setImmediate) continuations.',
+      'original() evaluates originalThunk on every call without memoization (README.md:105); async descendants are tested across microtask (Promise.resolve) and macrotask (setImmediate) continuations.',
   },
   histories: {
     arbitrary: scopeArbitrary,
@@ -603,9 +603,9 @@ oracleProperty({
     statement:
       'For every intercepted execution of a point p whose latest .capture(...keys) call specifies keys, invoke calls captureThunk() once, evaluates only the getter for each key in keys, and passes a frozen context whose locals is a shallowly frozen, null-prototype object mapping keys to their captured values.',
     authority:
-      'README.md:85 ("Captures are read once for each intercepted execution. The locals container is shallowly frozen"), README.md:174 ("the locals container is shallowly frozen with a null prototype"), and src/runtime.d.ts:32-37.',
+      'README.md:82 ("Captures are read once for each intercepted execution. The locals container is shallowly frozen") and src/runtime.d.ts:44-51.',
     limits:
-      'Captured object references retain their normal mutability by design (README.md:93).',
+      'Captured object references retain their normal mutability by design (README.md:89).',
   },
   histories: {
     arbitrary: captureArbitrary,
@@ -860,7 +860,7 @@ oracleProperty({
     statement:
       'For every file registration and select(file, visitor) call, select resolves to the single node for which visitor(node) returns node or node.capture(...), throws a TypeError when visitor, handler, or action is not a function, and throws an Error when file is unregistered or visitor matches 0 or 2 or more nodes.',
     authority:
-      'README.md:49 ("Returning 0 nodes or 2+ nodes (ambiguous match) is rejected") and src/runtime.mjs:24-30, 41-44, 88-114.',
+      'README.md:57 ("Returning 0 nodes or 2+ nodes (ambiguous match) is rejected") and src/runtime.mjs.',
     limits:
       'File registration must happen before withReplacement is called.',
   },

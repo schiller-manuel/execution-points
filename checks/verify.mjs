@@ -249,6 +249,25 @@ async function verifyLsp() {
     }
     passed('VS Code LSP autocompletes in-scope locals in select()')
 
+    // Minimal callee autocomplete without checking node.kind first
+    const minimalTyping = `${testSource}
+const __minimalCallee = select('examples/checkout.ts', (node) => node.callee === '' && node)
+void __minimalCallee
+`
+    notify('textDocument/didChange', {
+      textDocument: { uri: testUri, version: 3 },
+      contentChanges: [{ text: minimalTyping }],
+    })
+
+    const calleePos = positionOf(minimalTyping, "node.callee === ''")
+    const calleeCompletions = await request('textDocument/completion', {
+      textDocument: { uri: testUri },
+      position: { line: calleePos.line, character: calleePos.character + "node.callee === '".length },
+    })
+    const calleeLabels = (Array.isArray(calleeCompletions) ? calleeCompletions : calleeCompletions?.items ?? []).map((i) => i.label)
+    assert.ok(calleeLabels.includes('send'), `Expected minimal node.callee autocomplete to include "send", got: ${JSON.stringify(calleeLabels)}`)
+    passed('VS Code LSP autocompletes callees directly on node.callee without checking node.kind')
+
     // Instant keystroke check: unknown capture + wrong return + ambiguous visitor
     const edited = replaceOnce(
       replaceOnce(testSource, "'user', 'attempt'", "'missingLocal', 'attempt'"),
@@ -256,7 +275,7 @@ async function verifyLsp() {
       '/* invalid-return */ "oops"',
     )
     notify('textDocument/didChange', {
-      textDocument: { uri: testUri, version: 3 },
+      textDocument: { uri: testUri, version: 4 },
       contentChanges: [{ text: edited }],
     })
     const dirtyDiag = await request('textDocument/diagnostic', { textDocument: { uri: testUri } })
@@ -345,6 +364,20 @@ await rejectsTestSource(
   "node.callee === 'doesNotExist'",
   /no overlap/i,
 )
+
+const minimalValid = analyze(
+  new Map([
+    [
+      testFile,
+      `${testSource}
+const __minPoint = select('examples/checkout.ts', (n) => n.callee === 'send' && n).capture('region')
+__minPoint.withReplacement(({ locals, original }) => { const r: 'EU' | 'US' = locals.region; void r; return original() }, () => 0)
+`,
+    ],
+  ]),
+)
+assert.equal(minimalValid.ok, true, `Minimal select() failed:\n${describeDiagnostics(minimalValid.diagnostics)}`)
+passed('minimal node.callee === "send" && n typechecks cleanly without kind or inFunction')
 
 const after = await fingerprintProject()
 const changed = [...new Set([...before.keys(), ...after.keys()])].filter((file) => before.get(file) !== after.get(file))
