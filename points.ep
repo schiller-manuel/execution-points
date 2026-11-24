@@ -2,6 +2,7 @@
   "tsconfig": "tsconfig.json",
   "targets": [
     "examples/checkout.ts",
-    "examples/expressions.ts"
+    "examples/expressions.ts",
+    "examples/profile.ts"
   ]
 }

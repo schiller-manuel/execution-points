@@ -77,3 +77,20 @@ A running log. Each entry says what I was doing, what happened, and what would h
 **What happened:** for `n = 0` the model produced `-0` and production `0`, and the law failed with a diff that printed both as `0`. Correct by `Object.is`, but the printed diff did not show why.
 
 **Would have helped:** printing `-0` as `-0` in the diff.
+
+### A mutant that only waits longer needs a work bound, and nothing says what "work" counts
+
+**Doing:** closing gaps in `interleavings`, whose quiet-point loop waits for two still turns of the event loop.
+
+**What happened:** mutants that make the loop wait three turns instead of two give the same observations in every history. They were reported as `extra-work`, and the summary named a ratio for each. Setting `work: { ratio: 1 }` on the property closed them. Before trying it I could not tell from the skill whether a wait on `setImmediate` is work the framework measures or a timer it leaves out, so I had also started designing a turn counter of my own in the driver.
+
+**Would have helped:** a sentence in the skill on what the work bound measures (calls, event-loop turns, time) and that awaited turns count.
+
+### `owns` cannot name a class, only its members
+
+**Doing:** adding the error class `InterleavingFailure` to the runtime and to the interleavings oracle's `owns`.
+
+**What happened:** `src/runtime.mjs#InterleavingFailure` is refused: "owns entry … names no function in src/runtime.mjs". The skill documents `#Class.method` but not what to write for a class whose only member is its constructor. `src/runtime.mjs#InterleavingFailure.constructor` is accepted. A statement after the class (`InterleavingFailure.prototype.name = '…'`) belongs to no unit an entry can name, so I moved the assignment into the constructor: again the tool shaped production code.
+
+**Would have helped:** accepting a class name as "all of its members", or naming `#Class.constructor` in the skill and in the refusal.
+

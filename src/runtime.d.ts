@@ -218,6 +218,51 @@ interface EmptyRegistryPoint extends Point<any, any> {
   capture(...keys: readonly string[]): EmptyRegistryPoint
 }
 
+export interface InterleavingOptions<Result> {
+  /** The expressions at which operations can be made to wait. Each must evaluate to a promise. */
+  readonly points: readonly { pause(): Pause<any> }[]
+  /** Starts the operations. It runs once per order, so it must start from the same state each time. */
+  readonly run: () => Result | PromiseLike<Result>
+  /** Judges one run. Throwing stops the search and reports the order that failed. */
+  readonly check?: (result: Awaited<Result>) => void | PromiseLike<void>
+  /** Runs before every run, to put the state back. */
+  readonly setup?: () => void | PromiseLike<void>
+  /** The most runs to make. Default 1000. */
+  readonly limit?: number
+  /** Replays one order: the `schedule` of an earlier failure. */
+  readonly schedule?: readonly number[]
+  /**
+   * Picks the orders instead of walking all of them: called with the step within the run, the
+   * number of evaluations held at that step (in the order they arrived), and the run's number,
+   * it returns the index of the one to release. `limit` runs are made.
+   */
+  readonly choose?: (step: number, count: number, run: number) => number
+}
+
+export interface InterleavingReport {
+  /** How many orders ran. */
+  readonly schedules: number
+  /** Whether that was every order. */
+  readonly complete: boolean
+}
+
+/**
+ * What `interleavings` throws when a run fails; `cause` is what the run or `check` threw.
+ * Narrow a caught value with `instanceof InterleavingFailure` to read `schedule`.
+ */
+export declare class InterleavingFailure extends Error {
+  private constructor()
+  /** Pass it back as `schedule` to replay the failing order. */
+  readonly schedule: readonly number[]
+}
+
+/**
+ * Runs `run` once for every order in which its operations can pass the selected expressions,
+ * and judges each run with `check`. Every evaluation of a selected expression inside `run` is
+ * held; whenever all operations have finished or are held, one is released.
+ */
+export declare function interleavings<Result>(options: InterleavingOptions<Result>): Promise<InterleavingReport>
+
 /**
  * Checks what the current test's replacements still owe (asynchronous actions, replacements
  * that were not restored, pauses) and throws what went wrong. The Vite plugin's Vitest setup

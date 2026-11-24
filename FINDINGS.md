@@ -25,6 +25,7 @@ Made on 2026-11-24 by Manuel Schiller:
 - `original()` evaluates the expression on every call. `AGENTS.md` and the README no longer call it provisional.
 - All eight potential laws are accepted, every finding is to be fixed, and every feature idea is to be built with oracle coverage. Status is tracked in "Work in progress" below.
 - F7: a replacement that never runs must be loud. All four API options are built; for an asynchronous action the returned promise stays the action's own and the test fails at its end through a Vitest hook. Done; see F7.
+- A type that is silently `any` is an error. `pnpm check` now runs `checks/no-any.mjs` after `tsc`; see F17.
 
 Still open:
 
@@ -32,6 +33,7 @@ Still open:
 2. New benchmark tasks: which, and in which stratum.
 3. The benchmark sequence at the end of this file: approve, or change.
 4. Your global pnpm broke during this work (see "Incidents" below); say whether I should repair it.
+5. `interleavings` throws on a failing order. If you also want a form that returns the failure as a value (as fast-check has `check` beside `assert`), say so; today a test narrows the caught value with `instanceof InterleavingFailure`.
 
 ## Work in progress
 
@@ -45,7 +47,10 @@ Still open:
 | F1, F2, F3, F10, F15, F16, registry half of F9; potential laws 1 to 4; registry source mappings | in a separate checkout, to be merged |
 | Benchmark harness fixes from the audit | in a separate checkout, to be merged |
 | F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command | queued behind the fast path, which edits the same files |
-| Selector fields (F4), `new` and `await` as selectable kinds, pass-through for unportable types, schedule exploration | queued behind the two merges above |
+| Schedule exploration: `interleavings` with `limit`, `schedule`, `choose`, and the `InterleavingFailure` error | done |
+| `checks/no-any.mjs` in `pnpm check` (F17) | done for the type-checked files |
+| Type-check the oracle test files (F17): declarations for `src/*.mjs`, 62 errors to fix | queued behind the merges, which edit the same test files |
+| Selector fields (F4), `new` and `await` as selectable kinds, pass-through for unportable types | queued behind the merges |
 
 ---
 
@@ -445,6 +450,33 @@ The error is thrown inside the application call, and the registry gives the capt
 
 **How often:** both shapes tried; the control with a 3-member interface is fine. Probe: `p22-dangling-helper-names.mjs`. Potential law 1 would catch it.
 
+### F17. `strict` does not stop every `any`, and the oracle test files are not type-checked at all
+
+Probe: `p27`.
+
+`tsconfig.json` has `"strict": true`, so an implicit `any` is already an error in the files it includes. Two things get past it.
+
+**An `any` that a declaration hands over is not implicit.** `Promise#then` and `Promise#catch` declare the rejection reason as `any`, so in
+
+```ts
+const failure = await interleavings(scenario).catch((error) => error)
+```
+
+both `error` and `failure` are `any`, `tsc` reports nothing, and every property read from `failure` is unchecked. The first version of `examples/profile.test.ts` hid this behind an annotation (`const failure: InterleavingFailure = …`), which the compiler accepts without checking because `any` is assignable to everything. No compiler option reports this, and the lint rule that does is not available for TypeScript 7.1.
+
+Fixed for the type-checked files: `checks/no-any.mjs` asks the checker for the type of every variable, parameter and destructured name that has no annotation, of every initializer under an annotation, and of every operand of `as` or `satisfies`, and fails on `any`. `pnpm check` runs it after `tsc`. On the three shapes above it reports the name and position; on the examples as committed it reports nothing. `interleavings` now throws an exported class, `InterleavingFailure`, so a test narrows the caught value with `instanceof` instead of annotating it.
+
+**The oracle test files are outside `include`.** `include` lists `examples/**/*.ts`, `src/runtime.d.ts` and `points.ep`. Nothing type-checks `tests/`. Checked with the same options, the nine oracle files have 62 errors:
+
+| Code | Count | What |
+| --- | --- | --- |
+| TS7006, TS7031 | 36 | a parameter or binding that is implicitly `any` |
+| TS7016 | 12 | an import of `../src/*.mjs` with no declaration file. `src/runtime.d.ts` is not what `import '../src/runtime.mjs'` resolves to (that would be `runtime.d.mts`), and the other four modules have none, so everything the oracles import from production is `any` |
+| TS2322 | 9 | history options that do not match the `@tanstack/oracles` types |
+| TS2307, TS2339 | 5 | the `?copy=N` specifiers, and two property reads |
+
+Open: bring `tests/` into `include`, give the five production modules declarations the tests resolve, and fix the 62. Queued behind the merges, because the delegated branches edit the same test files.
+
 ### What held
 
 - All baseline checks pass at `b26e2c1`: `pnpm check`, `pnpm test` (353 tests), `pnpm verify` (16 checks), `node bench/run.mjs --self-test` (57 variants, 16 mutants, 8 cheats).
@@ -534,7 +566,7 @@ Each needs approval. The first five come from the library findings, the rest fro
 
 ## Feature ideas
 
-Ordered by how much evidence there is that users need them.
+Ordered by how much evidence there is that users need them. Built so far: 1, 2, 6, 7 and 9 (in the runtime, each with its own laws); 3, 5, 10 and 11 are in the delegated branches; 4 and 8 are open.
 
 1. **A built-in pause.** By a text search of the stored trials, all 43 treatment tests that used the library wrote their own barrier, and 110 of 135 handlers end in `original()`: they wait and continue. Something like `const gate = point.pause(); const a = gate.run(() => op()); await gate.reached; ...; gate.release()` removes 15 lines from every test and from the guide, and removes the deadlock the guide has to warn about.
 2. **Reach counts and a strict mode.** `point.calls`, or `withReplacement` failing when the handler never ran unless told otherwise. Closes F7 and makes F5 visible.
@@ -652,6 +684,10 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 | `p21-registry-type-fidelity.mjs` | F1 (enum members), F15 |
 | `p22-dangling-helper-names.mjs` | F16 |
 | `p23-who-is-outside-the-scope.mjs` | F5: which application shapes a scope covers |
+| `p24-fast-path-semantics.mjs` | F6: a replacement applies exactly to the evaluations in its scope, across function kinds |
+| `p25-e2e-loud-at-test-end.mjs` | F7: a replacement that never ran fails the test through the Vitest hook |
+| `p26-interleavings.mjs` | schedule exploration: orders run, the failing order and its replay, a sample, an unreached expression, a run that waits on a timer |
+| `p27-what-the-type-check-covers.mjs` | F17 |
 
 `probes/lib.mjs`, `probes/types.mjs`, and `probes/e2e.mjs` are shared helpers. `e2e.mjs` builds a real consumer project with the package copied into its `node_modules`, the way `bench/toolchain.mjs` does, and runs the real `tsc` and Vitest on it.
 
@@ -662,6 +698,7 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 - 2026-11-24: added the harness audit, each point rechecked (grading instability on `cancel-commit` re-graded by me, power recomputed, robustness counts recomputed). New F16 (dangling helper names; `AbortController`). Recorded three decisions: `AGENTS.md` corrected for `select`, performance must be optimal (F6, two designs measured, the per-call one chosen), a replacement that never runs must be loud (F7, four API options). F5 now lists which application shapes a scope covers. Benchmark section rewritten around the audit.
 - 2026-11-24: F6 fixed (per-function fast path; plugin Law P4, runtime Law 5, new runtime-copies oracle, source-map check; 0 gaps in runtime, discovery, plugin). `original()` settled as "evaluates on every call". Decisions recorded: accept all laws, fix all findings, build all feature ideas with oracle coverage.
 - 2026-11-24: F7 and F8 fixed and F5 resolved in the runtime (strict replacements with `times` and `on`, `pause`, `replace` with `using`, `calls`, shorthands, capture-name and visitor-return checks; seven new laws; 0 gaps over runtime, discovery, plugin). README and examples describe the new API. `ORACLES.md` started for issues met with `@tanstack/oracles`. Two incidents recorded.
+- 2026-11-24: schedule exploration built (`interleavings`, feature idea 9): every order, `limit`, `schedule`, `choose`; it throws `InterleavingFailure` with the order, the replay schedule and what failed. New oracle `runtime-interleavings`, example `examples/profile.test.ts`, README section, probe `p26`. New F17: an `any` that `strict` lets through and the untyped oracle test files; `checks/no-any.mjs` added to `pnpm check`.
 
 ## Incidents
 

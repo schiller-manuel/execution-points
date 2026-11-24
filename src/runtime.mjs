@@ -104,6 +104,9 @@ export function verifyReplacements() {
   }
 }
 
+// What `interleavings` needs from a point that its users do not.
+const internals = new WeakMap()
+
 function createPointHandle(file, resolveSelection, captureNames) {
   const begin = (handler, options) => {
     const selected = resolveSelection()
@@ -146,7 +149,7 @@ function createPointHandle(file, resolveSelection, captureNames) {
     })
   }
 
-  return Object.freeze({
+  const handle = Object.freeze({
     capture(...keys) {
       return createPointHandle(file, resolveSelection, keys)
     },
@@ -272,6 +275,148 @@ function createPointHandle(file, resolveSelection, captureNames) {
       })
     },
   })
+  internals.set(handle, { begin, id: () => resolveSelection().id })
+  return handle
+}
+
+// Taken before a test can install fake timers.
+const nextTurn = setImmediate
+
+/** Waits until two turns of the event loop in a row change nothing that `snapshot` reports. */
+async function quiet(snapshot) {
+  let last = snapshot()
+  for (let still = 0; still < 2; ) {
+    await new Promise((resolve) => nextTurn(resolve))
+    const now = snapshot()
+    still = now === last ? still + 1 : 0
+    last = now
+  }
+}
+
+/** What `interleavings` throws when a run fails. `schedule` replays that run; `cause` is what it threw. */
+export class InterleavingFailure extends Error {
+  constructor(message, cause, schedule) {
+    super(message, { cause })
+    this.name = 'InterleavingFailure'
+    this.schedule = schedule
+  }
+}
+
+/**
+ * Runs `run` once for every order in which its operations can pass the selected expressions.
+ * Each evaluation of a selected expression inside `run` is held; whenever everything has
+ * finished or is held, one held evaluation is released, and the search walks every choice.
+ * `check` judges each run. `schedule` replays one order, `choose` picks the orders itself,
+ * and `limit` bounds the number of runs.
+ */
+export async function interleavings({ points, run, check, setup, limit = 1000, schedule, choose }) {
+  if (!Array.isArray(points) || !points.every((point) => internals.has(point)) || typeof run !== 'function') {
+    throw new TypeError('[execution-points] interleavings requires `points` selected with select() and a `run` function.')
+  }
+  const reached = new Set()
+
+  // One run. `pick(step, count)` says which of the `count` held evaluations goes next.
+  const once = async (pick) => {
+    await setup?.()
+    const held = []
+    const choices = []
+    const options = []
+    const order = []
+    const replacements = new Map(registry.storage.getStore() ?? [])
+    for (const point of points) {
+      const installation = internals.get(point).begin((context) => {
+        reached.add(installation.id)
+        return new Promise((go) => {
+          held.push({ id: installation.id, go })
+        }).then(() => context.original())
+      })
+      replacements.set(installation.id, installation)
+    }
+
+    let outcome
+    Promise.resolve()
+      .then(() => registry.storage.run(replacements, run))
+      .then(
+        (value) => {
+          outcome = { value }
+        },
+        (error) => {
+          outcome = { error }
+        },
+      )
+    for (;;) {
+      await quiet(() => `${held.length} ${order.length}`)
+      if (outcome) break
+      if (held.length === 0) {
+        outcome = {
+          error: new Error(
+            '[execution-points] The run neither finished nor reached a selected expression. It may be waiting on a timer or on I/O, which the search cannot order.',
+          ),
+        }
+        break
+      }
+      const choice = pick(choices.length, held.length)
+      options.push(held.length)
+      choices.push(choice)
+      const [next] = held.splice(choice, 1)
+      order.push(next.id)
+      next.go()
+    }
+    if (!('error' in outcome) && check) {
+      try {
+        await check(outcome.value)
+      } catch (error) {
+        outcome = { error }
+      }
+    }
+    if ('error' in outcome) {
+      throw new InterleavingFailure(
+        (order.length
+          ? `[execution-points] The scenario failed in this order:\n` +
+            order.map((id, position) => `  ${position + 1}. ${id}`).join('\n') +
+            `\nReplay it with { schedule: ${JSON.stringify(choices)} }.`
+          : '[execution-points] The scenario failed before any selected expression was released.') +
+          `\nIt failed with: ${outcome.error?.message ?? outcome.error}`,
+        outcome.error,
+        choices,
+      )
+    }
+    return { choices, options }
+  }
+
+  let schedules = 0
+  let complete = false
+  if (schedule) {
+    const { choices } = await once((step, count) => {
+      if (!(schedule[step] < count)) {
+        throw new TypeError(`[execution-points] The schedule has no valid choice for step ${step + 1}: ${count} evaluations were held.`)
+      }
+      return schedule[step]
+    })
+    if (choices.length !== schedule.length) {
+      throw new TypeError(`[execution-points] The schedule has ${schedule.length} choices, but the run made ${choices.length}.`)
+    }
+    schedules = 1
+    complete = true
+  } else if (choose) {
+    for (; schedules < limit; schedules += 1) await once((step, count) => choose(step, count, schedules))
+  } else {
+    // Depth first: repeat the choices up to the last one that has an untried alternative.
+    for (let prefix = []; prefix && schedules < limit; schedules += 1) {
+      const { choices, options } = await once((step) => prefix[step] ?? 0)
+      const turn = choices.findLastIndex((choice, step) => choice + 1 < options[step])
+      prefix = turn === -1 ? undefined : [...choices.slice(0, turn), choices[turn] + 1]
+      complete = !prefix
+    }
+  }
+
+  const unreached = points.map((point) => internals.get(point).id()).filter((id) => !reached.has(id))
+  if (unreached.length) {
+    throw new Error(
+      `[execution-points] No run reached ${unreached.map((id) => `"${id}"`).join(', ')}. Every selected expression must be evaluated by the scenario.`,
+    )
+  }
+  return { schedules, complete }
 }
 
 function makeVisitorNode(descriptor) {

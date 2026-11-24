@@ -19,7 +19,7 @@ pnpm verify
 
 | Command | Purpose |
 | --- | --- |
-| `pnpm check` | Run regular `tsc --noEmit --runExternalCode` using the TypeScript 7.1 content mapper (`points.ep`). |
+| `pnpm check` | Run regular `tsc --noEmit --runExternalCode` using the TypeScript 7.1 content mapper (`points.ep`), then `node checks/no-any.mjs`, which fails on a name whose type is silently `any`. |
 | `pnpm test` | Run the instrumented Vitest examples. |
 | `pnpm verify` | Verify real `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and that no generated files are written. |
 
@@ -160,6 +160,56 @@ quotePoint.throws(new Error('pricing service is down'))
 remotePoint.resolves(7)                             // for an expression whose value is a promise
 remotePoint.rejects(new Error('timeout'), { on: 2 }) // only the second evaluation fails
 ```
+
+### Search every order
+
+A test that pauses one operation at one place tries one order. `interleavings` tries all of them. Give it the expressions where operations can be made to wait, and the scenario:
+
+```ts
+import { interleavings, select } from 'execution-points-prototype'
+
+const normalizing = select('examples/profile.ts', (n) => n.callee === 'normalize' && n)
+const writing = select('examples/profile.ts', (n) => n.callee === 'writeStore' && n)
+
+await interleavings({
+  points: [normalizing, writing],
+  setup: reset, // puts the state back before every run
+  run: () => Promise.all([getProfile('u1'), updateProfile('u1', 'Bob')]),
+  check: () => expect(cachedName('u1')).toBe('Bob'), // judges every run
+})
+```
+
+Inside `run`, every evaluation of a selected expression waits. Whenever each operation has either finished or is waiting, one waiting evaluation is let through and continues with the original expression. The scenario runs once for each way to make those choices, and the call resolves to `{ schedules, complete }`: how many orders ran, and whether that was all of them.
+
+When `check` throws or `run` rejects, the search stops and throws an error that names the order:
+
+```
+[execution-points] The scenario failed in this order:
+  1. examples/profile.ts#updateProfile:CallExpression:writeStore:0
+  2. examples/profile.ts#getProfile:CallExpression:normalize:0
+Replay it with { schedule: [0,0] }.
+It failed with: expected 'Alice' to be 'Bob'
+```
+
+The error is an `InterleavingFailure`. Its `cause` is what the scenario threw, and its `schedule` is the list of choices. Passing that list back runs exactly that order again, which is how the failing order becomes a regression test: `interleavings({ ...scenario, schedule: [0, 0] })`.
+
+To read `schedule` from a caught failure in a test, narrow the value with `instanceof`. A rejection can be any value, so TypeScript types it as `any` unless you say `unknown`:
+
+```ts
+const failure = await interleavings(scenario).catch((error: unknown) => error)
+assert(failure instanceof InterleavingFailure)
+failure.schedule // readonly number[]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `limit` | The most runs to make, 1000 by default. If the search stops there, `complete` is `false`. |
+| `schedule` | Run this one order. A schedule that does not fit the run is refused. |
+| `choose(step, count, run)` | Pick the orders yourself, for example with a seeded random generator: return which of the `count` waiting evaluations goes next. `limit` runs are made. |
+
+Each selected expression must be one whose value is a promise, as for `pause`. An expression that no run evaluates makes the search throw, like any replacement that never runs. The number of orders grows quickly: two operations that each pass two selected expressions have six orders, and three such operations have ninety.
+
+The search can only order work that is driven by promises. An operation that waits on a real timer, on disk, or on the network is not waiting at a selected expression, so the search either reports that the run "neither finished nor reached a selected expression" or lets the others go first. Fake the timers, or select the expression that starts the slow work. (`node probes/p26-interleavings.mjs` shows each of these cases.)
 
 ### Replacement scope
 
