@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -262,20 +261,29 @@ function formatFrame(payload: unknown): Buffer {
   return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'), body])
 }
 
+/**
+ * Takes the next bytes of the input, and writes a reply for every request that is now complete.
+ * What is left of a frame that has not arrived in full stays in `state.buffer`.
+ */
 export function handleInputChunk(state: { buffer: Buffer }, chunk: Buffer, write: (frame: Buffer) => void): void {
   state.buffer = Buffer.concat([state.buffer, chunk])
-  for (;;) {
-    const headerEnd = state.buffer.indexOf('\r\n\r\n')
-    if (headerEnd < 0) return
-    const match = /Content-Length:\s*(\d+)/i.exec(state.buffer.subarray(0, headerEnd).toString('ascii'))
+  // Up to where the buffer has been dealt with.
+  let taken = 0
+  // A header block ends at a blank line. All of them are looked up first, so the walk over them
+  // ends whatever a frame says about its length. In latin1 a character is a byte, so where a
+  // blank line stands in the text is where it stands in the buffer.
+  for (const { index: headerEnd } of state.buffer.toString('latin1').matchAll(/(?=\r\n\r\n)/g)) {
+    // A blank line inside a message that was taken ends no header.
+    if (headerEnd < taken) continue
+    const match = /Content-Length:\s*(\d+)/i.exec(state.buffer.subarray(taken, headerEnd).toString('ascii'))
     if (!match) {
-      state.buffer = state.buffer.subarray(headerEnd + 4)
+      taken = headerEnd + 4
       continue
     }
     const messageEnd = headerEnd + 4 + Number(match[1])
-    if (state.buffer.length < messageEnd) return
+    if (state.buffer.length < messageEnd) break
     const raw = state.buffer.subarray(headerEnd + 4, messageEnd).toString('utf8')
-    state.buffer = state.buffer.subarray(messageEnd)
+    taken = messageEnd
     let message: { readonly id?: unknown; readonly method: string; readonly params?: unknown }
     try {
       message = JSON.parse(raw)
@@ -294,15 +302,25 @@ export function handleInputChunk(state: { buffer: Buffer }, chunk: Buffer, write
       write(formatFrame({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: String(err) } }))
     }
   }
+  state.buffer = state.buffer.subarray(taken)
 }
 
-// Serve standard input only when this file is the mapper process, not when it is imported.
-if (import.meta.main) {
-  const stdioState = { buffer: Buffer.alloc(0) }
-  process.stdin.on('data', (chunk: Buffer) => {
-    handleInputChunk(stdioState, chunk, (frame) => process.stdout.write(frame))
+/** Where requests come from: standard input, when the mapper runs as a process. */
+export interface MapperInput {
+  on(event: 'data' | 'end', listener: (chunk: Buffer) => void): unknown
+}
+
+/**
+ * Serves the requests that arrive on `input`, writing each reply to `output`, until the input
+ * ends. The TypeScript API the mapper opened is closed then, and a later input gets a new one.
+ */
+export function serve(input: MapperInput, output: { write(frame: Buffer): unknown }): void {
+  const state = { buffer: Buffer.alloc(0) }
+  input.on('data', (chunk) => {
+    handleInputChunk(state, chunk, (frame) => output.write(frame))
   })
-  process.stdin.on('end', () => {
+  input.on('end', () => {
     sharedApi?.close()
+    sharedApi = undefined
   })
 }

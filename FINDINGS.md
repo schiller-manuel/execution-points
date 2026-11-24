@@ -514,7 +514,7 @@ What is done about it: an order's `run` rejects with an exported class, `Interle
 
 ### What the gap check shows
 
-**Now (2026-11-24, commit `393f6cd`, seed 42, all six sources, 14 oracle files):** 2,117 changes tried, 2,100 noticed, 10 in code no oracle owns (the mapper's top-level block that serves standard input), 7 gaps. Four of the seven are endless loops in the mapper's frame reader, which the gap check can only report as a timeout. The other three were in the listing's quoting of a value with a space and are closed since (`src/cli.ts`: 101 of 101). The table and the paragraphs below describe the state the review started from.
+**Now (2026-11-24, seed 42, all six sources, 15 oracle files): no gap is known and no code is unowned.** The last run over everything (commit `393f6cd`) had 7 gaps and 10 unowned mutants among 2,117. All are closed since, each confirmed by a run over its file: three in the listing's quoting of a value with a space (`src/cli.ts`: 101 of 101), and the four endless loops in the mapper's frame reader together with the ten unowned mutants of its standard-input block (`src/content-mapper.ts`: 263 of 263, 0 unowned). The frame reader was rewritten to walk a finite list of header ends, so a wrong length can no longer make it spin, and the standard-input block became `serve(input, output)`, which an oracle drives; the process entry is two lines in `src/content-mapper-main.ts`. A confirming run over all six sources is in progress. The table and the paragraphs below describe the state the review started from.
 
 Gap check at `b26e2c1`, seed 42: 1,472 changes tried, 1,214 noticed, **248 gaps**, 10 changes in functions no oracle owns. All six oracle files pass on the unchanged code.
 
@@ -737,6 +737,7 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 - 2026-11-24: discovery, plugin and CLI work merged (F9, F11, F12, F14; `execution-points list`; `points.schema.json`; the plugin reads `points.ep` and adds the Vitest setup module). One interaction between the two delegated branches fixed oracle first: the content mapper refused the manifest's new `$schema` key. Selection by a Babel-style visitor object decided (`p30`).
 - 2026-11-24: every module in `src/` is TypeScript and built with `tsdown` (full gap check: 1,950 of 1,965 mutants killed, 10 unowned, the 4 known mapper timeouts, and one gap that was a property added for a type's sake, removed). Every file under `tests/` type-checks under `strict` without `any`. F4 fixed: selection through a visitor object with `traverse`, plus `line`, `text` and `object`; `execution-points list` shows `object=` and `inside=`.
 - 2026-11-24: gap check on the finished selector work: 2,100 of 2,117 noticed; the four mapper timeouts remain, three gaps in the listing closed afterwards. An expression whose type cannot be written can be selected and passed through. The benchmark's treatment guide and witness use the new API; the self-test passes.
+- 2026-11-24: the last gaps closed. The mapper's frame reader walks a finite list of header ends instead of looping until done (four timeouts became four kills), `serve(input, output)` replaces the standard-input block (ten unowned mutants became owned and killed), and a new oracle generates streams of frames cut at arbitrary places.
 
 ## Incidents
 

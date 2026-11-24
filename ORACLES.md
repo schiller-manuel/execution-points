@@ -30,6 +30,8 @@ A running log. Each entry says what I was doing, what happened, and what would h
 
 **Would have helped:** the gap line or the skill distinguishing a synchronous hang from a driver that waited on something that never came, with the instruction to bound the wait.
 
+**A synchronous loop is the hard case, and it took production to close it.** Four mutants of the content mapper's frame reader made its `for (;;)` spin without consuming a byte. No history can turn that into an observation: the driver never gets control back. The skill calls it a CLI limitation to report and leave. What closed them was a rewrite of the loop itself: the reader now looks up every header end first and walks that finite list, so no arithmetic in the body can keep it going. All four became ordinary kills. A line in the skill saying "a loop whose end depends on the mutated arithmetic can often be rewritten to walk something finite" would have pointed there sooner.
+
 **It came back in another shape.** In the generator form of `interleavings`, a mutant makes the walk hand out the same order forever. Nothing hangs and no promise stays pending: the driver's own `for … of` loop simply never ends, one awaited run after another, and the gap is again labeled `timeout`. The driver now takes its orders through a wrapper that throws after more orders than the scenario can have. So a driver must bound every loop over what production hands out, not only every wait.
 
 ### The gap check cannot run red-first for a law about a function that does not exist yet

@@ -622,7 +622,7 @@ oracleProperty({
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: after every sequence of edits to targets and to the files they import, the warm mapper’s registry equals a cold mapper’s registry, so the mapper watches those files too. README.md:167 ("A persistent typescript/sync snapshot ... updates incrementally via snapshot.update(...) on file saves"). Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23: Law M2. The watch set (the tsconfig, the targets, and every project file the analysis read): approved by Manuel Schiller (GitHub schiller-manuel), 2026-11-24.',
     limits:
-      'Malformed frames without a Content-Length header or JSON parse errors without an id are ignored; histories are bounded-exhaustive over five lifecycle sequences. The standard-input loop of the mapper process is not driven; importing the mapper is checked for attaching no listener.',
+      'Malformed frames without a Content-Length header or JSON parse errors without an id are ignored; histories are bounded-exhaustive over five lifecycle sequences. Serving a whole input, and every way of cutting a stream into chunks, are the laws of content-mapper-wire; here, importing the mapper is checked for attaching no listener.',
   },
   histories: {
     enumerated: LIFECYCLE_SCENARIOS.map((scenario) => ({ scenario })),

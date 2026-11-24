@@ -34,7 +34,7 @@
     "contentMapper": {
       "exec": [
         "node",
-        "./dist/content-mapper.mjs"
+        "./dist/content-mapper-main.mjs"
       ],
       "dynamicConfig": true
     }
