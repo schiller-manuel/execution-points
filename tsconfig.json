@@ -29,8 +29,7 @@
   "include": [
     "src/**/*.ts",
     "examples/**/*.ts",
-    "tests/runtime*.ts",
-    "tests/loose-select.ts",
+    "tests/**/*.ts",
     "points.ep"
   ]
 }
