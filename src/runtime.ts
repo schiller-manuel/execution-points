@@ -51,7 +51,7 @@ export interface ExecutionPointFileRegistry {}
 export interface ExecutionPointContainerRegistry {}
 
 export interface Context<Result, Locals extends object> {
-  /** Captured binding values. Referenced objects retain their normal mutability. */
+  /** Captured binding values, read-only here. Referenced objects retain their normal mutability. */
   readonly locals: Readonly<Locals>
   /** Evaluate the original expression. Each call evaluates it again. */
   readonly original: () => Result
@@ -101,6 +101,11 @@ export interface Pause<Locals extends object> {
   readonly calls: number
 }
 
+/**
+ * What a method that needs a promise is on any other expression. It is written out where it is
+ * used, and never behind a name: the compiler prints an unnamed object type in full, so the
+ * error for calling it says why.
+ */
 type OnlyForPromises<Method extends string> = `${Method}() needs an expression whose value is a promise.`
 
 /** `Yes` when the expression's value is a promise (or `any`), `No` otherwise. */
@@ -141,15 +146,23 @@ export interface Point<Result, Locals extends object> {
   /** `replace` with a handler that throws `error`. */
   throws(error: unknown, options?: ReplacementOptions): Replacement
   /** `replace` with a handler that returns a promise fulfilled with `value`. */
-  resolves: IfPromise<Result, (value: Awaited<Result>, options?: ReplacementOptions) => Replacement, OnlyForPromises<'resolves'>>
+  resolves: IfPromise<
+    Result,
+    (value: Awaited<Result>, options?: ReplacementOptions) => Replacement,
+    { readonly __unavailable: OnlyForPromises<'resolves'> }
+  >
   /** `replace` with a handler that returns a promise rejected with `error`. */
-  rejects: IfPromise<Result, (error: unknown, options?: ReplacementOptions) => Replacement, OnlyForPromises<'rejects'>>
+  rejects: IfPromise<
+    Result,
+    (error: unknown, options?: ReplacementOptions) => Replacement,
+    { readonly __unavailable: OnlyForPromises<'rejects'> }
+  >
 
   /**
    * Holds evaluations of the expression inside `pause.run(action)` until `pause.release()`.
    * Only an expression whose value is a promise can wait.
    */
-  pause: IfPromise<Result, () => Pause<Locals>, OnlyForPromises<'pause'>>
+  pause: IfPromise<Result, () => Pause<Locals>, { readonly __unavailable: OnlyForPromises<'pause'> }>
 
   /** How often a replacement for this expression has run since the current test began. */
   readonly calls: number
@@ -159,7 +172,7 @@ export interface SelectablePoint<N extends NodeDescriptor, Captured extends obje
   /** Explicitly capture one or more in-scope local bindings at this expression. */
   capture<K extends keyof N['locals'] & string = never>(
     ...keys: readonly K[]
-  ): SelectablePoint<N, { readonly [P in K]: N['locals'][P] }>
+  ): SelectablePoint<N, { [P in K]: N['locals'][P] }>
 }
 
 export interface CapturedSelection<N extends NodeDescriptor, Keys extends readonly string[]> {
@@ -228,7 +241,7 @@ type ExtractNode<R> =
 
 type ExtractCapturedLocals<R> =
   CleanReturn<R> extends CapturedSelection<infer N, infer Keys>
-    ? { readonly [K in Keys[number] & keyof N['locals']]: N['locals'][K] }
+    ? { [K in Keys[number] & keyof N['locals']]: N['locals'][K] }
     : {}
 
 type SelectFromNodes<N extends NodeDescriptor, Captured extends object> = [N] extends [never]
@@ -237,7 +250,7 @@ type SelectFromNodes<N extends NodeDescriptor, Captured extends object> = [N] ex
     }
   : IsUnion<N> extends true
     ? {
-        readonly __selectionError: 'Selector matched multiple expressions. Narrow further by callee/operator, inFunction, kind, or nth.'
+        readonly __selectionError: 'Selector matched multiple expressions: __matched lists them. Compare more of the node (kind, callee, operator, object, inFunction, line), or look inside one function or class with traverse().'
         readonly __matched: N['id']
       }
     : // An expression whose type cannot be written has an opaque result in the registry, which only

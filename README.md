@@ -163,7 +163,7 @@ When the action is synchronous, `withReplacement` throws as it returns. When the
 
 ### Pause an asynchronous call
 
-To hold one operation in the middle while another runs, pause the expression it is about to await. This needs an expression whose value is a promise.
+To hold one operation in the middle while another runs, pause the expression it is about to await. This needs an expression whose value is a promise. On any other expression `pause`, `resolves` and `rejects` cannot be called, and the compile error gives that reason.
 
 ```ts
 const pause = remotePoint.pause()

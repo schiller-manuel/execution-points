@@ -142,6 +142,12 @@ optimization project.
   `node_modules/@tanstack/oracles/skills/oracles-evaluate-review/SKILL.md` in
   full.
 - Lint: not available here (typescript-eslint does not support TypeScript 7.1 yet; its TypeScript peer range ends before 7).
+- Wrong versions written by hand, for what the gap check cannot change or would not think of:
+  `pnpm build && node checks/wrong-declarations.mjs` applies wrong type declarations to the
+  built `dist/runtime.d.mts` and expects a type oracle to reject each; the gap check with
+  `--mutants checks/wrong-versions --only authored:<id>,…` does the same for wrong
+  implementations. Run them after changing an oracle or a declaration, and add to them when a
+  wrong version turns out to pass.
 - Oracle files: `tests/**/*oracle*.test.ts`. Gap check: `pnpm build && pnpm exec oracle-gaps --package . --source src/runtime.ts,src/discovery.ts,src/plugin.ts,src/contracts.ts,src/content-mapper.ts,src/cli.ts --seed 42`.
 
 <!-- END @tanstack/oracles -->

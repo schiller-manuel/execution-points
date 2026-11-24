@@ -1,0 +1,154 @@
+[
+  {
+    "id": "live-getters",
+    "source": "src/runtime.ts",
+    "find": "    locals[key] = typeof getter === 'function' ? (getter as () => unknown)() : getter\n",
+    "replace": "    Object.defineProperty(locals, key, { get: typeof getter === 'function' ? (getter as () => unknown) : () => getter, enumerable: true })\n",
+    "intent": "a captured primitive follows the application's binding instead of being the value at interception (first review, wrong version 1)",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "frozen-clones",
+    "source": "src/runtime.ts",
+    "find": "    locals[key] = typeof getter === 'function' ? (getter as () => unknown)() : getter\n",
+    "replace": "    const taken = typeof getter === 'function' ? (getter as () => unknown)() : getter\n    locals[key] = taken !== null && typeof taken === 'object' && !Array.isArray(taken) ? Object.freeze({ ...taken }) : taken\n",
+    "intent": "a captured object is a frozen copy instead of the application's own object (first review, wrong version 2a)",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "rewrapped-promise",
+    "source": "src/runtime.ts",
+    "find": "        registry.owed.add(installation)\n        return result\n",
+    "replace": "        registry.owed.add(installation)\n        return Promise.resolve(result).then((value) => value) as T\n",
+    "intent": "withReplacement returns a new promise instead of the action's own (first review, wrong version 2b)",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "release-forgets-it-released",
+    "source": "src/runtime.ts",
+    "find": "        released = true\n        letGo()\n",
+    "replace": "        letGo()\n",
+    "intent": "after release() a later evaluation still counts as held",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "pause-miss-only-for-a-synchronous-action",
+    "source": "src/runtime.ts",
+    "find": "          if (isThenable(result)) result.then(() => finished(), finished)\n          else finished()\n",
+    "replace": "          if (!isThenable(result)) finished()\n",
+    "intent": "reached never rejects when an asynchronous action finishes without reaching the expression",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "orders-walked-from-the-first-open-choice",
+    "source": "src/runtime.ts",
+    "find": "choices.findLastIndex(",
+    "replace": "choices.findIndex(",
+    "intent": "the walk over the orders backtracks at the first choice that has an alternative instead of the last",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "one-selection-per-expression-whatever-it-captures",
+    "source": "src/runtime.ts",
+    "find": "[JSON.stringify([selection.id, selection.captureNames]), selection]",
+    "replace": "[selection.id, selection]",
+    "intent": "two handlers that select one expression with different captures count as one selection",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "any-capture-counts-as-a-selection",
+    "source": "src/runtime.ts",
+    "find": "if (captured.__epSelected && captured.id === node?.id) return",
+    "replace": "if (captured.__epSelected) return",
+    "intent": "a handler may return the capture of a node it was not given",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "restore-removes-the-newest",
+    "source": "src/runtime.ts",
+    "find": "stack.splice(stack.indexOf(installation), 1)",
+    "replace": "stack.pop()",
+    "intent": "restoring a replacement removes the newest one for the expression, whichever it is",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "restore-twice-removes-another",
+    "source": "src/runtime.ts",
+    "find": "      if (!registry.owed.delete(installation)) return\n",
+    "replace": "      registry.owed.delete(installation)\n",
+    "intent": "a second restore() of the same replacement acts again",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "only-the-first-problem-is-reported",
+    "source": "src/runtime.ts",
+    "find": "  if (problems.length === 1) throw problems[0]\n  if (problems.length) {\n",
+    "replace": "  if (problems.length) throw problems[0]\n  if (problems.length) {\n",
+    "intent": "when several replacements fell short, the test end reports only the first",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "call-counts-handler-runs",
+    "source": "src/runtime.ts",
+    "find": "return active.handler(Object.freeze({ locals, original: originalThunk, call })) as Result",
+    "replace": "return active.handler(Object.freeze({ locals, original: originalThunk, call: active.runs })) as Result",
+    "intent": "the context's call is the number of handler runs, not which evaluation it is",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "inner-scope-drops-the-outer-replacement",
+    "source": "src/runtime.ts",
+    "find": "    const replacements = new Map(registry.storage.getStore() ?? [])\n    replacements.set(installation.id, installation)\n",
+    "replace": "    const replacements = new Map<string, Installation>()\n    replacements.set(installation.id, installation)\n",
+    "intent": "a replacement inside another's action hides the outer one",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "an-order-drops-the-replacements-around-it",
+    "source": "src/runtime.ts",
+    "find": "        const replacements = new Map(registry.storage.getStore() ?? [])\n        for (const point of points) {",
+    "replace": "        const replacements = new Map<string, Installation>()\n        for (const point of points) {",
+    "intent": "order.run hides a replacement that is active around it",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "a-failure-without-its-cause",
+    "source": "src/runtime.ts",
+    "find": "            failed,\n            [...choices],\n",
+    "replace": "            undefined,\n            [...choices],\n",
+    "intent": "an InterleavingFailure does not carry what the action threw",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "climb-stops-at-non-null",
+    "source": "src/discovery.ts",
+    "find": "  SyntaxKind.NonNullExpression,\n",
+    "replace": "  // SyntaxKind.NonNullExpression,\n",
+    "intent": "the wrapper climb does not pass x! (first review, wrong version 3)",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "climb-stops-at-type-assertion",
+    "source": "src/discovery.ts",
+    "find": "  SyntaxKind.TypeAssertionExpression,\n",
+    "replace": "  // SyntaxKind.TypeAssertionExpression,\n",
+    "intent": "the wrapper climb does not pass <T>x (first review, wrong version 3)",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "climb-stops-at-satisfies",
+    "source": "src/discovery.ts",
+    "find": "  SyntaxKind.SatisfiesExpression,\n",
+    "replace": "  // SyntaxKind.SatisfiesExpression,\n",
+    "intent": "the wrapper climb does not pass x satisfies T (first review, wrong version 3)",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  },
+  {
+    "id": "source-map-points-at-column-zero",
+    "source": "src/plugin.ts",
+    "find": "        segment(vlq(0) + vlq(lineOf[from]! - lastLine) + vlq(columnOf[from]! - lastColumn))\n        lastLine = lineOf[from]!\n        lastColumn = columnOf[from]!\n",
+    "replace": "        segment(vlq(0) + vlq(lineOf[from]! - lastLine) + vlq(0 - lastColumn))\n        lastLine = lineOf[from]!\n        lastColumn = 0\n",
+    "intent": "the source map sends every copied token to the start of its line (in the place of the first review's wrong version 4)",
+    "author": "written by hand on 2026-11-24 in the session that also wrote most of the oracles (self-generated); the first review's wrong versions are marked in the intent"
+  }
+]

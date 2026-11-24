@@ -84,6 +84,7 @@ function getAny(): any { return 1 }
 function identity<T>(v: T): T { return v }
 
 export function work(a: number, b: number, flag: boolean) {
+  const box = { n: a }
   const sum = a + b
   const chosen = flag ? 'yes' : 'no'
   const len = send(chosen)
@@ -363,7 +364,19 @@ const T3_CASES = [
   'valid-capture-narrows-locals',
   'chained-capture-replaces-prior-keys',
   'unknown-capture-key-rejected',
+  'assigning-a-local-captured-in-the-visitor',
+  'assigning-a-local-captured-on-the-point',
+  'assigning-a-local-of-an-arrival',
+  'writing-into-a-captured-object',
+  'writing-into-a-captured-object-of-an-arrival',
 ] as const
+
+/** The cases that compile: reading what was captured, and writing into an object that a captured local holds. */
+const T3_COMPILES: ReadonlyArray<(typeof T3_CASES)[number]> = [
+  'valid-capture-narrows-locals',
+  'writing-into-a-captured-object',
+  'writing-into-a-captured-object-of-an-arrival',
+]
 
 type T3Case = (typeof T3_CASES)[number]
 
@@ -374,8 +387,9 @@ oracleProperty({
     statement:
       'For every .capture(...keys) call on a visitor node or selected point, zero arguments types locals as {} (rejecting uncaptured local reads), valid keys expose typed readonly locals, chained .capture() replaces prior keys, and unknown keys fail compile time.',
     authority:
-      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: fix 0-arg capture soundness with = never default.',
-    limits: 'Checked on the send() call of one target module.',
+      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: fix 0-arg capture soundness with = never default. AGENTS.md, "Agreed direction": "Make the captured bindings read-only, while preserving ordinary mutation of referenced objects."',
+    limits:
+      'Checked on the send() and logAsync() calls of one target module. Read-only is checked as: assigning to a captured local does not compile, in a handler for either way of capturing and in the arrival of a pause, while writing a property of an object that a captured local holds does.',
   },
   histories: {
     enumerated: T3_CASES.map((c) => ({ c })),
@@ -385,11 +399,14 @@ oracleProperty({
       'valid-capture-reads-ok',
       'chained-capture-replaces',
       'invalid-capture-rejected',
+      'assignment-to-a-captured-local',
+      'write-into-a-captured-object',
+      'in-an-arrival',
     ],
   },
   label: (h) => h.c,
   model: (h) => ({
-    ok: h.c === 'valid-capture-narrows-locals',
+    ok: T3_COMPILES.includes(h.c),
     registryErrors: [],
   }),
   driver: (history, observe) => {
@@ -427,6 +444,38 @@ p.withReplacement(({ locals, original }) => { void locals.chosen; return origina
 const p = select(${JSON.stringify(TARGET_REL)}, (n) => n.callee === 'send' ? n.capture('doesNotExist') : undefined)
 void p`
         break
+      case 'assigning-a-local-captured-in-the-visitor':
+        observe('reach', 'assignment-to-a-captured-local')
+        code = `${header}
+const p = select(${JSON.stringify(TARGET_REL)}, (n) => n.callee === 'send' ? n.capture('sum') : undefined)
+p.withReplacement(({ locals, original }) => { locals.sum = 1; return original() }, () => 0)`
+        break
+      case 'assigning-a-local-captured-on-the-point':
+        observe('reach', 'assignment-to-a-captured-local')
+        code = `${header}
+const p = select(${JSON.stringify(TARGET_REL)}, (n) => n.callee === 'send' ? n : undefined).capture('sum')
+p.withReplacement(({ locals, original }) => { locals.sum = 1; return original() }, () => 0)`
+        break
+      case 'assigning-a-local-of-an-arrival':
+        observe('reach', 'assignment-to-a-captured-local')
+        observe('reach', 'in-an-arrival')
+        code = `${header}
+const gate = select(${JSON.stringify(TARGET_REL)}, (n) => n.callee === 'logAsync' ? n : undefined).capture('sum').pause()
+void gate.run(async () => { (await gate.reached).locals.sum = 1 })`
+        break
+      case 'writing-into-a-captured-object':
+        observe('reach', 'write-into-a-captured-object')
+        code = `${header}
+const p = select(${JSON.stringify(TARGET_REL)}, (n) => n.callee === 'send' ? n.capture('box') : undefined)
+p.withReplacement(({ locals, original }) => { locals.box.n = 1; return original() }, () => 0)`
+        break
+      case 'writing-into-a-captured-object-of-an-arrival':
+        observe('reach', 'write-into-a-captured-object')
+        observe('reach', 'in-an-arrival')
+        code = `${header}
+const gate = select(${JSON.stringify(TARGET_REL)}, (n) => n.callee === 'logAsync' ? n : undefined).capture('box').pause()
+void gate.run(async () => { (await gate.reached).locals.box.n = 1 })`
+        break
     }
     const res = checkSnippet(code)
     observe('t3', { ok: res.ok, registryErrors: res.registryErrors })
@@ -443,6 +492,20 @@ void p`
       history: { enumerated: 'empty-capture-on-node-rejects-local-read' },
       corrupt: (trace) =>
         trace.map((o) => (o.checkpoint === 't3' ? { ...o, value: { ok: true, registryErrors: [] } } : o)),
+    },
+    {
+      name: 'a-captured-local-can-be-assigned',
+      law: 'capture-soundness',
+      history: { enumerated: 'assigning-a-local-captured-on-the-point' },
+      corrupt: (trace) =>
+        trace.map((o) => (o.checkpoint === 't3' ? { ...o, value: { ok: true, registryErrors: [] } } : o)),
+    },
+    {
+      name: 'a-captured-object-is-deeply-read-only',
+      law: 'capture-soundness',
+      history: { enumerated: 'writing-into-a-captured-object' },
+      corrupt: (trace) =>
+        trace.map((o) => (o.checkpoint === 't3' ? { ...o, value: { ok: false, registryErrors: [] } } : o)),
     },
   ],
 })

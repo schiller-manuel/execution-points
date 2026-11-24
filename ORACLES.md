@@ -161,3 +161,32 @@ Another session's notes, taken over as written and not rechecked by me.
 
 **What happened:** three times I added something only to satisfy the compiler (`let heldAtEnd = false` for an inferred type, `start: 0` on an object typed wider than what is read, `return {}` where `undefined` spreads the same), and each time the gap check reported the addition as a gap, `not-observed` or `not-distinguished`. Each fix was to take the addition out and give the value the type of what is actually read. The tool was right every time. The directive for these classes points at the oracle's histories; for this kind of gap a second sentence, "or the code is dead: remove it", would have saved a look.
 
+
+### Zero gaps, and the hand-written wrong versions still found seven
+
+**Doing:** answering "can we close all gaps?" after the gap check reported 2,114 of 2,114.
+
+**What happened:** I wrote 19 plausible wrong implementations as authored mutants and 38 wrong type declarations. Seven passed every oracle. Two of them were in the first review of this repository as "wrong versions that pass", and through all the oracle work since then nothing had made anyone run them again: a captured number that follows the application's variable, and a captured object that is a copy. The authored-mutant format made rerunning them a matter of minutes once they were written down.
+
+**Would have helped:** the skill saying where authored mutants are meant to live in a repository (I put them in `checks/wrong-versions/`), and the gap check running such a directory by default when it exists, so that a wrong version someone once found keeps being asked.
+
+### No way to mutate a declaration file, part two: doing it by hand
+
+**Doing:** getting mutation evidence for an oracle that owns only `dist/runtime.d.mts`.
+
+**What happened:** four things in a row.
+
+- `--only <oracle ids>` with ids that own nothing in `--source` ran no oracle file at all and ended `baseline all 0 oracle files pass`, exit 0. It reads like success.
+- A Vitest config that includes only that oracle file is refused: "no file owns any selected source". I had to include an unrelated oracle (the listing's) and name its source to get a baseline of the file I meant.
+- `--config` must be inside the package, so the temporary config has to be written into the repository and removed again.
+- An authored mutant cannot target the declaration file, because the harness reads it with `readFileSync`, which no transform sees. So the script edits the built file, runs the gap check for its baseline, and puts the file back.
+
+**Would have helped:** authored mutants applied to any file under the package (as a patched copy the run points the reader at, or simply written and restored by the tool), and a baseline-only mode (`--baseline <test file>`) that needs no source.
+
+### A failing file names one test
+
+**Doing:** reading which histories of a new oracle fail on unchanged production (the red run).
+
+**What happened:** `baseline fail … 14 of 733 tests failed` came with one failing test's name and replay. `results.json` holds the count and the same one name. The other thirteen can only be read by running Vitest alone, which this repository's rule forbids. I reasoned my way to the list (twelve histories of one law and two calibrations bound to a failing history) and confirmed it only through the fix.
+
+**Would have helped:** every failing test's name in `results.json`, or in the log up to some number.

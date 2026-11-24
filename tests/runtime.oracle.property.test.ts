@@ -9,6 +9,7 @@
  * invoke('n0', () => 10, () => ({ a: () => 1 })) // → 10, without calling captureThunk, when no replacement for 'n0' is active
  * point.withReplacement(({ original }) => original() + 5, () => invoke('n0', () => 10, () => ({}))) // → 15 inside action and its async descendants
  * point.capture('a').withReplacement(({ locals }) => locals.a, () => invoke('n0', () => 10, () => ({ a: () => 7, b: () => 9 }))) // → 7 on a frozen null-prototype locals object, without reading 'b'
+ * //                                                                                                                       → still 7 after the application reassigns a; an object in locals is the application's own
  * select('app.ts', (n) => (n.callee === 'send' ? n : undefined)) // → Point for the single matching node; throws when 0 or 2+ nodes match
  * registerFile('app.ts', nodes, homes)[home].on // → false until a replacement is installed for an expression of that home, true from then on
  * ```
@@ -52,6 +53,17 @@
  * a frozen `context` whose `locals` is a shallowly frozen, null-prototype
  * object mapping `keys` to their captured values (`README.md:82`,
  * the `Context` type in `src/runtime.ts`).
+ *
+ * For every captured primitive, the value in `locals` is the value at
+ * interception and does not change when the application's binding changes; for
+ * every captured object, `locals` holds the application's own object; and each
+ * captured binding is read once, when the expression is reached and before the
+ * handler runs (README, "Primitive captures are snapshots of the binding's
+ * value at interception. They do not become live getters"; "Existing objects
+ * are shared with the application and remain mutable"). A `locals` that read
+ * the binding whenever the handler asked would look the same to every handler
+ * that reads once and at once: it differs when the application moves on while
+ * the handler still holds `locals`, which is what a handler that awaits does.
  *
  * For every file registration and `select(file, visitor)` call, `select`
  * resolves to the single node for which `visitor(node)` returns `node` or
@@ -794,6 +806,239 @@ oracleProperty({
             ? { ...o, value: { ...(o.value as object), entries: [['bogus', 999]] } }
             : o,
         ),
+    },
+  ],
+})
+
+// ---------------------------------------------------------------------------
+// Law 3b: A captured primitive is the value at interception; a captured object is the application's own
+// ---------------------------------------------------------------------------
+
+const VALUE_KEYS = ['a', 'b', 'c'] as const
+
+interface CapturedLocal {
+  /** Whether the test captures this local. */
+  captured: boolean
+  /** What the application's binding holds when the expression is reached. */
+  holds: 'number' | 'object'
+  value: number
+  /** How far the application moves its binding on while the handler runs: 0 leaves it alone. */
+  reassignedBy: number
+  /** What the handler adds to an object through `locals`: 0 writes nothing. A number cannot be written through. */
+  writtenBy: number
+}
+
+interface CapturedValueHistory {
+  locals: [CapturedLocal, CapturedLocal, CapturedLocal]
+}
+
+const capturedLocalArbitrary: fc.Arbitrary<CapturedLocal> = fc.record({
+  captured: fc.boolean(),
+  holds: fc.constantFrom('number', 'object'),
+  value: fc.integer({ min: -20, max: 20 }),
+  reassignedBy: fc.integer({ min: 0, max: 5 }),
+  writtenBy: fc.integer({ min: 0, max: 5 }),
+})
+
+const capturedOf = (history: CapturedValueHistory) =>
+  VALUE_KEYS.flatMap((key, index) => (history.locals[index]!.captured ? [[key, history.locals[index]!] as const] : []))
+
+/**
+ * README, "Capture local bindings": a primitive capture is a snapshot of the binding's value at
+ * interception and does not become a live getter; an existing object is shared with the
+ * application and remains mutable. So what the application does to its binding afterwards shows
+ * in neither, and what the handler writes into the object shows in the application's.
+ */
+function capturedValueModel(history: CapturedValueHistory) {
+  const captured = capturedOf(history)
+  // Read once, when the expression is reached: before the handler runs, and never again.
+  const once = captured.map(([key]) => [key, 1])
+  return {
+    readsBeforeTheHandler: once,
+    readsInAll: once,
+    locals: captured.map(([key, local]) => [
+      key,
+      local.holds === 'number'
+        ? { first: local.value, later: local.value }
+        : {
+            first: local.value,
+            later: local.value + local.writtenBy,
+            itsOwn: true,
+            frozen: false,
+            applicationSees: local.value + local.writtenBy,
+          },
+    ]),
+  }
+}
+
+const withFirstLocal = (base: CapturedValueHistory, first: Omit<CapturedLocal, 'value'>): CapturedValueHistory => ({
+  locals: [{ ...first, value: base.locals[0].value }, base.locals[1], base.locals[2]],
+})
+
+oracleProperty({
+  id: 'runtime-captured-values',
+  owns: ['src/runtime.ts#invoke'],
+  law: {
+    statement:
+      'For every captured primitive, the value in locals is the value at interception and does not change when the application\'s binding changes; for every captured object, locals holds the application\'s own object; and each captured binding is read once, when the expression is reached and before the handler runs.',
+    authority:
+      'README, "Capture local bindings": "Existing objects are shared with the application and remain mutable", "Primitive captures are snapshots of the binding\'s value at interception. They do not become live getters", and "Captures are read once for each intercepted execution".',
+    limits:
+      'Three locals that hold a number or a plain object with one property; the application reassigns its binding while the handler runs, and the handler writes one property. Other primitives, and objects with accessors or a prototype of their own, are not among them.',
+  },
+  histories: {
+    arbitrary: fc.record({ locals: fc.tuple(capturedLocalArbitrary, capturedLocalArbitrary, capturedLocalArbitrary) }),
+    runs: 60,
+    fixedSeeds: [42],
+    states: [
+      'number-reassigned-by-the-application',
+      'object-replaced-by-the-application',
+      'object-written-through-locals',
+      'binding-left-alone',
+    ],
+    constructed: [
+      {
+        name: 'a-number-the-application-reassigns',
+        enters: ['number-reassigned-by-the-application'],
+        build: (base): CapturedValueHistory => withFirstLocal(base, { captured: true, holds: 'number', reassignedBy: 3, writtenBy: 0 }),
+      },
+      {
+        name: 'an-object-the-application-replaces',
+        enters: ['object-replaced-by-the-application'],
+        build: (base): CapturedValueHistory => withFirstLocal(base, { captured: true, holds: 'object', reassignedBy: 2, writtenBy: 0 }),
+      },
+      {
+        name: 'an-object-written-through-locals',
+        enters: ['object-written-through-locals'],
+        build: (base): CapturedValueHistory => withFirstLocal(base, { captured: true, holds: 'object', reassignedBy: 0, writtenBy: 4 }),
+      },
+      {
+        // The replacement object and the written one then hold the same number: only identity tells them apart.
+        name: 'an-object-replaced-and-written-by-the-same-amount',
+        enters: ['object-replaced-by-the-application', 'object-written-through-locals'],
+        build: (base): CapturedValueHistory => withFirstLocal(base, { captured: true, holds: 'object', reassignedBy: 3, writtenBy: 3 }),
+      },
+      {
+        name: 'a-number-left-alone',
+        enters: ['binding-left-alone'],
+        build: (base): CapturedValueHistory => withFirstLocal(base, { captured: true, holds: 'number', reassignedBy: 0, writtenBy: 0 }),
+      },
+    ],
+  },
+  model: (history) => capturedValueModel(history),
+  driver: (history, observe) => {
+    const file = 'oracle-captured-values.ts'
+    registerFile(file, [{ id: 'value-node', kind: 'CallExpression', inFunction: 'fn', callee: 'send', nth: 0, line: 1, text: '' }])
+    const captured = capturedOf(history)
+    for (const [, local] of captured) {
+      if (local.holds === 'number' && local.reassignedBy > 0) observe('reach', 'number-reassigned-by-the-application')
+      if (local.holds === 'object' && local.reassignedBy > 0) observe('reach', 'object-replaced-by-the-application')
+      if (local.holds === 'object' && local.writtenBy > 0) observe('reach', 'object-written-through-locals')
+      if (local.reassignedBy === 0) observe('reach', 'binding-left-alone')
+    }
+
+    // The application's side: its bindings, the objects it made, and how often each binding was read.
+    const bindings: Record<string, unknown> = {}
+    const made: Record<string, { n: number }> = {}
+    const reads: Record<string, number> = {}
+    VALUE_KEYS.forEach((key, index) => {
+      const local = history.locals[index]!
+      reads[key] = 0
+      if (local.holds === 'object') made[key] = { n: local.value }
+      bindings[key] = local.holds === 'object' ? made[key] : local.value
+    })
+    const readsSoFar = () => captured.map(([key]) => [key, reads[key]!])
+
+    try {
+      select(file, (n) => n.capture(...captured.map(([key]) => key))).withReplacement(
+        (context) => {
+          const locals = context.locals as Record<string, unknown>
+          const readsBeforeTheHandler = readsSoFar()
+          const seen = captured.map(([key, local]) => {
+            const first = locals[key]
+            const firstValue = local.holds === 'object' ? (first as { n: number }).n : first
+            // The application moves its binding on while the handler runs.
+            if (local.reassignedBy > 0) {
+              bindings[key] = local.holds === 'object' ? { n: local.value + local.reassignedBy } : local.value + local.reassignedBy
+            }
+            if (local.holds === 'number') return [key, { first: firstValue, later: locals[key] }]
+            let writing: string | undefined
+            try {
+              if (local.writtenBy > 0) (locals[key] as { n: number }).n += local.writtenBy
+            } catch (error) {
+              writing = error instanceof Error ? error.message : String(error)
+            }
+            const later = locals[key] as { n: number }
+            return [
+              key,
+              {
+                first: firstValue,
+                later: later.n,
+                itsOwn: first === made[key] && later === made[key],
+                frozen: Object.isFrozen(later),
+                applicationSees: made[key]!.n,
+                ...(writing === undefined ? {} : { writing }),
+              },
+            ]
+          })
+          observe('captured', { readsBeforeTheHandler, readsInAll: readsSoFar(), locals: seen })
+          return 0
+        },
+        () =>
+          invoke(
+            'value-node',
+            () => 0,
+            () =>
+              Object.fromEntries(
+                VALUE_KEYS.map((key) => [
+                  key,
+                  () => {
+                    reads[key]! += 1
+                    return bindings[key]
+                  },
+                ]),
+              ),
+          ),
+      )
+    } catch (error) {
+      observe('captured', { threw: error instanceof Error ? error.message : String(error) })
+    }
+  },
+  check: (_history, observations, expected) =>
+    differs('captured', 'captured-values', observations.find((each) => each.checkpoint === 'captured')?.value, expected) ?? pass,
+  calibrations: [
+    {
+      name: 'a-number-that-follows-the-binding',
+      law: 'captured-values',
+      history: { constructed: 'a-number-the-application-reassigns' },
+      corrupt: (trace) =>
+        trace.map((each) => {
+          if (each.checkpoint !== 'captured') return each
+          const value = each.value as { locals: Array<[string, { first: number; later: number }]> }
+          return { ...each, value: { ...value, locals: value.locals.map(([key, seen], index) => [key, index === 0 ? { ...seen, later: seen.first + 3 } : seen]) } }
+        }),
+    },
+    {
+      name: 'a-copy-of-the-object',
+      law: 'captured-values',
+      history: { constructed: 'an-object-written-through-locals' },
+      corrupt: (trace) =>
+        trace.map((each) => {
+          if (each.checkpoint !== 'captured') return each
+          const value = each.value as { locals: Array<[string, object]> }
+          return { ...each, value: { ...value, locals: value.locals.map(([key, seen], index) => [key, index === 0 ? { ...seen, itsOwn: false } : seen]) } }
+        }),
+    },
+    {
+      name: 'read-only-when-the-handler-asks',
+      law: 'captured-values',
+      history: { constructed: 'a-number-left-alone' },
+      corrupt: (trace) =>
+        trace.map((each) => {
+          if (each.checkpoint !== 'captured') return each
+          const value = each.value as { readsBeforeTheHandler: Array<[string, number]> }
+          return { ...each, value: { ...value, readsBeforeTheHandler: value.readsBeforeTheHandler.map(([key]) => [key, 0]) } }
+        }),
     },
   ],
 })

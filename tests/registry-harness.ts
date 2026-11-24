@@ -249,6 +249,15 @@ export interface CompiledRegistry {
   relations: Array<boolean>
 }
 
+interface MessageChain {
+  readonly text?: string
+  readonly messageChain?: ReadonlyArray<MessageChain>
+}
+
+/** Every line under a diagnostic's first, however deep: the reason is often the last one. */
+const chainTexts = (chain: ReadonlyArray<MessageChain> | undefined): Array<string> =>
+  (chain ?? []).flatMap((each) => [each.text ?? '', ...chainTexts(each.messageChain)])
+
 /**
  * Compile `registryText` as `points.ep.ts` in `root`, together with the
  * project's own files and the library's real declarations, and read it.
@@ -298,7 +307,7 @@ export function compileRegistry(
     for (const [file] of extra) extraErrors[relativeName(file)] = []
     for (const diagnostic of [...program.getSyntacticDiagnostics(), ...program.getSemanticDiagnostics()]) {
       if (diagnostic.category !== 1) continue
-      const text = [diagnostic.text ?? '', ...(diagnostic.messageChain ?? []).map((chain) => chain.text)].join(' ')
+      const text = [diagnostic.text ?? '', ...chainTexts(diagnostic.messageChain)].join(' ')
       const name = relativeName(diagnostic.fileName)
       if (name === 'points.ep.ts') registryErrors.push(`TS${diagnostic.code}: ${text}`)
       else if (name in extraErrors) extraErrors[name]!.push({ code: diagnostic.code, text })
