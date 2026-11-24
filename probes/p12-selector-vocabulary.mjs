@@ -14,6 +14,9 @@ export default async function (id: string) { return fetchOrder(id) }
 export const api = { load: (id: string) => fetchItem(id), ['dyn' + 1]: () => fetchDyn() }
 declare function fetchUser(id: string): unknown; declare function fetchOrder(id: string): unknown
 declare function fetchItem(id: string): unknown; declare function fetchDyn(): unknown; declare function build(): unknown`,
+  'calls whose callee is wrapped: non-null, parentheses, bracket access': `
+export class Svc { handler?: (n: number) => number; client: any
+  run(key: string) { return [this.handler!(1), (this.client.send)(2), this.client[key](3), this.client['fixed'](4)] } }`,
   'nested binary chain a + b + c': `export function f(a: number, b: number, c: number) { return a + b + c }`,
   'ternaries have no name at all': `export function f(a: boolean, b: boolean) { const x = a ? 1 : 2; const y = b ? 3 : 4; return x + y }`,
   'callbacks collapse into the nearest named function': `

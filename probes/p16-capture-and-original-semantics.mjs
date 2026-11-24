@@ -11,6 +11,16 @@ const p = instrument({
 }
 function compute(n) { return n * 2 }
 
+export function route(k) {
+  const a = 'outer'
+  switch (k) {
+    case 0: return send(k)   // the "let a" of case 1 is in the same switch scope, uninitialized here
+    case 1: { }
+    default: let a = 1; return a
+  }
+}
+function send(k) { return k }
+
 let counter = 0
 export function next() { return bump() }
 function bump() { return ++counter }
@@ -30,6 +40,14 @@ try {
   console.log(`capture('limit') at compute(1): handler saw ${out}`)
 } catch (error) {
   console.log(`capture('limit') at compute(1) -> ${error.constructor.name}: ${error.message}   (without the capture, early() returns ${app.early()})`)
+}
+
+// 1b. Same class, inside a switch: an outer "a" is offered, but a later case declares its own "a".
+try {
+  const out = ids('send').capture('a').withReplacement(({ locals }) => locals.a, () => app.route(0))
+  console.log(`capture('a') at send(k) inside switch: handler saw ${JSON.stringify(out)}`)
+} catch (error) {
+  console.log(`capture('a') at send(k) inside switch -> ${error.constructor.name}: ${error.message}   (without the capture, route(0) returns ${app.route(0)})`)
 }
 
 // 2. original() twice, and original() after the scope has ended.

@@ -1,5 +1,6 @@
 // Probe (end to end, real tsc + real content mapper): one target expression whose type comes from
-// a Node built-in module. What does `tsc --noEmit --runExternalCode` report, and where?
+// a Node built-in module, or one local typed with the project's own exported enum.
+// What does `tsc --noEmit --runExternalCode` report, and where?
 import { consumer, tail } from './e2e.mjs'
 
 const test = `import { expect, test } from 'vitest'
@@ -20,8 +21,17 @@ const withFs = consumer({
   'src/files.ts': `import { statSync } from 'node:fs'\nexport function size(p: string) { return statSync(p).size }\n`,
   'test/app.test.ts': test,
 })
+const withEnum = consumer({
+  'src/app.ts': `export function total(a: number, b: number) { return a + b }\n`,
+  'src/status.ts': `export enum Status { Ok, Err }\nexport function describe(status?: Status) { return String(status ?? Status.Ok) }\n`,
+  'test/app.test.ts': test,
+})
 
-for (const [label, c] of [['project without node:fs', clean], ['same project + src/files.ts calling statSync()', withFs]]) {
+for (const [label, c] of [
+  ['project without node:fs', clean],
+  ['same project + src/files.ts calling statSync()', withFs],
+  ['same project + src/status.ts with an optional enum parameter', withEnum],
+]) {
   const t = c.tsc()
   const v = c.vitest()
   console.log(`## ${label}`)

@@ -8,20 +8,22 @@ Nothing in `src/`, `tests/`, or `bench/` was changed by this review. The laws be
 
 ## Short version
 
-- **The library has one defect that should be fixed before anything else.** A single expression in any target file whose type comes from a Node built-in module (`fs.Stats`, `http.Server`, `ChildProcess`, ...) makes `tsc` fail for the whole project (F1). 22 of 38 everyday Node calls trigger it. The benchmark tasks happen to avoid it.
+- **The library has one defect that should be fixed before anything else.** A single expression or local in any target file whose type comes from a Node built-in module (`fs.Stats`, `http.Server`, ...) or is a member of the project's own enum makes `tsc` fail for the whole project (F1). 22 of 38 everyday Node calls trigger it, and so does an optional enum parameter. The benchmark tasks happen to avoid both.
 - **Two more type-generation defects** leave the editor with stale types (F2) and make expressions unselectable when the project declares global types outside the targets (F3).
-- **The oracles are strong where the runtime lives and thin where these defects live.** The gap check kills every code change in `runtime.mjs`, `discovery.mjs`, and `plugin.mjs`, and misses 248 of 1,472 (17%), all in `contracts.mjs` and `content-mapper.mjs`.
+- **The oracles are green but hold less than that suggests.** The gap check misses 248 of 1,472 small code changes (17%), all in `contracts.mjs` and `content-mapper.mjs`. It notices every small change in `runtime.mjs`, `discovery.mjs`, and `plugin.mjs`, yet seven deliberately wrong versions of the runtime, discovery, plugin, and type contract pass every oracle file. No law compiles the generated registry, which is why F1 went unseen.
 - **Listing a module as a target makes it run 30 to 120 times slower** even when no test replaces anything (F6). Resolving the registry once per module instead of once per call recovers about two thirds of that.
 - **Do not rerun the whole benchmark now.** The runtime, plugin, and discovery code are byte-identical to the last paid run; only the types and twelve lines of the treatment guide changed. A full rerun would cost about 2,700 credits and, by the protocol's own power calculation, could not reach significance. The section "Should the benchmark be rerun" gives the sequence I recommend instead.
 - **The benchmark measures regression-test quality, not bug fixing.** Across all 138 stored trials the hidden grader passed 68 of 69 in each arm. Every difference in `solved` comes from one component, `adequateReproduction`.
 
 ## Decisions needed
 
-1. F1, F2, F3, F8, F9, F10: is each a bug, or intended? Each one becomes a law and a failing history first, then a fix.
+1. F1, F2, F3, F8, F9, F10, F14, F15: is each a bug, or intended? Each one becomes a law and a failing history first, then a fix. F1 also needs Law C3 of the contracts oracle changed, which is yours to approve.
 2. F4: should the promise that selector breaks are loud cover `nth`, or should `nth` be documented as the one selector that can retarget silently?
 3. F5 and F7: should a replacement that never runs fail the test by default, and should there be a scope that is not tied to the async context?
 4. F6: is there a performance budget for instrumented code with no replacement active? If so it can become a `work` bound in the runtime oracle.
-5. The benchmark sequence at the end of this file: approve, or change.
+5. The potential laws in "Oracle suites": approve, change, or reject each. Law 1 (the registry compiles and means the same type) is the one that would have caught F1.
+6. Two statements that disagree and need one answer: `AGENTS.md` says selection uses "an existing AST query language" while an adopted law says `select` is the sole selection API; and repeated `original()` is called provisional while a law enforces its exact count.
+7. The benchmark sequence at the end of this file: approve, or change.
 
 ---
 
@@ -29,11 +31,19 @@ Nothing in `src/`, `tests/`, or `bench/` was changed by this review. The laws be
 
 Ordered by how much a user would be hurt.
 
-### F1. Types from Node built-in modules break `tsc` for the whole project
+### F1. The registry names types that do not resolve, and `tsc` fails for the whole project
 
-**Kind:** possible bug.
+**Kind:** possible bug. For Node built-ins the behavior is what an adopted law prescribes, so the law is part of the finding.
 
-**The class:** the generated registry writes ambient types by bare name. That is right for true globals (`Map`, `URL`, `NodeJS.Timeout`) and wrong for every type declared inside a `declare module "..."` block, which is how `@types/node` declares nearly everything. Any selectable expression, or any local in scope of one, with such a type puts an unresolvable name into the registry. The project then fails to typecheck, including tests that never select that expression.
+**The class:** the generated registry writes some types by a name that means nothing where the registry is compiled. Any selectable expression, or any local in scope of one, with such a type breaks the typecheck of the whole project, including tests that never select that expression. Three forms:
+
+| Type of the expression or local | Emitted | Result |
+| --- | --- | --- |
+| declared inside a `declare module "..."` block, which is how `@types/node` declares nearly everything | `Stats` | `TS2304: Cannot find name 'Stats'` |
+| a member of the project's own exported enum, or a union of members such as an optional enum parameter | `Status.Ok`, `(undefined \| Status.Ok \| Status.Err)` | `TS2503: Cannot find namespace 'Status'` |
+| a bare name that the library also exports (`vm.createContext()` returns `Context`) | `Context` | binds to the library's own `Context<Result, Locals>` |
+
+Bare names are right only for true globals (`Map`, `URL`, `NodeJS.Timeout`).
 
 ```ts
 // src/files.ts, listed in points.ep, never selected by any test
@@ -47,19 +57,27 @@ points.ep(9,227): error TS2304: Cannot find name 'Stats'.
   This location is in virtual code produced by the content mapper ... and has no corresponding location in the original file.
 ```
 
-Expected: exit 0, as for the same project without `src/files.ts`. Observed: exit 2. Vitest still passes, so only the typecheck tells you.
+Expected: exit 0, as for the same project without `src/files.ts`. Observed: exit 2. Vitest still passes, so only the typecheck tells you. The enum form needs no dependency at all:
 
-A second form of the same class is a wrong binding instead of a missing one: `vm.createContext()` is emitted as `Context`, which inside the registry's `declare module 'execution-points-prototype'` block resolves to the library's own `Context<Result, Locals>`.
+```ts
+// src/status.ts, listed in points.ep
+export enum Status { Ok, Err }
+export function describe(status?: Status) { return String(status ?? Status.Ok) }
+```
 
-**Why I think it's wrong:** `README.md:7` says the content mapper works with `tsc --noEmit --runExternalCode`. `BENCHMARK-LOG.md:107` records the same failure for `Timeout` and the decision to fix it by qualifying the name (`NodeJS.Timeout`); `qualifyAmbientName` (`src/contracts.mjs:96`) only walks namespaces with identifier names, so `declare module "fs"` is skipped.
+```text
+points.ep(9,303): error TS2503: Cannot find namespace 'Status'.
+```
+
+**Why I think it's wrong:** `README.md:7` says the content mapper works with `tsc --noEmit --runExternalCode`. `BENCHMARK-LOG.md:107` records the same failure for `Timeout` and the decision to fix it by qualifying the name (`NodeJS.Timeout`); `qualifyAmbientName` (`src/contracts.mjs:96`) only walks namespaces with identifier names, so `declare module "fs"` is skipped. That skip is written into Law C3 of the contracts oracle, which says ambient types get their qualified name "ignoring declare global and string-literal module wrappers" (`tests/contracts.oracle.property.test.ts:669`). The law states the algorithm instead of the promise a user relies on, which is that the registry compiles.
 
 **Why it matters:** most server code touches `fs`, `http`, `child_process`, `crypto`, or `stream`. One call anywhere in a target is enough. In the benchmark this can only hurt the treatment arm, because `contractTypecheckPass` runs only there; `cancel-commit` imports `node:fs/promises`, so a fix that calls `stat()` or `open()` would fail the treatment trial for a reason the agent cannot see. It has not happened in the 69 stored treatment trials.
 
-**Why the tests miss it:** the contracts oracle reaches ambient types in two histories, both for namespaces (`ambient-and-global-namespaces: 2` in the run output). None uses a type from an ambient module. `resolveExternal` and `isAmbientOrGlobal` also have open gaps.
+**Why the tests miss it:** nothing compiles the registry. The contracts oracle compares the emitted text with expected strings. The types oracle does compile, but it adds the registry as a `.d.ts` file with `skipLibCheck` on and keeps only the diagnostics of the test snippet (`tests/types.oracle.property.test.ts:114`, `:148`, `:157`), so an error inside the registry cannot surface.
 
-**How often:** 22 of 38 common Node built-in calls (58%), every one whose result type is declared in an ambient module. Probes: `p18-node-builtin-grid.mjs`, `p08-e2e-node-builtin-types.mjs`, `p05-library-types-in-registry.mjs`.
+**How often:** 22 of 38 common Node built-in calls (58%), every one whose result type is declared in an ambient module; and both enum shapes I tried. Probes: `p18-node-builtin-grid.mjs`, `p08-e2e-node-builtin-types.mjs` (real `tsc`, both forms), `p21-registry-type-fidelity.mjs`, `p05-library-types-in-registry.mjs`.
 
-**Direction:** emit `import("node:fs").Stats` when the declaration sits in a string-named ambient module, and keep bare names only for declarations with no module parent.
+**Direction:** emit `import("node:fs").Stats` when the declaration sits in a string-named ambient module, anchor enum members to their enum's import path, and keep bare names only for declarations with no module parent. The law to hold it is potential law 1 below.
 
 ### F2. The editor keeps stale types when a non-target file changes
 
@@ -130,6 +148,7 @@ selector resolves to (after ): cache.get(id)
 | `UserCache.get` and `OrderCache.get` in one file | identical descriptors; only `nth` differs |
 | `cache.get(id)` and `db.get(id)` in one function | `callee: 'get'` twice; only `nth` differs |
 | class field arrows, `export default function` | `inFunction: '(anonymous)'` |
+| `this.handler!(1)`, `(client.send)(2)`, `client[key](3)` | `callee: '(anonymous)'` |
 | any two ternaries in one function | no name at all; only `nth` differs |
 | `a + b + c` | the outer `+` is `nth: 0`, the inner `a + b` is `nth: 1` |
 
@@ -288,14 +307,52 @@ At 200 targets and 5,000 modules that is about 8 seconds per cold run on a quiet
 
 | Finding | Evidence |
 | --- | --- |
-| A captured local can be in its temporal dead zone. `capture('limit')` throws `ReferenceError` inside the application where the uninstrumented code returns 7. Discovery offers every binding declared earlier in the source, not every binding initialized at that point. | `p16-capture-and-original-semantics.mjs` |
 | An ambiguous selection is reported only when a method is called on the result. `export const points = [select(...)]` with two matches compiles. | `p15-compile-errors-as-a-user-sees-them.mjs` |
 | A local with an unportable type disappears from `capture`'s accepted names with no reason: `'"item"' is not assignable to parameter of type '"id"'`. | same probe |
 | The unportable message says the expression "cannot be selected directly". There is no indirect way. | same probe |
 | Registry errors have no source mapping (`mappings: []`), so F1 is reported at `points.ep(9,227)`. | `src/content-mapper.mjs:103` |
 | The README's Vitest config imports `./src/discovery.mjs` (`README.md:147`), which the package does not export. A consumer has to repeat the targets in `vitest.config.mjs`, as the benchmark does (`bench/run.mjs:586`), and the two lists can drift. `executionPoints()` with no arguments instruments nothing. | `package.json` exports |
 | `src/content-mapper.mjs:153-159` attaches `stdin` listeners at import time, so the oracle that imports it gets them too. | file |
+| The plugin inserts its import before a leading directive such as `'use client'` (`importOffset` skips only a BOM and a shebang, `src/plugin.mjs:132-139`), so the string is no longer a directive. Whether any framework in a test run depends on it is not verified. | file |
 | `checks/verify.mjs:318` still says `fromFile()`; `bench/EXECUTION_POINTS_GUIDE.md` is referenced by nothing, shows the old verbose selector, and awaits the overlapping operation while holding the barrier, which the current guide forbids. | `grep` |
+
+### F14. Discovery offers captures that are not initialized when the point runs
+
+**Kind:** possible bug.
+
+**The class:** discovery offers every binding declared earlier in the source. Two shapes make such a binding unreadable at the moment the expression runs: a hoisted function called before a later `const`, and a `switch` in which a later `case` declares the same name as an outer binding.
+
+```ts
+export function route(k) {
+  const a = 'outer'
+  switch (k) {
+    case 0: return send(k)      // capture('a') is offered here
+    default: let a = 1; return a
+  }
+}
+```
+
+```text
+capture('a') at send(k) inside switch -> ReferenceError: Cannot access 'a' before initialization   (without the capture, route(0) returns 0)
+capture('limit') at compute(1)        -> ReferenceError: Cannot access 'limit' before initialization   (without the capture, early() returns 7)
+```
+
+The error is thrown inside the application call, and the registry gives the capture a type.
+
+**Why I think it's wrong:** Law D3 of the discovery oracle says captures are bindings "initialized before start and is not shadowed by an uninitialized declaration of the same name in an inner enclosing scope" (`tests/discovery.oracle.property.test.ts:742`). The `switch` shape is exactly that. The law is checked on eight fixed source templates, none with a `switch`, and none executes the code.
+
+**How often:** both shapes tried. Probe: `p16-capture-and-original-semantics.mjs`.
+
+### F15. Two shapes where the registry's type is not the expression's type
+
+**Kind:** possible bug.
+
+| Original type | Emitted | Effect |
+| --- | --- | --- |
+| `{ [Symbol.iterator](): Iterator<number>; size: number }` | `{ "__@iterator@2814...": ...; "size": number }` | a handler returning `new Set<number>()`, which the original type accepts, is rejected with TS2741 |
+| a private alias of an array, `type Items = Item[]`, not reachable from an export | `never` with "Object type has too many properties to inline" | the call cannot be selected; the same code with `Item[]` written out works |
+
+`README.md:61` says the replacement's result must match the selected expression's inferred type. Both shapes tried are wrong; the control passes. Probe: `p21-registry-type-fidelity.mjs`.
 
 ### What held
 
@@ -310,29 +367,77 @@ At 200 targets and 5,000 modules that is about 8 seconds per cold run on a quiet
 
 ## Oracle suites
 
+### What the gap check shows
+
 Gap check at `b26e2c1`, seed 42: 1,472 changes tried, 1,214 noticed, **248 gaps**, 10 changes in functions no oracle owns. All six oracle files pass on the unchanged code.
 
 | Owned file | Gaps |
 | --- | --- |
-| `src/runtime.mjs` | 0 |
-| `src/discovery.mjs` | 0 |
-| `src/plugin.mjs` | 0 |
-| `src/contracts.mjs` | 216 |
-| `src/content-mapper.mjs` | 32 |
+| `src/runtime.mjs` | 0 of 87 |
+| `src/discovery.mjs` | 0 of 257 |
+| `src/plugin.mjs` | 0 of 121 |
+| `src/contracts.mjs` | 216 of 821 |
+| `src/content-mapper.mjs` | 32 of 186 |
+| `src/runtime.d.ts` | not checked: it is not in the gap check's source list in `AGENTS.md` |
 
-Gaps by function: `buildExportIndex` 49, `emit` 44, `generateFileRegistryModule` 31, `isNominalUnexported` 22, `transform` 12, `projectNested` 10, `emitSig` 10, `handleInputChunk` 9, `emitHelper` 8, `renderFileModule` 8, then 16 functions with 6 or fewer.
+What the 248 leave unguarded, by group:
 
-The picture is consistent: the three files with no gaps produced no correctness finding from my probes (F6 and F12 are about work, which no law bounds yet), and the two files with gaps produced F1, F2, F3, F9, and F10. `AGENTS.md` says green is not done, so these 248 are open work under the existing laws. The largest groups to close first are the ones next to the confirmed defects: how external and ambient names are resolved (`buildExportIndex`, `resolveExternal`, `isAmbientOrGlobal`), and what the mapper does across a sequence of edits (`generateFileRegistryModule`, `transform`, `getSnapshotCache`).
+| Group | Gaps | Behavior no law notices |
+| --- | --- | --- |
+| `buildExportIndex` and its helpers | 70 | which `import("...")` path a private type gets: the depth and property limits, the shortest-path choice, the `NonNullable` / `Awaited` / `[number]` / `ReturnType` / `Parameters` steps |
+| `emit`, `emitSig`, `emitMembers`, `emitHelper`, `isReadonlyProp`, `isPrivateMember` | 75 | the emitted type text: enum literals, recursive types, variadic tuples, rest and optional parameters, helper interface bodies |
+| `isNominalUnexported` | 22 | the brand on private enums and classes |
+| `generateFileRegistryModule` | 31 | cache key and bookkeeping, snapshot disposal, the global-script skip, nodes with no AST match |
+| `projectNested`, `renderFileModule` | 18 | order and closing of nested probe insertions, file and locals order, closing braces |
+| `transform`, `handleInputChunk`, `getSnapshotCache`, `openProject`, `scanProject` | 32 | that the project root and tsconfig are used, that the warm cache is used at all, the `diagnostics` field |
 
-Potential laws that the findings suggest, each needing approval:
+Three of these are worth reading as written in the log: deleting the registry's closing braces survives all three owning oracles (`contracts.mjs:M819`), replacing every helper interface body with `undefined` survives (`M427`, `M429`), and all six changes to `getSnapshotCache` survive.
 
-1. For every target whose expressions or locals have a type that the project can name, the generated registry typechecks in that project with zero diagnostics. Authority: `README.md:7`. Would have caught F1.
+### What the gap check does not show
+
+Zero gaps means every small syntactic change is noticed. It does not mean the promises in the README are held. I put seven deliberately wrong versions into scratch copies of the repository and ran each through the gap check. Every one reported `baseline all N oracle files pass`:
+
+| Wrong version | Promise it breaks | Oracles | Caught by anything else |
+| --- | --- | --- | --- |
+| captured locals become live getters (`src/runtime.mjs:110`) | primitive captures are snapshots (`README.md:95`) | pass | no: the 11 example tests pass too |
+| captured objects are frozen clones and the async result is re-wrapped (`src/runtime.mjs:48`, `:110`) | objects stay shared and mutable (`README.md:88-92`); the same promise is returned (`README.md:99`) | pass | one example test |
+| the wrapper climb drops `x!`, `<T>x`, and `x satisfies T` (`src/discovery.mjs:40-42`) | reference-only positions are skipped (`README.md:175`) | pass | no |
+| the source map is generated from the untransformed code (`src/plugin.mjs:103`) | stack traces and coverage point at the right line | pass | no |
+| a handler may return anything for a non-void expression (`HandlerResult` in `src/runtime.d.ts`) | the result must match (`README.md:61`) | all six pass | `checks/verify.mjs` |
+| `locals` is writable in the handler type | readonly locals (`README.md:82`) | all six pass | `checks/verify.mjs` |
+| `point.capture(...)` always types `locals` as `{}` | captured locals are typed (`README.md:59`) | all six pass | `pnpm check` on the examples |
+
+The first four are one-to-four-line edits found by an independent review of the oracle files; I reran all seven myself. So the type contract's main promises are held by `checks/verify.mjs` and the examples, not by the type oracle, and the snapshot promise is held by nothing.
+
+### Why
+
+- **Most laws are tables of examples.** The review counted 17 of the 22 laws as a fixed list of scenario labels mapped to literal expected answers, with only runtime Laws 1 to 3 and discovery D2 (and partly D4) computing the answer from generated inputs. In the contracts oracle the expected strings are production's own output format, so a correct refactor of the formatting would fail and a wrong type with the same text passes.
+- **The calibrations corrupt a field the check already compares.** They show the comparison is deep. They cannot show a missing observation, which is what all seven wrong versions exploit.
+- **Nothing compiles the registry** (see F1), and the type oracle's negative cases pass on any diagnostic at all, not on the expected code and position.
+
+### Laws and their authority
+
+| Inconsistency | Where |
+| --- | --- |
+| `AGENTS.md` "Agreed direction" says to select "using an existing AST query language". Runtime Law 4 records a decision of 2026-11-22 that "`select` is the sole selection API". One of the two is stale. | `AGENTS.md`; `tests/runtime.oracle.property.test.ts:59-61` |
+| `AGENTS.md` and `README.md:105` call repeated `original()` provisional and undecided. Runtime Law 2 enforces the exact evaluation count. | `tests/runtime.oracle.property.test.ts`, Law 2 model |
+| Law C3 prescribes the bare-name behavior behind F1. | `tests/contracts.oracle.property.test.ts:669` |
+| Laws cite README line numbers that have moved. For example the contracts oracle cites `README.md:170-171` for sentences now at `:173` and `:167`. The review counted ten such citations. | `tests/contracts.oracle.property.test.ts:909` |
+
+Reported by the review and not rechecked by me: several "reach" labels count the wrong scenario (for example `global-script-ignored` is entered by a fixture with no selectable expression, so it passes whether or not scripts are skipped); six laws cite production code as their authority; the plugin oracle's prose names two things (`sourcesChanged`, `watchFiles`) that do not exist in `src/plugin.mjs`. The same review found discovery offsets correct with non-ASCII text.
+
+### Potential laws
+
+Each needs approval. The first five come from the library findings, the rest from the wrong versions above.
+
+1. For every target whose expressions and locals have types the project can name, the generated registry compiled as `.ts` beside the target has no diagnostics of its own, and each node's `result` and `locals` are mutually assignable with the type TypeScript gives the original expression. Authority: `README.md:7`, `:61`. Would have caught F1 and F15. It replaces the text comparison in C1 and C3.
 2. For every sequence of edits to targets and to the files they import, the registry the warm mapper returns equals the registry a cold mapper returns. Authority: `README.md:167`. Would have caught F2.
-3. For every target file, the set of files and node ids in the registry equals the set the plugin registers at runtime. Authority: the existing parity decision of 2026-11-24, widened from nodes to files. Would have caught F9.
+3. For every target file, the files and node ids in the registry equal the ones the plugin registers at runtime. Authority: the parity decision of 2026-11-24, widened from nodes to files. Would have caught F9.
 4. For every manifest, either the registry reflects exactly the listed targets that exist, or a diagnostic names what is wrong. Authority: `src/content-mapper.mjs:31`. Would have caught F10.
 5. For every capture name passed at runtime, the name is a capture the point offers, or installing the replacement throws. Authority: `README.md:59`. Would have caught F8.
-
-A separate review of the six oracle files is in progress; its results will be added here.
+6. For every capture the registry offers at a point, reading it when the instrumented code reaches that point succeeds. The model is JavaScript's own scoping; the driver has to execute the code. Authority: Law D3's own sentence. Would have caught F14.
+7. For every captured primitive, the value in `locals` is the value at interception and does not change when the application's binding changes; for every captured object, `locals` holds the application's own object. Authority: `README.md:88-95`.
+8. For every pair of expression type and handler return type, the handler is accepted exactly when TypeScript would assign the return type to the expression type; `locals` rejects assignment; `capture` on a point types exactly the named locals. Authority: `README.md:59-61`, `:82`. Adding `src/runtime.d.ts` to the gap check's sources would give mutation evidence for it.
 
 ---
 
@@ -434,13 +539,15 @@ If you want a number sooner than that, step 2 alone is cheap and honest. Rerunni
 | `p12-selector-vocabulary.mjs`, `p14-nth-shifts-silently.mjs` | F4 |
 | `p13-scope-vs-shared-worker.mjs` | F5 |
 | `p15-compile-errors-as-a-user-sees-them.mjs` | F13, what held for compiler messages |
-| `p16-capture-and-original-semantics.mjs` | F13 (dead zone), what held for `original()` |
+| `p16-capture-and-original-semantics.mjs` | F14, what held for `original()` |
 | `p18-node-builtin-grid.mjs` | F1: 22 of 38 |
 | `p19-project-ambient-types.mjs` | F3 |
 | `p20-typecheck-cost-vs-file-size.mjs` | what held: typecheck cost |
+| `p21-registry-type-fidelity.mjs` | F1 (enum members), F15 |
 
 `probes/lib.mjs`, `probes/types.mjs`, and `probes/e2e.mjs` are shared helpers. `e2e.mjs` builds a real consumer project with the package copied into its `node_modules`, the way `bench/toolchain.mjs` does, and runs the real `tsc` and Vitest on it.
 
 ## Changelog
 
 - 2026-11-24: first version at `b26e2c1`. Library findings F1 to F13, gap check, feature ideas, benchmark assessment from the stored results. Harness audit and oracle-file review still running.
+- 2026-11-24: added the oracle-file review. Each claim taken from it was rerun before it went in. F1 widened to the project's own enums (confirmed through real `tsc`) and tied to Law C3. New F14 (captures in the dead zone, moved out of F13 and extended with the `switch` shape) and F15 (registry type differs from the expression's type). "Oracle suites" rewritten: seven wrong versions that pass every oracle file, why, law and authority inconsistencies, eight potential laws. Harness audit still running.
