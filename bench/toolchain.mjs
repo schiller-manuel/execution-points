@@ -228,35 +228,102 @@ function stripNonTrialEntries(nmDir) {
   }
 }
 
+/** Written into every temp root this harness creates; names the process that owns it. */
+export const OWNER_FILE = '.ep-owner.json'
+
+const SWEEP_PREFIXES = [
+  'ep-grader-',
+  'ep-bench-toolchains-',
+  'ep-bench-',
+  'ep-ws-',
+  'ep-ownfix-',
+  'ep-test-eval-',
+  'ep-copilot-home-',
+  'ep-trial-tmp-',
+  'ep-run-',
+  'ep-regrade-',
+  'ep-selftest-',
+]
+
+function writeOwnerFile(dir) {
+  writeFileSync(
+    path.join(dir, OWNER_FILE),
+    JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), argv: process.argv.slice(1, 4) }) + '\n',
+  )
+}
+
 /**
- * Startup sweep of any orphaned `ep-grader-*` / `ep-bench-toolchains-*` / `ep-ws-*`
- * temp dirs left behind by killed prior runs (closes I-01).
+ * Creates a temp root owned by this process: a fresh directory under
+ * `parentDir` with an owner record in it. Everything a run, a re-grade or a
+ * self-test creates goes under one such root, so a later sweep can tell whose
+ * it is.
  */
-export function sweepStaleTempDirs() {
-  const root = realpathSync(tmpdir())
-  const prefixes = [
-    'ep-grader-',
-    'ep-bench-toolchains-',
-    'ep-bench-',
-    'ep-ws-',
-    'ep-ownfix-',
-    'ep-test-eval-',
-    'ep-copilot-home-',
-    'ep-trial-tmp-',
-    'ep-run-',
-  ]
-  let removed = 0
+export function createOwnedTempRoot(prefix, parentDir = realpathSync(tmpdir())) {
+  // N-00: realpath so macOS /var -> /private/var matches CLI paths
+  const dir = realpathSync(mkdtempSync(path.join(parentDir, prefix)))
+  writeOwnerFile(dir)
+  return dir
+}
+
+/** True when a process with this pid exists (also when it belongs to another user). */
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
   try {
-    for (const name of readdirSync(root)) {
-      if (prefixes.some((p) => name.startsWith(p))) {
-        rmSync(path.join(root, name), { recursive: true, force: true })
-        removed++
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return err?.code === 'EPERM'
+  }
+}
+
+/**
+ * Removes orphaned `ep-*` temp roots left behind by killed runs (closes I-01),
+ * and ONLY those whose owning process is gone.
+ *
+ * Up to v2.3 this removed every `ep-*` directory in the temp directory,
+ * including the sandboxes of bench processes that were still running (another
+ * run, a self-test, a re-grade, possibly from another checkout). Now a
+ * directory is removed only when it carries an owner record and that process
+ * no longer exists. A directory whose owner is alive is left alone. A directory
+ * without an owner record (made by an older harness version or by another
+ * tool) is also left alone, because nothing shows that its process is gone; it
+ * is counted so the caller can say so.
+ *
+ * A pid that was reused by an unrelated process reads as alive, which errs on
+ * the side of keeping the directory.
+ */
+export function sweepStaleTempDirs({ root = realpathSync(tmpdir()) } = {}) {
+  const result = { removed: [], inUse: [], unowned: [] }
+  let names = []
+  try {
+    names = readdirSync(root)
+  } catch {
+    return result // best-effort
+  }
+  for (const name of names) {
+    if (!SWEEP_PREFIXES.some((p) => name.startsWith(p))) continue
+    const dir = path.join(root, name)
+    let owner = null
+    try {
+      if (!lstatSync(dir).isDirectory()) continue
+      owner = JSON.parse(readFileSync(path.join(dir, OWNER_FILE), 'utf8'))
+    } catch {
+      owner = null
+    }
+    if (owner === null || !Number.isInteger(owner.pid)) {
+      result.unowned.push(name)
+    } else if (owner.pid === process.pid || processIsAlive(owner.pid)) {
+      result.inUse.push(name)
+    } else {
+      try {
+        rmSync(dir, { recursive: true, force: true })
+        result.removed.push(name)
+      } catch {
+        // best-effort
       }
     }
-  } catch {
-    // best-effort
   }
-  return removed
+  return result
 }
 
 function collectWholeGraderHashEntries(graderNm, repoRoot) {
@@ -311,8 +378,10 @@ export function prepareToolchains(repoRoot, parentDir = realpathSync(tmpdir())) 
     )
   }
 
-  // N-00: Always realpath so macOS /var -> /private/var matches CLI paths
-  const baseDir = realpathSync(mkdtempSync(path.join(parentDir, 'ep-bench-toolchains-')))
+  // N-00: Always realpath so macOS /var -> /private/var matches CLI paths.
+  // The toolchain root carries an owner record even when it is nested in a run root, so a
+  // standalone caller's toolchain can be swept once that caller is gone.
+  const baseDir = createOwnedTempRoot('ep-bench-toolchains-', parentDir)
   const controlRoot = path.join(baseDir, 'trial-control')
   const treatmentRoot = path.join(baseDir, 'trial-treatment')
   const graderRoot = path.join(baseDir, 'grader')

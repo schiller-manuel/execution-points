@@ -75,7 +75,13 @@ import {
 } from './classify.mjs'
 import { extractUsageMetrics, formatUsd, MODEL_PRICING_PER_M, projectCredits } from './pricing.mjs'
 import { formatCI, matchedRiskDifferenceCI, stratifiedCMH, wilsonCI } from './stats.mjs'
-import { assertNoRepoLeak, prepareToolchains, sweepStaleTempDirs } from './toolchain.mjs'
+import {
+  assertNoRepoLeak,
+  createOwnedTempRoot,
+  OWNER_FILE,
+  prepareToolchains,
+  sweepStaleTempDirs,
+} from './toolchain.mjs'
 
 const execFileAsync = promisify(execFile)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -455,7 +461,7 @@ function parseArgs(argv) {
     only: null, // --regrade: comma-separated trial ids (or substrings) to re-grade
     maxConsecutiveInfra: 3, // N-05: abort run after k consecutive infra failures
     skipPreflight: false,
-    sweepStale: false, // N-01: opt-in sweep so concurrent runs are never clobbered
+    sweepStale: false, // N-01: opt-in; removes only temp roots whose owning process is gone (sweepStaleTempDirs)
     seed: 42,
     phaseSplit: true,
     keepWorkspaces: false,
@@ -2341,7 +2347,7 @@ export function checkGuideParity() {
  * `contractTypecheckPass` and accepted in control, so this must be green
  * before a paid run.
  */
-async function typecheckCalibrationVariants(toolchains, { concurrency = 4 } = {}) {
+async function typecheckCalibrationVariants(toolchains, { concurrency = 4, parentDir = realpathSync(tmpdir()) } = {}) {
   const perTask = []
   for (const taskId of Object.keys(TASKS)) {
     const baseline = readTaskBaselineFiles(taskId)
@@ -2364,7 +2370,7 @@ async function typecheckCalibrationVariants(toolchains, { concurrency = 4 } = {}
   const results = []
   const runOne = async ({ taskId, arm, variants }) => {
     const task = TASKS[taskId]
-    const { dir: ws } = createWorkspace({ taskId, arm, promptStyle: 'symptom', toolchains })
+    const { dir: ws } = createWorkspace({ taskId, arm, promptStyle: 'symptom', toolchains, parentDir })
     try {
       const tscBin = path.join(ws, 'node_modules/.bin/tsc')
       const tscArgs = arm === 'treatment' ? ['--noEmit', '--runExternalCode'] : ['--noEmit']
@@ -2398,7 +2404,10 @@ async function typecheckCalibrationVariants(toolchains, { concurrency = 4 } = {}
 async function runSelfTest() {
   console.log(`Running ${HARNESS_VERSION} hardened benchmark self-test (every graded variant runs ${DEFAULT_GRADE_REPEATS}x and must agree)...\n`)
   const provenance = computeProvenance()
-  const toolchains = prepareToolchains(REPO_ROOT)
+  // One owned temp root for everything this self-test creates, so a later `--sweep-stale`
+  // of any bench process can tell it is in use (or, after a kill, that its owner is gone).
+  const selfTestRoot = createOwnedTempRoot('ep-selftest-')
+  const toolchains = prepareToolchains(REPO_ROOT, selfTestRoot)
   let failures = 0
   let cheatCount = 0 // G-8: hoist out of try block so final summary never throws ReferenceError!
 
@@ -2494,6 +2503,7 @@ async function runSelfTest() {
         arm: 'treatment',
         promptStyle: 'symptom',
         toolchains,
+        parentDir: selfTestRoot,
       })
       try {
         writeFileSync(
@@ -2735,7 +2745,7 @@ test('selects in a file that is not a target', async () => {
       const workspaces = {}
       try {
         for (const arm of ['control', 'treatment']) {
-          workspaces[arm] = createWorkspace({ taskId: 'stale-cache', arm, promptStyle: 'symptom', toolchains }).dir
+          workspaces[arm] = createWorkspace({ taskId: 'stale-cache', arm, promptStyle: 'symptom', toolchains, parentDir: selfTestRoot }).dir
         }
         for (const c of e2e) {
           const ws = workspaces[c.arm]
@@ -2836,6 +2846,7 @@ test('fails on the first run only', () => {
         provenance,
         copilotVersion: 'self-test',
         toolchains,
+        parentDir: selfTestRoot,
       })
       const rejected = graded.solved === false
       console.log(
@@ -2867,6 +2878,7 @@ test('fails on the first run only', () => {
         provenance,
         copilotVersion: 'self-test',
         toolchains,
+        parentDir: selfTestRoot,
       })
       const vf = graded.validFixRobustness ?? { trueGreenCount: 0, total: 0 }
       const ok =
@@ -2910,7 +2922,7 @@ test('fails on the first run only', () => {
       const PROBE_RUNS = 10
       const tally = {}
       for (const mode of ['deterministic', 'real']) {
-        const dir = realpathSync(mkdtempSync(path.join(realpathSync(tmpdir()), 'ep-selftest-io-')))
+        const dir = realpathSync(mkdtempSync(path.join(selfTestRoot, 'ep-selftest-io-')))
         try {
           const cfg = writePristineWorkspaceConfigs(
             dir,
@@ -2955,7 +2967,7 @@ test('fails on the first run only', () => {
     for (const taskId of Object.keys(TASKS)) {
       const task = TASKS[taskId]
       for (const arm of ['control', 'treatment']) {
-        const { dir: ws } = createWorkspace({ taskId, arm, promptStyle: 'symptom', toolchains })
+        const { dir: ws } = createWorkspace({ taskId, arm, promptStyle: 'symptom', toolchains, parentDir: selfTestRoot })
         try {
           const vitestRes = await runVitestClassified(ws, task.testRel, {
             configPath: path.join(ws, 'vitest.config.mjs'),
@@ -2981,7 +2993,7 @@ test('fails on the first run only', () => {
     // 9. Every calibration variant must typecheck in BOTH arms, not only the baselines
     console.log('9) Typecheck of every reference fix, valid fix, single-bug mutant and buggy refactor (control: tsc --noEmit; treatment: tsc --noEmit --runExternalCode)...')
     {
-      const results = await typecheckCalibrationVariants(toolchains)
+      const results = await typecheckCalibrationVariants(toolchains, { parentDir: selfTestRoot })
       const byVariant = new Map()
       for (const r of results) {
         const e = byVariant.get(r.key) ?? { ...r, arms: {} }
@@ -3027,6 +3039,7 @@ test('fails on the first run only', () => {
         srcFilesOrDir: srcFiles,
         toolchains,
         runVisibleToo: true,
+        parentDir: selfTestRoot,
       })
       const actualPass = res.oraclePass && res.visibleTestsPass
       const matched = actualPass === v.expectPass
@@ -3050,6 +3063,7 @@ test('fails on the first run only', () => {
           srcFilesOrDir: m.files,
           toolchains,
           runVisibleToo: true,
+          parentDir: selfTestRoot,
         })
         const rejected = !(res.oraclePass && res.visibleTestsPass)
         console.log(
@@ -3102,8 +3116,40 @@ test('fails on the first run only', () => {
       if (problems.length === 0) console.log('   PASS: the protocol and all file headers agree.')
     }
 
-    // 15. A matrix that does not fit the credit cap is refused before it starts
-    console.log('\n15) Credit projection (a rerun of the last stored matrix does not fit the default cap)...')
+    // 15. --sweep-stale removes only temp roots whose owning process is gone
+    console.log('\n15) Stale temp sweep (a root owned by a live process, and one without an owner record, are never removed)...')
+    {
+      const sweepParent = realpathSync(mkdtempSync(path.join(selfTestRoot, 'sweep-check-')))
+      const mine = createOwnedTempRoot('ep-run-', sweepParent)
+      const orphan = createOwnedTempRoot('ep-run-', sweepParent)
+      const dead = spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' })
+      writeFileSync(path.join(orphan, OWNER_FILE), JSON.stringify({ pid: dead.pid, startedAt: new Date().toISOString() }))
+      const otherLive = createOwnedTempRoot('ep-ws-', sweepParent)
+      writeFileSync(path.join(otherLive, OWNER_FILE), JSON.stringify({ pid: process.ppid, startedAt: new Date().toISOString() }))
+      const unowned = realpathSync(mkdtempSync(path.join(sweepParent, 'ep-grader-')))
+      const unrelated = realpathSync(mkdtempSync(path.join(sweepParent, 'not-ours-')))
+      const swept = sweepStaleTempDirs({ root: sweepParent })
+      const ok =
+        swept.removed.length === 1 &&
+        swept.removed[0] === path.basename(orphan) &&
+        !existsSync(orphan) &&
+        existsSync(mine) &&
+        existsSync(otherLive) &&
+        existsSync(unowned) &&
+        existsSync(unrelated) &&
+        swept.inUse.length === 2 &&
+        swept.unowned.length === 1
+      console.log(
+        `   ${ok ? 'PASS' : 'FAIL'}: removed ${swept.removed.length} (owner pid ${dead.pid} has exited), kept ${swept.inUse.length} owned by live processes and ${swept.unowned.length} without an owner record.`,
+      )
+      if (!ok) {
+        failures++
+        console.error('     ', swept)
+      }
+    }
+
+    // 16. A matrix that does not fit the credit cap is refused before it starts
+    console.log('\n16) Credit projection (a rerun of the last stored matrix does not fit the default cap)...')
     {
       const lastMatrix = []
       for (const spec of ['gpt-6.2-sol:low', 'gpt-6.2-sol:medium', 'claude-haiku-5.5:low', 'claude-haiku-5.5:medium']) {
@@ -3129,6 +3175,7 @@ test('fails on the first run only', () => {
   } finally {
     closeAuditApi()
     toolchains.cleanup()
+    rmSync(selfTestRoot, { recursive: true, force: true })
   }
 
   console.log()
@@ -3355,7 +3402,7 @@ async function runRegrade(regradeDir, { outDir = null, only = null, gradeRepeats
   }
 
   const current = computeProvenance()
-  const runTmpRoot = realpathSync(mkdtempSync(path.join(realpathSync(tmpdir()), 'ep-regrade-')))
+  const runTmpRoot = createOwnedTempRoot('ep-regrade-')
   const toolchains = prepareToolchains(REPO_ROOT, runTmpRoot)
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const targetDir = outDir ?? regradeDir
@@ -3538,7 +3585,9 @@ async function main() {
   // N-01: Only sweep stale temp dirs when explicitly requested (--sweep-stale)
   if (opts.sweepStale) {
     const swept = sweepStaleTempDirs()
-    if (swept > 0) console.log(`Startup sweep removed ${swept} stale ep-* temp dir(s).`)
+    console.log(
+      `Startup sweep: removed ${swept.removed.length} ep-* temp dir(s) whose owning process is gone; left ${swept.inUse.length} that belong to a running process and ${swept.unowned.length} without an owner record (older harness version or another tool; remove those by hand if you know they are stale).`,
+    )
   }
 
   const runId = randomUUID()
@@ -3555,7 +3604,7 @@ async function main() {
   }
 
   // N-01: Run-scoped temp root so cleanup/signals never clobber concurrent runs
-  const runTmpRoot = realpathSync(mkdtempSync(path.join(realpathSync(tmpdir()), 'ep-run-')))
+  const runTmpRoot = createOwnedTempRoot('ep-run-')
   activeTempDirs.add(runTmpRoot)
 
   console.log(
