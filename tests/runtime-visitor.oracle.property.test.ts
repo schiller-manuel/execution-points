@@ -122,6 +122,8 @@ interface VisitorHistory {
   readonly returns?: 'the-node' | 'a-capture' | 'true' | 'another-object'
   /** The handler of the last step returns the container itself instead of traversing into it. */
   readonly returnsTheContainer?: boolean
+  /** The handler of the last step returns a capture of an expression that another handler was called for. */
+  readonly returnsACaptureOfAnotherNode?: boolean
 }
 
 const VISITOR_HISTORIES: ReadonlyArray<VisitorHistory> = [
@@ -223,6 +225,14 @@ const VISITOR_HISTORIES: ReadonlyArray<VisitorHistory> = [
     returns: 'another-object',
   },
   {
+    // What `capture` returns selects the node it was called on, in the handler that was called for that node.
+    name: 'container-handler-returns-a-capture',
+    states: ['none', 'not-a-selection'],
+    steps: [{ type: 'Function', name: 'refund' }],
+    wanted: [{ kind: 'CallExpression' }],
+    returnsACaptureOfAnotherNode: true,
+  },
+  {
     name: 'handler-returns-the-container',
     states: ['none', 'not-a-selection'],
     steps: [{ type: 'Function', name: 'refund' }],
@@ -287,7 +297,7 @@ function visitorModel(history: VisitorHistory) {
   // The innermost handlers are not reached when the last step returns its container.
   const selected = new Set<string>()
   const expressionsSeen: Array<string> = []
-  if (!history.returnsTheContainer) {
+  if (!history.returnsTheContainer && !history.returnsACaptureOfAnotherNode) {
     for (const chain of chains) {
       for (const leaf of PLACED.leaves) {
         const inScope = chain.length === 0 || leaf.inside.includes(chain.at(-1)!)
@@ -299,7 +309,8 @@ function visitorModel(history: VisitorHistory) {
   }
   const isSelection = history.returns === undefined || history.returns === 'the-node' || history.returns === 'a-capture'
   const matched = isSelection ? [...selected].sort() : []
-  const returnedSomethingElse = history.returnsTheContainer ? chains.length > 0 : !isSelection && selected.size > 0
+  const returnedSomethingElse =
+    history.returnsTheContainer || history.returnsACaptureOfAnotherNode ? chains.length > 0 : !isSelection && selected.size > 0
   return {
     containersCalledFor: calledFor,
     expressionsCalledFor: expressionsSeen.sort(),
@@ -413,14 +424,25 @@ oracleProperty({
         }
         return handlers
       }
+      // An expression that a handler at the top was called for, kept for a handler that has no business with it.
+      let seenAtTheTop: VisitedExpression | undefined
       const visitorAt = (depth: number): object => {
         const step = history.steps[depth]
         if (!step) return innermost()
         return {
+          ...(history.returnsACaptureOfAnotherNode && depth === 0
+            ? {
+                CallExpression: (node: VisitedExpression) => {
+                  seenAtTheTop ??= node
+                  return undefined
+                },
+              }
+            : {}),
           [step.type]: (container: VisitedContainer) => {
             containersCalledFor[depth]!.push(container.name)
             if (step.name !== undefined && container.name !== step.name) return false
             if (history.returnsTheContainer && depth === history.steps.length - 1) return container
+            if (history.returnsACaptureOfAnotherNode && depth === history.steps.length - 1) return seenAtTheTop!.capture('kept')
             return container.traverse(visitorAt(depth + 1))
           },
         }

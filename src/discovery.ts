@@ -361,11 +361,11 @@ function callCalleeName(node: Syntax): string {
 }
 
 /** For a call made on an object, that object as the listing shows it. */
-function calledOn(node: Syntax, source: string, bomOffset: number, tree: SourceFile): { object?: string } {
+function calledOn(node: Syntax, source: string, bomOffset: number, tree: SourceFile): string | undefined {
   const callee = node.expression!
-  if (callee.kind !== SyntaxKind.PropertyAccessExpression && callee.kind !== SyntaxKind.ElementAccessExpression) return {}
+  if (callee.kind !== SyntaxKind.PropertyAccessExpression && callee.kind !== SyntaxKind.ElementAccessExpression) return undefined
   const object = callee.expression!
-  return { object: excerpt(source.slice(object.getStart(tree) + bomOffset, object.end + bomOffset)) }
+  return excerpt(source.slice(object.getStart(tree) + bomOffset, object.end + bomOffset))
 }
 
 /** The names a binding name or pattern declares; an array pattern can leave an element out. */
@@ -542,7 +542,7 @@ export function indexTargetFile(file: string, source: string, root: string, api:
               : 'ConditionalExpression'
         const extra: { callee?: string; operator?: string; object?: string } =
           kind === 'CallExpression'
-            ? { callee: callCalleeName(node), ...calledOn(node, source, bomOffset, sourceFile) }
+            ? { callee: callCalleeName(node), object: calledOn(node, source, bomOffset, sourceFile) }
             : kind === 'BinaryExpression'
               ? {
                   operator: source.slice(

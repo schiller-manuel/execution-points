@@ -55,11 +55,48 @@ const result = quotePoint.withReplacement(
 )
 ```
 
-- `node` is a discriminated union of every selectable expression in `'examples/checkout.ts'` (`kind`, `inFunction`, `callee`, `operator`, `nth`, `id`). `callee` and `operator` are mutually exclusive (`operator?: undefined` on calls, `callee?: undefined` on binary expressions), so `node.callee === 'send' && node` narrows cleanly without checking `node.kind`.
+- `node` is a discriminated union of every selectable expression in `'examples/checkout.ts'` (`kind`, `callee`, `operator`, `object`, `inFunction`, `nth`, `line`, `text`, `id`). `callee` and `operator` are mutually exclusive (`operator?: undefined` on calls, `callee?: undefined` on binary expressions), so `node.callee === 'send' && node` narrows cleanly without checking `node.kind`.
 - Returning 0 nodes or 2+ nodes (ambiguous match) is rejected at compile time (multi-match errors list the matched node IDs under `__matched`).
 - **Keep selectors minimal:** omit `inFunction` (and `nth`) whenever `callee` or `operator` is already unique in the file. Filtering on `inFunction` only when disambiguating multiple sites prevents a test from breaking (`matched 0`) when a call moves into an extracted private helper.
 - `.capture(...)` autocompletes every in-scope local at that expression and rejects unknown binding names at compile time. At runtime, a name the expression cannot see makes the evaluation throw an error that lists the locals there are. Calling `.capture()` with no arguments types `locals` as `{}`.
 - The visitor selects a node by returning that node, or `node.capture(...)`. Returning anything else, such as the boolean from `node.callee === 'send'` alone, selects nothing, and the "matched 0" error says so.
+
+### Say where the expression stands
+
+When the same call is written in several places, say which one by where it stands. The visitor can be an object keyed by node type, as in Babel: a handler is called for every node of its type, and `traverse` looks inside a function, a class, or a declaration.
+
+```ts
+// cache.set(id, name) is written in getProfile and in updateProfile
+const cachingAfterUpdate = select('examples/profile.ts', {
+  Function: (fn) =>
+    fn.name === 'updateProfile' &&
+    fn.traverse({
+      CallExpression: (call) => call.callee === 'set' && call.object === 'cache' && call,
+    }),
+})
+
+// the call that initializes `raw`
+const readingForRaw = select('examples/profile.ts', {
+  VariableDeclarator: (declared) => declared.name === 'raw' && declared.traverse({ CallExpression: (call) => call }),
+})
+```
+
+| Key | The handler is called for | Properties to compare |
+| --- | --- | --- |
+| `CallExpression` | every selectable call in scope | `callee`, `object` (what the call is made on, as written: `cache` in `cache.get(key)`), `line`, `text`, `nth` |
+| `BinaryExpression` | every selectable binary operation | `operator`, `line`, `text`, `nth` |
+| `ConditionalExpression` | every selectable ternary | `line`, `text`, `nth` |
+| `Function` | every function, method, accessor, constructor and arrow function with a selectable expression inside it | `name`, `line` |
+| `Class` | every class with one inside it | `name`, `line` |
+| `VariableDeclarator` | every `const`, `let` or `var` name whose initializer has one inside it | `name`, `line` |
+
+- In scope means: the whole file for the visitor given to `select`, and everything inside the container, however deep, for the visitor given to its `traverse`. A call inside a callback inside a method is inside the method and inside the class.
+- A handler for an expression returns the node (or `node.capture(...)`) to select it. A handler for a container returns `container.traverse(visitor)`. Anything else selects nothing.
+- `Function` and `Class` are Babel's alias keys: one key for every kind of function, one for every kind of class. A function or class assigned to a constant has the constant's name, as `fn.name` has in JavaScript; an anonymous one has `''`.
+- `text` is the expression on one line, as `execution-points list` prints it; `line` counts from 1. Both tie a test to the source text, so use them when nothing else tells two expressions apart.
+- The compiler follows every step. A handler is typed with exactly the nodes in its scope, so `fn.name === 'chekout'` is a compile error when no such function is inside, and the selected point has the type of the one expression that is left. Selecting none, or more than one, is a compile error when the point is used, as with the callback form. An expression that two functions lead to is still one expression.
+
+Only properties that sit directly on the node can be compared, in both forms. A Babel `path` would let you write `path.node.callee.object.name` or `path.findParent(...)`, but TypeScript does not narrow a value through a nested property or a callback, so the compiler would no longer know which expression was selected (`node probes/p30-what-the-compiler-can-follow.mjs`). `traverse` is the step it does follow.
 
 The replacement's result must match the selected expression's inferred type. A `Promise<number>` expression requires a `Promise<number>` replacement; a synchronous `Quote` expression requires a `Quote` replacement; an `async` handler on a synchronous `void` expression is rejected at compile time. The checker does not automatically unwrap promises.
 
@@ -260,17 +297,17 @@ npx execution-points list examples/checkout.ts
 ```
 
 ```text
-examples/checkout.ts:39:17  kind=CallExpression callee=send inFunction=checkout nth=0 id=examples/checkout.ts#checkout:CallExpression:send:0  getClient().send(order.id, attempt++)
-examples/checkout.ts:39:17  kind=CallExpression callee=getClient inFunction=checkout nth=0 id=examples/checkout.ts#checkout:CallExpression:getClient:0  getClient()
+examples/checkout.ts:39:17  kind=CallExpression callee=send object=getClient() inFunction=checkout nth=0 inside=Function:checkout>VariableDeclarator:quote id=examples/checkout.ts#checkout:CallExpression:send:0  getClient().send(order.id, attempt++)
+examples/checkout.ts:39:17  kind=CallExpression callee=getClient inFunction=checkout nth=0 inside=Function:checkout>VariableDeclarator:quote id=examples/checkout.ts#checkout:CallExpression:getClient:0  getClient()
 ```
 
-Each line is one selectable expression of the target: where it starts (`file:line:column`, both counted from 1), the fields a visitor reads under the names it reads them by, and the expression's text on one line, cut to 72 characters. So `grep callee=send` finds the call, and `node.callee === 'send' && node` selects it.
+Each line is one selectable expression of the target: where it starts (`file:line:column`, both counted from 1), the fields a visitor reads under the names it reads them by, what the expression stands inside (`inside=`, outermost first: the containers a visitor object traverses into), and the expression's text on one line, cut to 72 characters. So `grep callee=send` finds the call, and `node.callee === 'send' && node` selects it. A value with a space in it is written in JSON quotes.
 
 | Command | Prints |
 | --- | --- |
 | `npx execution-points list <file>` | The selectable expressions of one target file. |
 | `npx execution-points list` | The same for every target that `points.ep` lists. |
-| `npx execution-points list --json` | The same entries as one JSON array (`file`, `line`, `column`, `id`, `kind`, `callee` or `operator`, `inFunction`, `nth`, `text`). |
+| `npx execution-points list --json` | The same entries as one JSON array (`file`, `line`, `column`, `id`, `kind`, `callee` or `operator`, `object`, `inFunction`, `nth`, `inside`, `text`). |
 
 The command lists exactly what the Vite plugin registers when the tests run. It reads `points.ep` in the directory it is started in. A file that is not a target, a file that does not exist, and a missing or broken manifest are answered with a reason on the error stream and exit code 1; a command line it does not understand, with the usage and exit code 2. Field values are printed as they are, so use `--json` when a name could hold a space.
 

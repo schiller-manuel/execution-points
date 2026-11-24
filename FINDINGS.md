@@ -51,10 +51,10 @@ Still open:
 | F1, F2, F3, F10, F15, F16, registry half of F9; potential laws 1, 2 and 4; registry source mappings; an opaque result for unwritable expressions | merged; gaps in `contracts` and `content-mapper` went from 248 to 4, all four an endless loop in the mapper's frame reader |
 | Benchmark harness fixes from the audit (harness v2.4) | merged; `--self-test` passes 138 checks and fails 4, all the treatment typecheck of fixes that use `AbortController` or `fs.Stats` (F16, F1) |
 | F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command, the plugin adding the Vitest setup module | merged; the full gap check on the merged tree is running |
-| Selection by a visitor object with nested traversal (F4), plus `line`, `text` and the receiver of a member call | decided; not built yet |
+| Selection by a visitor object with nested traversal (F4), plus `line`, `text` and the receiver of a member call (`object`); `list` shows `object=` and `inside=` | built through discovery, plugin, runtime, registry and CLI, with four new oracles; its full gap check is running |
+| Every file under `tests/` type-checks under `strict`, without `any` (F17) | done |
 | Schedule exploration: `interleavings(points)` as a generator of orders, with `schedule`, `choose`, and the `InterleavingFailure` error | done |
-| Type-check the oracle test files (F17) | done for the four runtime oracle files, which are now in `include`; 52 errors remain in the other five, queued behind the merges, which edit those files |
-| Move to TypeScript built with `tsdown`; drop run-time argument checks the compiler makes | done for the runtime; `discovery`, `plugin`, `contracts` and `content-mapper` are queued behind the merges |
+| Move to TypeScript built with `tsdown`; drop run-time argument checks the compiler makes | done: every module in `src/` is TypeScript, the package ships `dist/`, and the benchmark self-test passes on it |
 | Selector fields (F4), `new` and `await` as selectable kinds, pass-through for unportable types | queued behind the merges |
 
 ---
@@ -159,7 +159,9 @@ after ALSO editing the target (mapper re-runs, warm cache): ... loadLimit() resu
 
 **Direction:** add the project's own root files (from the parsed tsconfig) to the analysis program.
 
-### F4. A selector that uses `nth` can move to a different expression without any error
+### F4. A selector that uses `nth` can move to a different expression without any error (fixed)
+
+**Fixed 2026-11-24**, by the decision "Nested traversal, keep callback too". A selector can now say where an expression stands instead of counting: `select(file, { Function: (fn) => fn.name === 'checkout' && fn.traverse({ CallExpression: (call) => call.callee === 'get' && call.object === 'cache' && call }) })`. Every expression also carries `line`, `text` and, for a call made on an object, `object`. `nth` is still there and still positional; nothing needs it any more to tell `cache.get` from `db.get`, or one function's call from another's. The compiler follows each `traverse` (`p30`), so a name that is not inside is a compile error. Four new oracles hold it: what discovery records, what the plugin registers, what the runtime selects, and what the compiler knows.
 
 **Kind:** inconsistency between the documented promise and the behavior.
 
@@ -729,6 +731,7 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 - 2026-11-24: the runtime is TypeScript (`src/runtime.ts` holds the implementation and the types that were in `runtime.d.ts`), built with `tsdown` into `dist/`. Three laws changed on the maintainer's decision: runtime Law 4, the replace-everywhere and pause laws of the new API, and `interleavings` no longer promise a `TypeError` for an argument of the wrong kind. The type oracle now compiles against the built declarations.
 - 2026-11-24: type-generation fixes merged (F1, F2, F3, F10, F15, F16, half of F9). I reran `p06`, `p07`, `p18`, `p19`, `p21` and `p22` on the merged code; each shows the fixed behavior quoted in its finding.
 - 2026-11-24: discovery, plugin and CLI work merged (F9, F11, F12, F14; `execution-points list`; `points.schema.json`; the plugin reads `points.ep` and adds the Vitest setup module). One interaction between the two delegated branches fixed oracle first: the content mapper refused the manifest's new `$schema` key. Selection by a Babel-style visitor object decided (`p30`).
+- 2026-11-24: every module in `src/` is TypeScript and built with `tsdown` (full gap check: 1,950 of 1,965 mutants killed, 10 unowned, the 4 known mapper timeouts, and one gap that was a property added for a type's sake, removed). Every file under `tests/` type-checks under `strict` without `any`. F4 fixed: selection through a visitor object with `traverse`, plus `line`, `text` and `object`; `execution-points list` shows `object=` and `inside=`.
 
 ## Incidents
 
