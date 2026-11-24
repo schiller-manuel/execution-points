@@ -277,7 +277,7 @@ async function within<T>(search: Promise<T>): Promise<T> {
       state = 'fulfilled'
       value = result
     },
-    (error) => {
+    (error: unknown) => {
       state = 'rejected'
       value = error
     },
@@ -454,7 +454,10 @@ oracleProperty({
       if (history.mode === 'every-order') {
         const released: Record<string, string> = {}
         let oneChoicePerRelease = true
-        const ended = await (idle as unknown as { withReplacement: Function }).withReplacement(
+        const surrounded = idle as unknown as {
+          withReplacement<Result>(handler: () => unknown, action: () => Result, options: object): Result
+        }
+        const ended = await surrounded.withReplacement(
           () => 'surrounding',
           async () => {
             try {

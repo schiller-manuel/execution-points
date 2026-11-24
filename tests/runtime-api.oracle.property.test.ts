@@ -196,7 +196,7 @@ async function settled<T>(promise: PromiseLike<T>) {
       state = 'fulfilled'
       value = result
     },
-    (error) => {
+    (error: unknown) => {
       state = 'rejected'
       value = error
     },
@@ -477,32 +477,32 @@ oracleProperty({
       {
         name: 'oldest-restored-first',
         enters: ['restored-out-of-order'],
-        build: () => ({ steps: ['install', 'install', 'evaluate', 'restore-oldest', 'evaluate', 'restore-newest'] }),
+        build: (): EverywhereHistory => ({ steps: ['install', 'install', 'evaluate', 'restore-oldest', 'evaluate', 'restore-newest'] }),
       },
       {
         name: 'newest-restored-first',
         enters: ['restored-in-order'],
-        build: () => ({ steps: ['install', 'install', 'restore-newest', 'evaluate', 'restore-oldest', 'evaluate'] }),
+        build: (): EverywhereHistory => ({ steps: ['install', 'install', 'restore-newest', 'evaluate', 'restore-oldest', 'evaluate'] }),
       },
       {
         name: 'two-left-unused',
         enters: ['left-installed-at-reckoning'],
-        build: () => ({ steps: ['install', 'install'] }),
+        build: (): EverywhereHistory => ({ steps: ['install', 'install'] }),
       },
       {
         name: 'never-used',
         enters: ['restored-without-running', 'left-installed-at-reckoning'],
-        build: () => ({ steps: ['install', 'dispose-newest', 'install'] }),
+        build: (): EverywhereHistory => ({ steps: ['install', 'dispose-newest', 'install'] }),
       },
       {
         name: 'server-style-context',
         enters: ['evaluated-in-another-context'],
-        build: () => ({ steps: ['install', 'evaluate-elsewhere', 'restore-newest', 'evaluate-elsewhere'] }),
+        build: (): EverywhereHistory => ({ steps: ['install', 'evaluate-elsewhere', 'restore-newest', 'evaluate-elsewhere'] }),
       },
       {
         name: 'scope-inside-everywhere',
         enters: ['scoped-over-everywhere'],
-        build: () => ({ steps: ['install', 'evaluate-in-scope', 'evaluate', 'restore-newest'] }),
+        build: (): EverywhereHistory => ({ steps: ['install', 'evaluate-in-scope', 'evaluate', 'restore-newest'] }),
       },
     ],
   },
@@ -920,7 +920,7 @@ function optionsModel(history: OptionsHistory) {
   const isCount = (value: unknown, least: number) => typeof value === 'number' && Number.isInteger(value) && value >= least
   const timesMeansSomething = times === undefined || times === 'any' || isCount(times, 0)
   const onMeansSomething =
-    on === undefined || isCount(on, 1) || (Array.isArray(on) && on.every((turn) => isCount(turn, 1)))
+    on === undefined || isCount(on, 1) || (Array.isArray(on) && on.every((turn: unknown) => isCount(turn, 1)))
   return { installing: timesMeansSomething && onMeansSomething ? 'accepted' : 'TypeError' }
 }
 
@@ -1136,13 +1136,13 @@ oracleProperty({
       {
         name: 'asks-for-toString',
         enters: ['inherited-name-refused'],
-        build: () => ({ locals: ['a'], asked: ['a', 'toString'] }),
+        build: (): CaptureHistory => ({ locals: ['a'], asked: ['a', 'toString'] }),
       },
-      { name: 'asks-for-a-typo', enters: ['typo-refused'], build: () => ({ locals: ['a', 'b'], asked: ['c'] }) },
+      { name: 'asks-for-a-typo', enters: ['typo-refused'], build: (): CaptureHistory => ({ locals: ['a', 'b'], asked: ['c'] }) },
       {
         name: 'a-local-named-constructor',
         enters: ['inherited-name-is-a-real-local', 'all-names-known'],
-        build: () => ({ locals: ['constructor', '__proto__'], asked: ['__proto__', 'constructor'] }),
+        build: (): CaptureHistory => ({ locals: ['constructor', '__proto__'], asked: ['__proto__', 'constructor'] }),
       },
     ],
   },

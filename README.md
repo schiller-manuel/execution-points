@@ -19,7 +19,7 @@ pnpm verify
 
 | Command | Purpose |
 | --- | --- |
-| `pnpm check` | Run regular `tsc --noEmit --runExternalCode` using the TypeScript 7.1 content mapper (`points.ep`), then `node checks/no-any.mjs`, which fails on a name whose type is silently `any`. |
+| `pnpm check` | Run regular `tsc --noEmit --runExternalCode` using the TypeScript 7.1 content mapper (`points.ep`). |
 | `pnpm test` | Run the instrumented Vitest examples. |
 | `pnpm verify` | Verify real `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and that no generated files are written. |
 
@@ -336,7 +336,6 @@ TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfi
 | `src/vitest.mjs` | Vitest setup module: after each test, fail it when a replacement did not run as often as the test said. |
 | `examples/` | Runnable applications and Vitest examples. |
 | `checks/verify.mjs` | End-to-end `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and no-write verification. |
-| `checks/no-any.mjs` | Fails when a name in the type-checked files is silently `any`, which `strict` allows when a declaration elsewhere says `any`. |
 | `probes/` | Small scripts that call the unchanged code and print what it does; `FINDINGS.md` names the probe behind each finding. |
 
 The native compiler API is currently a beta dependency. See the [TypeScript 7.1 beta announcement](https://devblogs.microsoft.com/typescript/announcing-typescript-7-1-beta/) for its API model.

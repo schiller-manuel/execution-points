@@ -1,8 +1,7 @@
 // Probe: what `pnpm check` looks at, and what `strict` lets through.
 //   1. The oracle test files are outside tsconfig's `include`. Type-checked with the same options,
 //      how many errors do they have, and of which kind?
-//   2. A value from a rejection handler is `any` under `strict`. Does `tsc` object? Does
-//      `checks/no-any.mjs`?
+//   2. A value from a rejection handler is `any` under `strict`. Does `tsc` object?
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { API } from 'typescript/sync'
@@ -68,6 +67,3 @@ const silent = source.replace(line, line.replace('(error: unknown) => error', '(
 )
 show('rewritten line', line.replace('(error: unknown) => error', '(error) => error').trim())
 show('tsc errors in the example', diagnose([], new Map([[example, silent]])).errors.filter((d) => d.fileName === example).length)
-const { findSilentAny, describeSilentAny } = await import(join(REPO, 'checks/no-any.mjs'))
-for (const finding of findSilentAny(new Map([[example, silent]]))) console.log('  ' + describeSilentAny(finding).split('. Say')[0])
-show('checks/no-any.mjs on the example as committed', findSilentAny().length + ' found')

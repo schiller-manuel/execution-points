@@ -93,7 +93,8 @@
 import fc from 'fast-check'
 import { afterEach } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { invoke, registerFile, select, verifyReplacements } from '../src/runtime.mjs'
+import { invoke, registerFile, verifyReplacements } from '../src/runtime.mjs'
+import { select } from './loose-select'
 
 // The drivers leave replacements behind on purpose (asynchronous scopes, unused ones). The
 // library's own check after each test is not what these laws are about, so it finds nothing.
@@ -151,22 +152,22 @@ oracleProperty({
       {
         name: 'idle-invoke',
         enters: ['no-active-scope'],
-        build: (base) => ({ ...base, mode: 'none' }),
+        build: (base): PassthroughHistory => ({ ...base, mode: 'none' }),
       },
       {
         name: 'sibling-point-only',
         enters: ['sibling-point-active'],
-        build: (base) => ({ ...base, mode: 'sibling-active' }),
+        build: (base): PassthroughHistory => ({ ...base, mode: 'sibling-active' }),
       },
       {
         name: 'after-normal-exit',
         enters: ['after-scope-exit'],
-        build: (base) => ({ ...base, mode: 'after-exit' }),
+        build: (base): PassthroughHistory => ({ ...base, mode: 'after-exit' }),
       },
       {
         name: 'after-thrown-exit',
         enters: ['after-scope-throw'],
-        build: (base) => ({ ...base, mode: 'after-throw' }),
+        build: (base): PassthroughHistory => ({ ...base, mode: 'after-throw' }),
       },
     ],
   },
@@ -382,27 +383,27 @@ oracleProperty({
       {
         name: 'single-scope',
         enters: ['single-replacement'],
-        build: (base) => ({ ...base, scenario: 'single', originalCallsInHandler: 0 }),
+        build: (base): ScopeHistory => ({ ...base, scenario: 'single', originalCallsInHandler: 0 }),
       },
       {
         name: 'nested-scope-restore',
         enters: ['nested-override-and-restore'],
-        build: (base) => ({ ...base, scenario: 'nested-override', originalCallsInHandler: 1 }),
+        build: (base): ScopeHistory => ({ ...base, scenario: 'nested-override', originalCallsInHandler: 1 }),
       },
       {
         name: 'nested-cross-point-scope',
         enters: ['nested-cross-point-preserved'],
-        build: (base) => ({ ...base, scenario: 'nested-cross-point', originalCallsInHandler: 1 }),
+        build: (base): ScopeHistory => ({ ...base, scenario: 'nested-cross-point', originalCallsInHandler: 1 }),
       },
       {
         name: 'handler-throw-cleanup',
         enters: ['handler-throws-and-restores'],
-        build: (base) => ({ ...base, scenario: 'handler-throws' }),
+        build: (base): ScopeHistory => ({ ...base, scenario: 'handler-throws' }),
       },
       {
         name: 'descendant-outlives-action',
         enters: ['async-descendant-outlives-action'],
-        build: (base) => ({
+        build: (base): ScopeHistory => ({
           ...base,
           scenario: 'async-descendant',
           actionTicks: 0,
@@ -413,7 +414,7 @@ oracleProperty({
       {
         name: 'multiple-original-calls',
         enters: ['repeated-original-calls'],
-        build: (base) => ({ ...base, scenario: 'single', originalCallsInHandler: 2 }),
+        build: (base): ScopeHistory => ({ ...base, scenario: 'single', originalCallsInHandler: 2 }),
       },
     ],
   },
@@ -651,7 +652,7 @@ oracleProperty({
       {
         name: 'visitor-subset-only',
         enters: ['visitor-capture-subset'],
-        build: (base) => ({
+        build: (base): CaptureHistory => ({
           ...base,
           initialMask: [true, false, true, false, false],
           hasOverride: false,
@@ -660,7 +661,7 @@ oracleProperty({
       {
         name: 'override-to-nonempty',
         enters: ['chained-capture-override-nonempty'],
-        build: (base) => ({
+        build: (base): CaptureHistory => ({
           ...base,
           initialMask: [true, true, false, false, false],
           hasOverride: true,
@@ -670,7 +671,7 @@ oracleProperty({
       {
         name: 'override-to-empty',
         enters: ['chained-capture-reset-to-empty'],
-        build: (base) => ({
+        build: (base): CaptureHistory => ({
           ...base,
           initialMask: [true, true, false, false, false],
           hasOverride: true,
@@ -680,7 +681,7 @@ oracleProperty({
       {
         name: 'proto-and-tostring-keys',
         enters: ['prototype-shadowing-keys'],
-        build: (base) => ({
+        build: (base): CaptureHistory => ({
           ...base,
           initialMask: [false, false, false, true, true],
           hasOverride: false,
@@ -689,7 +690,7 @@ oracleProperty({
       {
         name: 'direct-value-capture',
         enters: ['non-function-capture-entry'],
-        build: (base) => ({
+        build: (base): CaptureHistory => ({
           ...base,
           initialMask: [true, true, false, false, false],
           hasOverride: false,
@@ -754,7 +755,7 @@ oracleProperty({
             () => 0,
             () => {
               captureThunkCalls += 1
-              const map: Record<string, unknown> = Object.create(null)
+              const map = Object.create(null) as Record<string, unknown>
               ALL_LOCAL_KEYS.forEach((key, idx) => {
                 if (key === 'a' && history.directValueForA) {
                   map[key] = history.values[idx]!
@@ -911,42 +912,42 @@ oracleProperty({
       {
         name: 'bare-node-return',
         enters: ['selected-bare-node'],
-        build: (base) => ({ ...base, kind: 'match-one-node' }),
+        build: (base): SelectionHistory => ({ ...base, kind: 'match-one-node' }),
       },
       {
         name: 'captured-node-return',
         enters: ['selected-captured-node'],
-        build: (base) => ({ ...base, kind: 'match-one-captured' }),
+        build: (base): SelectionHistory => ({ ...base, kind: 'match-one-captured' }),
       },
       {
         name: 'deferred-register-before-with-replacement',
         enters: ['selected-deferred-registration'],
-        build: (base) => ({ ...base, kind: 'register-after-select' }),
+        build: (base): SelectionHistory => ({ ...base, kind: 'register-after-select' }),
       },
       {
         name: 'zero-match-visitor',
         enters: ['rejected-zero-matches'],
-        build: (base) => ({ ...base, kind: 'match-zero' }),
+        build: (base): SelectionHistory => ({ ...base, kind: 'match-zero' }),
       },
       {
         name: 'two-match-visitor',
         enters: ['rejected-multiple-matches'],
-        build: (base) => ({ ...base, kind: 'match-multiple' }),
+        build: (base): SelectionHistory => ({ ...base, kind: 'match-multiple' }),
       },
       {
         name: 'missing-file-registration',
         enters: ['rejected-unregistered-file'],
-        build: (base) => ({ ...base, kind: 'unregistered-file' }),
+        build: (base): SelectionHistory => ({ ...base, kind: 'unregistered-file' }),
       },
       {
         name: 'non-function-visitor',
         enters: ['rejected-invalid-callback'],
-        build: (base) => ({ ...base, kind: 'invalid-visitor-arg' }),
+        build: (base): SelectionHistory => ({ ...base, kind: 'invalid-visitor-arg' }),
       },
       {
         name: 'non-function-with-replacement-handler',
         enters: ['rejected-invalid-with-replacement-args'],
-        build: (base) => ({ ...base, kind: 'invalid-with-replacement-args' }),
+        build: (base): SelectionHistory => ({ ...base, kind: 'invalid-with-replacement-args' }),
       },
     ],
   },
@@ -1198,22 +1199,22 @@ oracleProperty({
       {
         name: 'second-import-after-install',
         enters: ['registered-again-after-install', 'one-home-of-two-installed'],
-        build: () => ({ withHomes: true, steps: ['install-2', 'register-again'] }),
+        build: (): FileFlagsHistory => ({ withHomes: true, steps: ['install-2', 'register-again'] }),
       },
       {
         name: 'edited-file-imported-after-install',
         enters: ['reshaped-after-install'],
-        build: () => ({ withHomes: true, steps: ['install-0', 'register-reshaped', 'install-2'] }),
+        build: (): FileFlagsHistory => ({ withHomes: true, steps: ['install-0', 'register-reshaped', 'install-2'] }),
       },
       {
         name: 'other-file-only',
         enters: ['installed-elsewhere-only'],
-        build: () => ({ withHomes: true, steps: ['install-elsewhere', 'register-again'] }),
+        build: (): FileFlagsHistory => ({ withHomes: true, steps: ['install-elsewhere', 'register-again'] }),
       },
       {
         name: 'no-homes-given',
         enters: ['registered-without-homes'],
-        build: () => ({ withHomes: false, steps: ['install-1', 'register-again'] }),
+        build: (): FileFlagsHistory => ({ withHomes: false, steps: ['install-1', 'register-again'] }),
       },
     ],
   },

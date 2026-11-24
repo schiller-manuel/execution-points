@@ -25,7 +25,8 @@ Made on 2026-11-24 by Manuel Schiller:
 - `original()` evaluates the expression on every call. `AGENTS.md` and the README no longer call it provisional.
 - All eight potential laws are accepted, every finding is to be fixed, and every feature idea is to be built with oracle coverage. Status is tracked in "Work in progress" below.
 - F7: a replacement that never runs must be loud. All four API options are built; for an asynchronous action the returned promise stays the action's own and the test fails at its end through a Vitest hook. Done; see F7.
-- A type that is silently `any` is an error. `pnpm check` now runs `checks/no-any.mjs` after `tsc`; see F17.
+- An implicit `any` is an error: `strict` is on, and the type check is being widened to the oracle test files (F17). There is no separate check for an `any` that a library declaration hands over; `checks/no-any.mjs`, which I had added for that, is removed again at your request.
+- The library moves to TypeScript sources built with `tsdown`, and argument checks that the compiler already makes are dropped from the runtime. Queued behind the two delegated branches, which edit the `.mjs` files.
 - Schedule exploration is a primitive to compose, not a function that takes the checks: `interleavings(points)` is a generator of orders, and the caller runs the scenario and checks it in the loop body. Rebuilt that way; the first form with `run`, `check`, `setup` and `limit` options is gone.
 
 Still open:
@@ -49,8 +50,8 @@ Still open:
 | Benchmark harness fixes from the audit (harness v2.4) | merged; `--self-test` passes 138 checks and fails 4, all the treatment typecheck of fixes that use `AbortController` or `fs.Stats` (F16, F1) |
 | F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command | queued behind the fast path, which edits the same files |
 | Schedule exploration: `interleavings(points)` as a generator of orders, with `schedule`, `choose`, and the `InterleavingFailure` error | done |
-| `checks/no-any.mjs` in `pnpm check` (F17) | done for the type-checked files |
-| Type-check the oracle test files (F17): declarations for `src/*.mjs`, 62 errors to fix | queued behind the merges, which edit the same test files |
+| Type-check the oracle test files (F17) | done for the four runtime oracle files, which are now in `include`; 52 errors remain in the other five, queued behind the merges, which edit those files |
+| Move `src/*.mjs` to TypeScript built with `tsdown`; drop run-time argument checks the compiler makes | queued behind the merges |
 | Selector fields (F4), `new` and `await` as selectable kinds, pass-through for unportable types | queued behind the merges |
 
 ---
@@ -451,11 +452,15 @@ The error is thrown inside the application call, and the registry gives the capt
 
 **How often:** both shapes tried; the control with a 3-member interface is fine. Probe: `p22-dangling-helper-names.mjs`. Potential law 1 would catch it.
 
-### F17. `strict` does not stop every `any`, and the oracle test files are not type-checked at all
+### F17. The oracle test files were not type-checked, and `strict` does not stop every `any`
 
 Probe: `p27`.
 
-`tsconfig.json` has `"strict": true`, so an implicit `any` is already an error in the files it includes. Two things get past it.
+`tsconfig.json` has `"strict": true`, so an implicit `any` is already an error in the files it includes.
+
+**The oracle test files were outside `include`.** `include` listed `examples/**/*.ts`, `src/runtime.d.ts` and `points.ep`. Nothing type-checked `tests/`. Checked with the same options, the nine oracle files had 62 errors: 36 parameters or bindings that are implicitly `any`; 12 imports of `../src/*.mjs` with no declaration file (`src/runtime.d.ts` is not what `import '../src/runtime.mjs'` resolves to, and the other four modules have none), so everything the oracles imported from production was `any`; 9 history options that do not match the `@tanstack/oracles` types; 5 others.
+
+Fixed for the four runtime oracle files: they are in `include` and compile. `tests/loose-select.ts` gives `select` the types a hand-registered file can have, because the registry only knows the targets in `points.ep`. Open: the other five oracle files (52 errors). They become straightforward once the sources are TypeScript, since the missing declarations are most of what is wrong.
 
 **An `any` that a declaration hands over is not implicit.** `Promise#then` and `Promise#catch` declare the rejection reason as `any`, so in
 
@@ -463,20 +468,9 @@ Probe: `p27`.
 const failure = await everyOrder().catch((error) => error)
 ```
 
-both `error` and `failure` are `any`, `tsc` reports nothing, and every property read from `failure` is unchecked. The first version of `examples/profile.test.ts` hid this behind an annotation (`const failure: InterleavingFailure = …`), which the compiler accepts without checking because `any` is assignable to everything. No compiler option reports this, and the lint rule that does is not available for TypeScript 7.1.
+both `error` and `failure` are `any`, `tsc` reports nothing, and every property read from `failure` is unchecked. The first version of `examples/profile.test.ts` hid this behind an annotation (`const failure: InterleavingFailure = …`), which the compiler accepts without checking. No compiler option reports this. The lint rule that does (`no-unsafe-assignment`) is not available for TypeScript 7.1 yet.
 
-Fixed for the type-checked files: `checks/no-any.mjs` asks the checker for the type of every variable, parameter and destructured name that has no annotation, of every initializer under an annotation, and of every operand of `as` or `satisfies`, and fails on `any`. `pnpm check` runs it after `tsc`. On the three shapes above it reports the name and position; on the examples as committed it reports nothing. An order's `run` rejects with an exported class, `InterleavingFailure`, so a test narrows the caught value with `instanceof` instead of annotating it.
-
-**The oracle test files are outside `include`.** `include` lists `examples/**/*.ts`, `src/runtime.d.ts` and `points.ep`. Nothing type-checks `tests/`. Checked with the same options, the nine oracle files have 62 errors:
-
-| Code | Count | What |
-| --- | --- | --- |
-| TS7006, TS7031 | 36 | a parameter or binding that is implicitly `any` |
-| TS7016 | 12 | an import of `../src/*.mjs` with no declaration file. `src/runtime.d.ts` is not what `import '../src/runtime.mjs'` resolves to (that would be `runtime.d.mts`), and the other four modules have none, so everything the oracles import from production is `any` |
-| TS2322 | 9 | history options that do not match the `@tanstack/oracles` types |
-| TS2307, TS2339 | 5 | the `?copy=N` specifiers, and two property reads |
-
-Open: bring `tests/` into `include`, give the five production modules declarations the tests resolve, and fix the 62. Queued behind the merges, because the delegated branches edit the same test files.
+What is done about it: an order's `run` rejects with an exported class, `InterleavingFailure`, so a test writes `(error: unknown) => error` and narrows with `instanceof`, and the example does. I had also added a script that failed on such an `any`; it was removed at the maintainer's request, so nothing reports this shape automatically until the lint rule supports this compiler.
 
 ### What held
 
@@ -705,6 +699,7 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 - 2026-11-24: F7 and F8 fixed and F5 resolved in the runtime (strict replacements with `times` and `on`, `pause`, `replace` with `using`, `calls`, shorthands, capture-name and visitor-return checks; seven new laws; 0 gaps over runtime, discovery, plugin). README and examples describe the new API. `ORACLES.md` started for issues met with `@tanstack/oracles`. Two incidents recorded.
 - 2026-11-24: schedule exploration built (`interleavings`, feature idea 9): every order, `limit`, `schedule`, `choose`; it throws `InterleavingFailure` with the order, the replay schedule and what failed. New oracle `runtime-interleavings`, example `examples/profile.test.ts`, README section, probe `p26`. New F17: an `any` that `strict` lets through and the untyped oracle test files; `checks/no-any.mjs` added to `pnpm check`.
 - 2026-11-24: `interleavings` rebuilt as a primitive after the maintainer's decision: a generator of orders (`order.run(action)`, `order.schedule`, `order.released`) with the caller's own loop and checks. Oracle, example, README section and probe `p26` rewritten for it. A negative or fractional schedule entry is now refused; the first form took `-1` as "the last waiting evaluation". Benchmark harness v2.4 merged.
+- 2026-11-24: the four runtime oracle files are type-checked (`include` widened, `tests/loose-select.ts`, `src/runtime.d.mts`). `checks/no-any.mjs` removed again at the maintainer's request. Decision recorded: TypeScript sources built with `tsdown`.
 
 ## Incidents
 

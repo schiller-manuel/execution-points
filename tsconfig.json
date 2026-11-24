@@ -6,13 +6,23 @@
     "moduleResolution": "Bundler",
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
   "contentMappers": [
     {
       "package": ".",
-      "extensions": [".ep"]
+      "extensions": [
+        ".ep"
+      ]
     }
   ],
-  "include": ["examples/**/*.ts", "src/runtime.d.ts", "points.ep"]
+  "include": [
+    "examples/**/*.ts",
+    "tests/runtime*.ts",
+    "tests/loose-select.ts",
+    "src/runtime.d.ts",
+    "points.ep"
+  ]
 }
