@@ -30,9 +30,9 @@
  * expressions, `select(file, visitor)` accepts minimal `n.callee === 'x' && n`
  * selectors without `kind`, rejects callee typos (TS2367), reports matched
  * node IDs (`__matched`) on ambiguous matches, preserves compile/runtime parity
- * for unportable generic nodes, and rejects direct selection of an unportable
- * node with an explicit `__selectionError` (Decision by Manuel Schiller (GitHub
- * schiller-manuel), 2026-11-24).
+ * for unportable generic nodes, and lets such a node be selected with a result
+ * type that only `original()` can produce, so that it can be observed and
+ * delayed (Decisions by Manuel Schiller (GitHub schiller-manuel), 2026-11-24).
  *
  * For every `select` call checked when `ExecutionPointFileRegistry` is empty,
  * TypeScript reports an explicit `ExecutionPointsNotLoaded` diagnostic on the
@@ -135,7 +135,8 @@ const T1_CASES = [
   'zero-match-selection-error',
   'multi-match-surfaces-matched-ids',
   'unportable-generic-counts-in-multi-match',
-  'unportable-generic-direct-selection-error',
+  'unportable-generic-passes-original-through',
+  'unportable-generic-takes-no-other-value',
 ] as const
 
 type T1Case = (typeof T1_CASES)[number]
@@ -153,7 +154,9 @@ function t1Model(c: T1Case) {
       return { ok: false, hasExpectedMarker: true, registryErrors: [] }
     case 'unportable-generic-counts-in-multi-match':
       return { ok: false, hasExpectedMarker: true, registryErrors: [] }
-    case 'unportable-generic-direct-selection-error':
+    case 'unportable-generic-passes-original-through':
+      return { ok: true, hasExpectedMarker: true, registryErrors: [] }
+    case 'unportable-generic-takes-no-other-value':
       return { ok: false, hasExpectedMarker: true, registryErrors: [] }
   }
 }
@@ -163,9 +166,9 @@ oracleProperty({
   owns: ['dist/runtime.d.mts', 'src/contracts.ts#renderFileModule'],
   law: {
     statement:
-      'For every target module, select(file, visitor) accepts minimal callee/operator narrowing with && short-circuit returns without requiring kind, rejects callee typos with TS2367, lists __matched node IDs on multiple matches, and keeps unportable generic nodes in the compile-time match count while rejecting direct selection with an explicit error.',
+      'For every target module, select(file, visitor) accepts minimal callee/operator narrowing with && short-circuit returns without requiring kind, rejects callee typos with TS2367, lists __matched node IDs on multiple matches, and keeps unportable generic nodes in the compile-time match count; such a node can be selected, and its handler can return what original() gives and nothing else.',
     authority:
-      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: disjoint callee/operator discriminators, false|null visitor returns, __matched IDs, and unportable-node parity.',
+      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: disjoint callee/operator discriminators, false|null visitor returns, __matched IDs, and unportable-node parity. Decision by Manuel Schiller, 2026-11-24 (build every feature idea of FINDINGS.md; idea 5): an expression whose type cannot be written stays selectable, with an opaque result that only original() can produce, so that it can be observed and delayed.',
     limits: 'Checked via TypeScript 7.1 semantic diagnostics on one target module.',
   },
   histories: {
@@ -177,7 +180,8 @@ oracleProperty({
       'zero-match-rejected',
       'multi-match-with-ids',
       'unportable-parity-multi-match',
-      'unportable-direct-rejected',
+      'unportable-selected',
+      'unportable-value-rejected',
     ],
   },
   label: (h) => h.c,
@@ -231,12 +235,22 @@ const p = select(${JSON.stringify(TARGET_REL)}, (n) => n.callee === 'identity' &
 p.withReplacement(({ original }) => original(), () => 0)`
         markerCheck = (txt) => txt.includes('matched multiple') && txt.includes('genericWork')
         break
-      case 'unportable-generic-direct-selection-error':
-        observe('reach', 'unportable-direct-rejected')
+      case 'unportable-generic-passes-original-through':
+        observe('reach', 'unportable-selected')
+        // The type of identity(val) in genericWork<U> cannot be written outside it. The expression can
+        // still be selected, observed and delayed: whatever original() gives is passed on.
         code = `${header}
 const p = select(${JSON.stringify(TARGET_REL)}, (n) => n.inFunction === 'genericWork' && n.callee === 'identity' && n)
-p.withReplacement(({ original }) => original(), () => 0)`
-        markerCheck = (txt) => txt.includes('unportable') || txt.includes('__selectionError')
+let calls = 0
+p.withReplacement(({ original }) => { calls += 1; return original() }, () => 0)
+void calls`
+        break
+      case 'unportable-generic-takes-no-other-value':
+        observe('reach', 'unportable-value-rejected')
+        code = `${header}
+const p = select(${JSON.stringify(TARGET_REL)}, (n) => n.inFunction === 'genericWork' && n.callee === 'identity' && n)
+p.withReplacement(() => 1, () => 0)`
+        markerCheck = (txt) => txt.includes('not assignable') && txt.includes('__EPOpaque')
         break
     }
 

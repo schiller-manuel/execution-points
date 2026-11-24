@@ -168,7 +168,7 @@ export interface CapturedSelection<N extends NodeDescriptor, Keys extends readon
 }
 
 type VisitorNode<N extends NodeDescriptor> = N extends NodeDescriptor
-  ? Omit<N, 'result' | 'locals' | '__unportable'> & {
+  ? Omit<N, 'result' | 'locals' | '__unportable' | '__unportableLocals'> & {
       readonly __node: N
       capture<K extends keyof N['locals'] & string = never>(...keys: readonly K[]): CapturedSelection<N, readonly K[]>
     }
@@ -240,11 +240,9 @@ type SelectFromNodes<N extends NodeDescriptor, Captured extends object> = [N] ex
         readonly __selectionError: 'Selector matched multiple expressions. Narrow further by callee/operator, inFunction, kind, or nth.'
         readonly __matched: N['id']
       }
-    : N extends { readonly __unportable: infer Reason extends string }
-      ? {
-          readonly __selectionError: `Matched expression "${N['id']}" has an unportable type and cannot be selected directly: ${Reason}`
-        }
-      : SelectablePoint<N, Captured>
+    : // An expression whose type cannot be written has an opaque result in the registry, which only
+      // `original()` produces: it can be observed, paused and delayed, and not replaced by another value.
+      SelectablePoint<N, Captured>
 
 interface EmptyRegistryPoint extends Point<any, any> {
   capture(...keys: readonly string[]): EmptyRegistryPoint
