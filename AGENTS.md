@@ -5,11 +5,22 @@ and runnable, and continue discussing unresolved API choices with the user.
 
 ## Agreed direction
 
-- Select an expression externally with `select(file, visitor)`: an ordinary
-  TypeScript callback that narrows the file's typed union of selectable
-  expressions and returns the one it wants. `select` is the only selection API;
-  the earlier query-string API built on an AST query language was replaced by
-  it.
+- Select an expression externally with `select(file, visitor)`. `select` is
+  the only selection API; the earlier query-string API built on an AST query
+  language was replaced by it. The visitor has two forms:
+  - a callback that narrows the file's typed union of selectable expressions
+    and returns the one it wants;
+  - an object keyed by node type, as in Babel: `CallExpression`,
+    `BinaryExpression`, `ConditionalExpression` for expressions, and `Function`
+    and `Class` (Babel's alias keys) for what contains them. A handler returns
+    the node it selects, or `node.traverse(visitor)` to look inside it. That is
+    how "inside this function" is said; no `inClass` field is added.
+- Build on established patterns (Babel's visitors, ESTree's names, what
+  JavaScript itself calls things) instead of inventing vocabulary. A selector
+  can only use properties that sit directly on the node, because TypeScript
+  narrows through nothing else (`probes/p30-what-the-compiler-can-follow.mjs`);
+  the compiler knowing which expression was selected is what types the
+  handler.
 - Leave authored application source unchanged; instrument it during tests.
 - Run application code and replacement callbacks in the same Node test worker.
 - Use ordinary TypeScript files and virtual compiler projections for types.

@@ -1566,7 +1566,7 @@ oracleProperty({
     statement:
       'For every private module-scope type, every result and local of that type refers to one copy, declared once, so a value of the type read from a local or returned by original() is accepted wherever the type is expected; two different nominal private types get two brands; and a type that cannot be copied leaves no name behind.',
     authority:
-      'README.md:172 ("unreachable private types emit structural or unique-symbol-branded helpers") and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the registry compiled as .ts beside the target has no diagnostics of its own.',
+      'README.md:172 ("unreachable private types emit structural or unique-symbol-branded helpers") and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the registry compiled as .ts beside the target has no diagnostics of its own. Approved as worded by Manuel Schiller (GitHub schiller-manuel), 2026-11-24.',
     limits:
       'Checked on a private class used as a result and as a local, two private classes of equal shape, a private enum, interfaces that cannot be copied because one has more than 24 properties, and a tuple that uses five types forty times each. The copies are counted as the __EP_* interfaces the registry declares.',
   },
@@ -1853,7 +1853,7 @@ oracleProperty({
     statement:
       'For every selectable expression indexed in a target module, generateFileRegistryModule emits disjoint optional-undefined callee/operator properties by kind, and emits an expression whose type cannot be written with __unportable, its locals, and an opaque result type of its own that only original() can produce, so compile-time node count equals runtime node count.',
     authority:
-      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: disjoint callee/operator discriminators and compile/runtime parity for unportable expressions. README.md:173 ("Global scripts are skipped."). Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: a local whose type cannot be written carries the reason. Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: an expression whose type cannot be written stays selectable with an opaque result type that only original() can produce; this replaces result: never.',
+      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: disjoint callee/operator discriminators and compile/runtime parity for unportable expressions. README.md:173 ("Global scripts are skipped."). Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: a local whose type cannot be written carries the reason. Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: an expression whose type cannot be written stays selectable with an opaque result type that only original() can produce; this replaces result: never. That a reason names its subject: approved by Manuel Schiller (GitHub schiller-manuel), 2026-11-24.',
     limits:
       'Applies to CallExpression, BinaryExpression, and ConditionalExpression nodes indexed by discovery.mjs. The reason is checked for being present and for naming the type or the cause that the history states, not word for word. Opaque means: not any, unknown, or never, and not assignable from the expression’s own type, from {}, or from string; whether select() accepts such a node is the type layer’s law.',
   },
@@ -2246,7 +2246,7 @@ oracleProperty({
     statement:
       'For every type, the requests the generator makes to TypeScript for its name do not grow with how often the type is used; for every module, its exports are walked once however many private types are looked up in it; and for every export-reachable type, each member is read once.',
     authority:
-      'FINDINGS.md, "What held": regenerating the registry for 160 target files takes about 0.2 s. The three caches change no result, so cost is their only promise, and @tanstack/oracles owes a cost law to a branch that exists only for speed (oracle-property.ts, `work`; maintainer decision of that package, 2026-11-12). These histories talk to a TypeScript server, which the built-in work bound does not judge, so the count of requests is observed instead.',
+      'FINDINGS.md, "What held": regenerating the registry for 160 target files takes about 0.2 s. The three caches change no result, so cost is their only promise, and @tanstack/oracles owes a cost law to a branch that exists only for speed (oracle-property.ts, `work`; maintainer decision of that package, 2026-11-12). These histories talk to a TypeScript server, which the built-in work bound does not judge, so the count of requests is observed instead. Approved as worded by Manuel Schiller (GitHub schiller-manuel), 2026-11-24.',
     limits:
       'Three relations between counts of requests, each over one module: a row of 15 or 60 elements, 1 or 21 exports with 1 or 3 private types, and a type with 2, 4, or 8 members that refer to itself. Time is not measured.',
   },

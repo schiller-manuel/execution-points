@@ -27,16 +27,16 @@ Made on 2026-11-24 by Manuel Schiller:
 - F7: a replacement that never runs must be loud. All four API options are built; for an asynchronous action the returned promise stays the action's own and the test fails at its end through a Vitest hook. Done; see F7.
 - An implicit `any` is an error: `strict` is on, and the type check is being widened to the oracle test files (F17). There is no separate check for an `any` that a library declaration hands over; `checks/no-any.mjs`, which I had added for that, is removed again at your request.
 - The library moves to TypeScript sources built with `tsdown`, and argument checks that the compiler already makes are dropped from the runtime. Done for the runtime (`src/runtime.ts`, `src/vitest.ts`, build into `dist/`); the other four modules follow when the two delegated branches, which edit them, are merged. The rule applied: what the compiler rejects is not checked again at run time; what depends on run-time state stays. Removed: the `typeof` checks on `visitor`, `handler`, `action`, and on the points and action of `interleavings`. Kept: everything about selections, capture names, schedules and replacements that never ran, and the value check on `times` and `on`, because the compiler accepts any number there.
+- The four laws the type-generation work had added or reworded are approved as worded, and so are the details of `interleavings` (`order.run`, `schedule`, `released`, the `schedule` and `choose` options, which misuse throws).
+- Selection gets a second form, built on Babel's visitor pattern: an object keyed by node type, with `Function` and `Class` (Babel's alias keys) as nodes you `traverse` into. The callback form `select(file, (n) => …)` stays, with `inFunction` as it is. `inClass` is not added: traversal says "inside". Evidence that the compiler can follow traversal and cannot follow a parent chain: `p30`.
 - Schedule exploration is a primitive to compose, not a function that takes the checks: `interleavings(points)` is a generator of orders, and the caller runs the scenario and checks it in the loop body. Rebuilt that way; the first form with `run`, `check`, `setup` and `limit` options is gone.
 
 Still open:
 
-1. New selector fields for F4 (`receiver`, `inClass`, `assignedTo`, `text`, `line`): the API is yours to approve before it is built.
+1. Names inside the new selector form that your decision did not fix: `object` for the receiver of a member call (ESTree's word for it, flattened), `VariableDeclarator` as a third kind of node to traverse into (for "the call that initializes `total`"), and `text` as the expression's source with whitespace collapsed. I build them as proposals and list them in the law's limits.
 2. New benchmark tasks: which, and in which stratum.
 3. The benchmark sequence at the end of this file: approve, or change.
 4. Your global pnpm broke during this work (see "Incidents" below); say whether I should repair it.
-5. Four laws the type-generation work added or reworded without your named approval. Confirm or strike: `contracts-one-copy-per-private-type` (one helper per private type, two brands for two nominal types); `contracts-cost-of-names` (three relations between counts of TypeScript requests, standing in for a work bound); the mapper's watch set is the tsconfig, the targets, and every project file the analysis read; a reason for an unselectable expression must name its subject.
-6. The details of `interleavings` that your decision did not fix: each order is an object with `run(action)`, `schedule` and `released` (instead of a bare callback); the options `schedule` (one order again) and `choose` (pick every order, endless); taking the next order before the current one ran, and running an order twice, throw. They are built and listed as proposals in the oracle's limits.
 
 ## Work in progress
 
@@ -704,6 +704,7 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 | `p27-what-the-type-check-covers.mjs` | F17 |
 | `p28-registry-error-location.mjs` | an error inside the registry is reported at the manifest entry that lists the file |
 | `p29-unportable-local-reason.mjs` | a local that cannot be captured carries its reason in the registry |
+| `p30-what-the-compiler-can-follow.mjs` | F4: which ways of naming an expression leave the compiler knowing which one was meant, and what each costs to type-check |
 
 `probes/lib.mjs`, `probes/types.mjs`, and `probes/e2e.mjs` are shared helpers. `e2e.mjs` builds a real consumer project with the package copied into its `node_modules`, the way `bench/toolchain.mjs` does, and runs the real `tsc` and Vitest on it.
 
