@@ -94,6 +94,7 @@ import { API } from 'typescript/sync'
 import { afterAll } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
 import {
+  type IndexedNode,
   buildTargetPlan,
   indexTargetFile,
   loadManifest,
@@ -593,7 +594,7 @@ oracleProperty({
       {
         name: 'callback-in-checkout',
         enters: ['callback-attributed-to-named-fn'],
-        build: (base) => ({
+        build: (base): MetadataHistory => ({
           ...base,
           container: 'callback-inside-fn',
           calleeForm: 'property-access',
@@ -602,22 +603,22 @@ oracleProperty({
       {
         name: 'top-level-call',
         enters: ['top-level-expression'],
-        build: (base) => ({ ...base, container: 'top-level' }),
+        build: (base): MetadataHistory => ({ ...base, container: 'top-level' }),
       },
       {
         name: 'bracket-string-callee',
         enters: ['string-element-callee'],
-        build: (base) => ({ ...base, calleeForm: 'string-element-access' }),
+        build: (base): MetadataHistory => ({ ...base, calleeForm: 'string-element-access' }),
       },
       {
         name: 'two-calls-nth',
         enters: ['repeated-nth-increment'],
-        build: (base) => ({ ...base, repeatCall: true }),
+        build: (base): MetadataHistory => ({ ...base, repeatCall: true }),
       },
       {
         name: 'comment-edit-invariance',
         enters: ['comment-edit-id-stability'],
-        build: (base) => ({ ...base, addCommentAndSiblingEdit: true }),
+        build: (base): MetadataHistory => ({ ...base, addCommentAndSiblingEdit: true }),
       },
     ],
   },
@@ -645,7 +646,7 @@ oracleProperty({
 
       // Filter out wrapper calls (`forEach`, IIFE, `afterTopCall`) so we inspect the target send/handlers calls
       const targetCallee = expectedCallee(history.calleeForm)
-      const isWrapperIife = (n: { callee?: string; inFunction: string | null }, src: string) =>
+      const isWrapperIife = (n: IndexedNode, src: string) =>
         (history.container === 'top-level-anonymous-iife' ||
           history.container === 'destructured-var-arrow') &&
         n.inFunction === null &&
@@ -1009,7 +1010,7 @@ oracleProperty({
       writeFileSync(file, plan.target)
 
       const indexed = indexTargetFile(file, plan.target, dir, sharedApi)
-      const captures: Array<Array<string> | 'not indexed'> = plan.points.map(() => 'not indexed')
+      const captures: Array<ReadonlyArray<string> | 'not indexed'> = plan.points.map(() => 'not indexed')
       for (const node of indexed.nodes) {
         const point = /^at\((\d+),/.exec(plan.target.slice(node.start, node.end))
         if (point) captures[Number(point[1])] = node.captures

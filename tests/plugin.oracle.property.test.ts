@@ -124,8 +124,9 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { executionPoints } from '../src/plugin.ts'
-import { invoke, registerFile, select, verifyReplacements } from '../src/runtime.ts'
+import { type ExecutionPointsPlugin, executionPoints } from '../src/plugin.ts'
+import { invoke, registerFile, verifyReplacements } from '../src/runtime.ts'
+import { select } from './loose-select'
 
 // The drivers leave replacements behind on purpose (asynchronous scopes, unused ones). The
 // library's own check after each test is not what these laws are about, so it finds nothing.
@@ -136,6 +137,16 @@ afterEach(() => {
     // Reported by the laws that own it.
   }
 })
+
+/**
+ * The plugin with two of its hooks as Vite calls them. The plugin declares `config` and
+ * `watchChange` without the arguments it does not read; Vite passes them all the same, and so
+ * do the drivers.
+ */
+type PluginAsViteCallsIt = ExecutionPointsPlugin & {
+  config(config: object, env: { command: 'serve' | 'build'; mode: string }): ReturnType<ExecutionPointsPlugin['config']>
+  watchChange(id: string, change: { event: 'create' | 'update' | 'delete' }): void
+}
 
 // ---------------------------------------------------------------------------
 // Law P1: Module ID filtering, URL/prefix resolution, and source-sync guard
@@ -1196,9 +1207,11 @@ oracleProperty({
             }),
         )
       type Handles = {
-        entry: (n: number, gate?: Promise<void>) => any
+        // A function, an async function, or a generator, by the host.
+        entry: (n: number, gate?: Promise<void>) => number | Promise<number> | Generator<number, void>
         make: (n: number) => { s: number; each: (i: number) => number; Box: new () => { value: number } }
-        host: { n: number; entry: any }
+        // On one host `entry` is a method, on another a getter.
+        host: { n: number; entry: number | ((n: number) => number) }
         Host: new (n?: number) => { sum: number; value: number }
         setArg: (n: number) => void
         noop: unknown
@@ -1221,19 +1234,19 @@ oracleProperty({
         if (traits.inner) return h.make(n).s
         switch (history.host) {
           case 'method':
-            return h.host.entry(n)
+            return (h.host.entry as (n: number) => number)(n)
           case 'getter':
             h.host.n = n
-            return h.host.entry
+            return h.host.entry as number
           case 'generator':
-            return [...h.entry(n)].reduce((sum: number, value: number) => sum + value, 0)
+            return [...(h.entry(n) as Generator<number, void>)].reduce((sum: number, value: number) => sum + value, 0)
           case 'constructor':
             return new h.Host(n).sum
           case 'field':
             h.setArg(n)
             return new h.Host().value
           default:
-            return h.entry(n)
+            return h.entry(n) as number | Promise<number>
         }
       }
 
@@ -1248,7 +1261,7 @@ oracleProperty({
       const gate = new Promise<void>((resolve) => {
         release = resolve
       })
-      const earlyGenerator = history.host === 'generator' ? h.entry(2) : undefined
+      const earlyGenerator = history.host === 'generator' ? (h.entry(2) as Generator<number, void>) : undefined
       earlyGenerator?.next()
       const earlyMade = traits.inner && traits.earlier === 'inside' ? h.make(EARLIER_ARGUMENT) : undefined
       const earlyAsync = traits.earlier === 'outside' ? h.entry(2, gate) : undefined
@@ -1590,7 +1603,7 @@ oracleProperty({
 
       const targets =
         history.listedBy === 'glob' ? ['src/*.js'] : [...versions.map((_, index) => `src/t${index}.js`), 'src/missing.js']
-      const plugin =
+      const plugin: PluginAsViteCallsIt =
         history.rootFrom === 'option' ? executionPoints({ root: tempDir, targets }) : executionPoints({ targets })
       plugin.configResolved({ root: history.rootFrom === 'option' ? '/ignored-root' : tempDir })
 
@@ -1852,7 +1865,7 @@ oracleProperty({
         ...(history.rootFrom === 'option' ? { root: dir } : {}),
         ...(history.explicit === 'none' ? {} : { targets: history.explicit === 'lists-b' ? ['b.js'] : [] }),
       }
-      const plugin = executionPoints(options)
+      const plugin: PluginAsViteCallsIt = executionPoints(options)
       plugin.configResolved({ root: history.rootFrom === 'option' ? '/ignored-root' : dir })
 
       const watched = new Set<string>()
@@ -2029,7 +2042,7 @@ oracleProperty({
       const user = userConfigOf(history)
       const hasOwn = history.shape !== 'no-test-section' && (history.setup === 'one' || history.setup === 'list')
       observe('reach', hasOwn ? 'setup-added-to-the-users-own' : 'setup-added-to-none')
-      const plugin = executionPoints({ targets: [] })
+      const plugin: PluginAsViteCallsIt = executionPoints({ targets: [] })
       const before = JSON.stringify(user)
       const contributed = await plugin.config(user, { command: history.command, mode: 'test' })
       const { test, ...restOfConfig } = mergeConfig(user, contributed ?? {}) as Record<string, unknown>

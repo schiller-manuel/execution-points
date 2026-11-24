@@ -12,11 +12,28 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { type API, SymbolFlags, TypeFlags } from 'typescript/sync'
+import {
+  type API,
+  type Checker,
+  type NumberLiteralType,
+  type StringLiteralType,
+  SymbolFlags,
+  type Type,
+  TypeFlags,
+  type UnionType,
+} from 'typescript/sync'
 import { createFileSystemLayer } from 'typescript/fs'
-import { SyntaxKind } from 'typescript/ast'
-import { generateFileRegistryModule } from '../src/contracts.ts'
-import { buildTargetPlan } from '../src/discovery.ts'
+import {
+  type Identifier,
+  type InterfaceDeclaration,
+  type Node,
+  type ParameterDeclaration,
+  SyntaxKind,
+  type VariableDeclaration,
+  type VariableStatement,
+} from 'typescript/ast'
+import { type RegistryCache, generateFileRegistryModule } from '../src/contracts.ts'
+import { type TargetPlan, buildTargetPlan } from '../src/discovery.ts'
 
 export const repoRoot = process.cwd()
 
@@ -108,27 +125,8 @@ export interface RegistryReading {
   nodes: Record<string, NodeReading>
 }
 
-interface PlanNode {
-  id: string
-  kind: string
-  start: number
-  end: number
-  captures: ReadonlyArray<string>
-}
-interface PlanFile {
-  file: string
-  relativeFile: string
-  source: string
-  nodes: ReadonlyArray<PlanNode>
-}
-export interface Plan {
-  root: string
-  files: ReadonlyArray<PlanFile>
-}
-
-type Checker = any
-type Type = any
-type Node = any
+/** A declaration of the witness file: `export declare const <name>: <type>`. */
+type Witness = VariableDeclaration & { readonly name: Identifier }
 
 const typeOfProperty = (checker: Checker, type: Type, name: string): Type | undefined => {
   const property = checker.getPropertyOfType(type, name)
@@ -142,7 +140,7 @@ function literalOf(checker: Checker, type: Type, name: string): string | number 
   const value = checker.getTypeOfSymbol(property)
   if (property.flags & SymbolFlags.Optional && value.flags & TypeFlags.Undefined) return ABSENT
   if (value.flags & TypeFlags.Null) return null
-  if (value.flags & (TypeFlags.StringLiteral | TypeFlags.NumberLiteral)) return value.value
+  if (value.flags & (TypeFlags.StringLiteral | TypeFlags.NumberLiteral)) return (value as StringLiteralType | NumberLiteralType).value
   return `type ${checker.typeToString(value)}`
 }
 
@@ -158,24 +156,25 @@ function modifiersOf(checker: Checker, type: Type, rootKey: string, depth = 0): 
   if (
     symbol &&
     symbol.flags & (SymbolFlags.Interface | SymbolFlags.Class) &&
-    symbol.declarations.some((declaration: { path: string }) => !declaration.path.toLowerCase().startsWith(rootKey))
+    symbol.declarations.some((declaration) => !declaration.path.toLowerCase().startsWith(rootKey))
   ) {
     return ''
   }
   const members = type.getProperties().map(
-    (property: any) =>
+    (property) =>
       `${property.name}${checker.isReadonlySymbol(property) ? '!' : ''}${property.flags & SymbolFlags.Optional ? '?' : ''}` +
       `(${modifiersOf(checker, checker.getTypeOfSymbol(property), rootKey, depth + 1)})`,
   )
   const indexes = type
     .getIndexInfos()
-    .map((info: any) => `[${checker.typeToString(info.keyType)}]${info.isReadonly ? '!' : ''}`)
+    .map((info) => `[${checker.typeToString(info.keyType)}]${info.isReadonly ? '!' : ''}`)
   const signatures = [...type.getCallSignatures(), ...type.getConstructSignatures()].map(
-    (signature: any) =>
+    (signature) =>
       `(${signature
         .getParameters()
-        .map((parameter: any) => {
-          const declaration = parameter.valueDeclaration?.resolve()
+        .map((parameter) => {
+          // What declares a parameter of a signature is a parameter.
+          const declaration = parameter.valueDeclaration?.resolve() as ParameterDeclaration | undefined
           return declaration?.dotDotDotToken ? '...' : declaration?.questionToken ? '?' : '.'
         })
         .join('')})`,
@@ -213,7 +212,7 @@ function localTypeAt(checker: Checker, expression: Node, name: string): { type: 
     if (reference) return
     if (
       node.kind === SyntaxKind.Identifier &&
-      node.text === name &&
+      (node as Identifier).text === name &&
       checker.getSymbolAtLocation(node)?.id === binding.id
     ) {
       reference = node
@@ -258,7 +257,7 @@ export function compileRegistry(
   api: API,
   root: string,
   registryText: string,
-  plan: Plan,
+  plan: TargetPlan,
   options: ReadOptions = {},
 ): CompiledRegistry {
   const registryFile = join(root, 'points.ep.ts')
@@ -299,7 +298,7 @@ export function compileRegistry(
     for (const [file] of extra) extraErrors[relativeName(file)] = []
     for (const diagnostic of [...program.getSyntacticDiagnostics(), ...program.getSemanticDiagnostics()]) {
       if (diagnostic.category !== 1) continue
-      const text = [diagnostic.text ?? '', ...(diagnostic.messageChain ?? []).map((chain: any) => chain.text)].join(' ')
+      const text = [diagnostic.text ?? '', ...(diagnostic.messageChain ?? []).map((chain) => chain.text)].join(' ')
       const name = relativeName(diagnostic.fileName)
       if (name === 'points.ep.ts') registryErrors.push(`TS${diagnostic.code}: ${text}`)
       else if (name in extraErrors) extraErrors[name]!.push({ code: diagnostic.code, text })
@@ -308,27 +307,27 @@ export function compileRegistry(
 
     const witnesses = new Map<string, Type>()
     const findWitnesses = (node: Node) => {
-      if (node.kind === SyntaxKind.VariableDeclaration) witnesses.set(node.name.text, checker.getTypeAtLocation(node.name))
+      if (node.kind === SyntaxKind.VariableDeclaration) witnesses.set((node as Witness).name.text, checker.getTypeAtLocation((node as Witness).name))
       node.forEachChild(findWitnesses)
     }
-    findWitnesses(program.getSourceFile(witnessFile))
-    const registryType = witnesses.get('registry')
-    const writable = [witnesses.get('anObject'), witnesses.get('aString')]
-    const files: Array<string> = registryType.getProperties().map((property: any) => property.name)
+    findWitnesses(program.getSourceFile(witnessFile)!)
+    const registryType = witnesses.get('registry')!
+    const writable = [witnesses.get('anObject')!, witnesses.get('aString')!]
+    const files: Array<string> = registryType.getProperties().map((property) => property.name)
 
     const nodes: Record<string, NodeReading> = {}
     const declaredAt = new Map<string, Type>()
     for (const entry of plan.files) {
       const declared = typeOfProperty(checker, registryType, entry.relativeFile)
       if (!declared) continue
-      const members: Array<Type> = declared.flags & TypeFlags.Union ? declared.getTypes() : [declared]
-      const byId = new Map(members.map((member) => [typeOfProperty(checker, member, 'id')?.value as string, member]))
+      const members: ReadonlyArray<Type> = declared.flags & TypeFlags.Union ? (declared as UnionType).getTypes() : [declared]
+      const byId = new Map(members.map((member) => [(typeOfProperty(checker, member, 'id') as StringLiteralType | undefined)?.value, member]))
 
       // TypeScript drops a byte-order mark before it parses, so its positions
       // start one code unit after the positions in the file on disk.
       const mark = entry.source.charCodeAt(0) === 0xfeff ? 1 : 0
       const expressions = new Map<string, Node>()
-      const sourceFile = program.getSourceFile(entry.file)
+      const sourceFile = program.getSourceFile(entry.file)!
       const collect = (node: Node) => {
         expressions.set(`${SyntaxKind[node.kind]}:${node.getStart(sourceFile) + mark}:${node.end + mark}`, node)
         node.forEachChild(collect)
@@ -338,7 +337,7 @@ export function compileRegistry(
       for (const node of entry.nodes) {
         const member = byId.get(node.id)
         if (!member) continue
-        const expression = expressions.get(`${node.kind}:${node.start}:${node.end}`)
+        const expression = expressions.get(`${node.kind}:${node.start}:${node.end}`)!
         const descriptor: NodeReading['descriptor'] = {}
         for (const field of ['kind', 'inFunction', 'nth', 'callee', 'operator']) {
           descriptor[field] = literalOf(checker, member, field)
@@ -355,14 +354,14 @@ export function compileRegistry(
         const unportableLocals: Record<string, string> = {}
         for (const property of typeOfProperty(checker, member, '__unportableLocals')?.getProperties() ?? []) {
           const reasonOfLocal = checker.getTypeOfSymbol(property)
-          unportableLocals[property.name] = reasonOfLocal.flags & TypeFlags.StringLiteral ? String(reasonOfLocal.value) : ''
+          unportableLocals[property.name] = reasonOfLocal.flags & TypeFlags.StringLiteral ? String((reasonOfLocal as StringLiteralType).value) : ''
         }
         const result = typeOfProperty(checker, member, 'result')!
         const original = checker.getTypeAtLocation(expression)
         declaredAt.set(node.id, result)
         nodes[node.id] = {
           descriptor,
-          unportable: reason ? String(reason.value) : null,
+          unportable: reason ? String((reason as StringLiteralType).value) : null,
           result: reason ? null : fitOf(checker, result, original, rootKey),
           opaque: reason
             ? !(result.flags & (TypeFlags.Any | TypeFlags.Unknown | TypeFlags.Never)) &&
@@ -374,8 +373,8 @@ export function compileRegistry(
             ? null
             : result
                 .getProperties()
-                .filter((property: any) => !String(property.escapedName).startsWith('__@'))
-                .map((property: any) => property.name)
+                .filter((property) => !String(property.escapedName).startsWith('__@'))
+                .map((property) => property.name)
                 .sort(),
           locals,
           mentioned: node.captures.filter((name) => originals.get(name)?.mentioned),
@@ -391,8 +390,8 @@ export function compileRegistry(
     let copies = 0
     let keyConstants = 0
     for (const statement of program.getSourceFile(registryFile)?.statements ?? []) {
-      if (statement.kind === SyntaxKind.InterfaceDeclaration && statement.name.text.startsWith('__EP_')) copies += 1
-      if (statement.kind === SyntaxKind.VariableStatement && statement.declarationList.declarations[0].name.text.startsWith('__ep_key_')) {
+      if (statement.kind === SyntaxKind.InterfaceDeclaration && (statement as InterfaceDeclaration).name.text.startsWith('__EP_')) copies += 1
+      if (statement.kind === SyntaxKind.VariableStatement && ((statement as VariableStatement).declarationList.declarations[0].name as Identifier).text.startsWith('__ep_key_')) {
         keyConstants += 1
       }
     }
@@ -403,7 +402,7 @@ export function compileRegistry(
 }
 
 export interface ProjectRegistry extends CompiledRegistry {
-  plan: Plan
+  plan: TargetPlan
   text: string
 }
 
@@ -412,9 +411,9 @@ export function generateAndCompile(
   api: API,
   root: string,
   targets: ReadonlyArray<string>,
-  options: ReadOptions & { cache?: Record<string, unknown> } = {},
+  options: ReadOptions & { cache?: RegistryCache } = {},
 ): ProjectRegistry {
-  const plan = buildTargetPlan({ root, targets, api }) as Plan
+  const plan = buildTargetPlan({ root, targets, api })
   const { text } = generateFileRegistryModule(plan, {
     fromFile: join(root, 'points.ep'),
     api,

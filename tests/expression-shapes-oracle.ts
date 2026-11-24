@@ -645,7 +645,7 @@ export function judge(plan: ShapePlan): Array<Candidate> {
     if (!parent || !inChain(e)) return false
     const object =
       parent.t === 'call' ? parent.callee : parent.t === 'member' || parent.t === 'element' ? parent.object : undefined
-    return object === cur && !(parent.t !== 'element' && parent.optional)
+    return object === cur && !(parent.t !== 'element' && (parent as Extract<Expr, { t: 'call' | 'member' }>).optional)
   }
   const calleeName = (callee: Expr) =>
     callee.t === 'id' || callee.t === 'member' || callee.t === 'keyword' ? callee.name : '(anonymous)'

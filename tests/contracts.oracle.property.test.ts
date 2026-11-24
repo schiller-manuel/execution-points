@@ -73,15 +73,14 @@
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import fc from 'fast-check'
-import { API } from 'typescript/sync'
+import { API, type Snapshot } from 'typescript/sync'
 import { afterAll } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { generateFileRegistryModule } from '../src/contracts.ts'
-import { buildTargetPlan } from '../src/discovery.ts'
+import { type RegistryCache, generateFileRegistryModule } from '../src/contracts.ts'
+import { type TargetPlan, buildTargetPlan } from '../src/discovery.ts'
 import {
   ABSENT,
   type Fit,
-  type Plan,
   type RegistryReading,
   compileRegistry,
   createProject,
@@ -117,9 +116,9 @@ interface PlannedNode {
   captures: Array<string>
 }
 
-const plannedNodes = (plan: Plan): Array<PlannedNode> =>
+const plannedNodes = (plan: TargetPlan): Array<PlannedNode> =>
   plan.files.flatMap((entry) =>
-    entry.nodes.map((node: any) => ({
+    entry.nodes.map((node) => ({
       id: node.id,
       kind: node.kind,
       inFunction: node.inFunction,
@@ -205,17 +204,18 @@ const nodeOf = (nodes: Record<string, unknown>, fixture: string, containing = ''
 
 const judge =
   (law: string) =>
-  (_history: unknown, observations: ReadonlyArray<Observation>, expected: unknown) => {
+  <History>(_history: History, observations: ReadonlyArray<Observation>, expected: unknown) => {
     const crash = observations.find((entry) => entry.checkpoint === 'crash')
     if (crash) return differs('crash', law, crash.value, 'no crash') ?? pass
     return differs('registry', law, observations.find((entry) => entry.checkpoint === 'registry')?.value, expected) ?? pass
   }
 
+/** Changes the registry that was observed. `Value` is the part of that observation the change reads. */
 const corruptRegistry =
-  (change: (value: any) => unknown) =>
+  <Value = Record<string, unknown>>(change: (value: Value) => unknown) =>
   (trace: ReadonlyArray<Observation>) =>
     trace.map((entry) =>
-      entry.checkpoint === 'registry' ? { ...entry, value: change(structuredClone(entry.value)) } : entry,
+      entry.checkpoint === 'registry' ? { ...entry, value: change(structuredClone(entry.value) as Value) } : entry,
     )
 
 // ---------------------------------------------------------------------------
@@ -240,7 +240,9 @@ const fitView = (reading: RegistryReading) => ({
   ),
 })
 
-const fitModel = (_history: unknown, trace: ReadonlyArray<Observation>) => ({
+type FitView = ReturnType<typeof fitView>
+
+const fitModel = <History>(_history: History, trace: ReadonlyArray<Observation>) => ({
   registryErrors: [],
   projectErrors: [],
   nodes: Object.fromEntries(
@@ -597,7 +599,7 @@ oracleProperty({
       name: 'a-result-of-another-type',
       law: 'registry compiles and fits',
       history: { enumerated: 'default-options' },
-      corrupt: corruptRegistry((value) => {
+      corrupt: corruptRegistry((value: FitView) => {
         value.nodes[nodeOf(value.nodes, 'exported-enum-members')].result = 'not assignable'
         return value
       }),
@@ -606,7 +608,7 @@ oracleProperty({
       name: 'a-file-missing-from-the-registry',
       law: 'registry compiles and fits',
       history: { enumerated: 'default-options' },
-      corrupt: corruptRegistry((value) => {
+      corrupt: corruptRegistry((value: FitView) => {
         for (const id of Object.keys(value.nodes)) if (id.startsWith('src/target-with-byte-order-mark.')) delete value.nodes[id]
         return value
       }),
@@ -781,7 +783,7 @@ oracleProperty({
       name: 'a-tuple-that-lost-readonly',
       law: 'primitive-and-collection-types',
       history: { enumerated: 'default-options' },
-      corrupt: corruptRegistry((value) => {
+      corrupt: corruptRegistry((value: FitView) => {
         value.nodes[nodeOf(value.nodes, 'tuples', ':ro:')].result = 'not assignable'
         return value
       }),
@@ -790,7 +792,7 @@ oracleProperty({
       name: 'a-member-that-lost-readonly',
       law: 'primitive-and-collection-types',
       history: { enumerated: 'default-options' },
-      corrupt: corruptRegistry((value) => {
+      corrupt: corruptRegistry((value: FitView) => {
         value.nodes[nodeOf(value.nodes, 'objects-with-optional-and-readonly-members')].result = 'modifiers differ'
         return value
       }),
@@ -936,7 +938,7 @@ oracleProperty({
       name: 'un-narrowed-nullable-user',
       law: 'control-flow-narrowing',
       history: { enumerated: 'default-options' },
-      corrupt: corruptRegistry((value) => {
+      corrupt: corruptRegistry((value: FitView) => {
         value.nodes[nodeOf(value.nodes, 'truthiness-throw-guard', ':send:')].locals.user = 'not assignable'
         return value
       }),
@@ -1345,6 +1347,8 @@ const identityView = (reading: RegistryReading) => ({
   ),
 })
 
+type IdentityView = ReturnType<typeof identityView>
+
 oracleProperty({
   id: 'contracts-export-paths-and-helpers',
   owns: [
@@ -1407,7 +1411,7 @@ oracleProperty({
       name: 'a-copy-where-the-type-has-a-name',
       law: 'export-paths-and-helpers',
       history: { enumerated: 'default-options' },
-      corrupt: corruptRegistry((value) => {
+      corrupt: corruptRegistry((value: IdentityView) => {
         value.targets[nodeOf(value.targets, 'exported-interface')].result = 'equivalent'
         return value
       }),
@@ -1416,7 +1420,7 @@ oracleProperty({
       name: 'a-nominal-copy-without-its-brand',
       law: 'export-paths-and-helpers',
       history: { enumerated: 'default-options' },
-      corrupt: corruptRegistry((value) => {
+      corrupt: corruptRegistry((value: IdentityView) => {
         value.targets[nodeOf(value.targets, 'private-enum')].acceptsOriginal = true
         return value
       }),
@@ -1425,7 +1429,7 @@ oracleProperty({
       name: 'a-copy-that-leaks-a-private-member',
       law: 'export-paths-and-helpers',
       history: { enumerated: 'default-options' },
-      corrupt: corruptRegistry((value) => {
+      corrupt: corruptRegistry((value: IdentityView) => {
         value.targets[nodeOf(value.targets, 'private-class-with-private-members')].members = ['id', 'open', 'secret']
         return value
       }),
@@ -1618,7 +1622,7 @@ oracleProperty({
       name: 'a-second-brand-for-the-same-class',
       law: 'one-copy-per-private-type',
       history: { enumerated: 'private-class-as-result-and-as-local' },
-      corrupt: corruptRegistry((value) => ({ ...value, same: value.same.map(() => false) })),
+      corrupt: corruptRegistry((value: { same: Array<boolean> }) => ({ ...value, same: value.same.map(() => false) })),
     },
     {
       name: 'a-copy-for-every-use',
@@ -1846,6 +1850,12 @@ export function unknownCall() { return gone() }
   },
 ]
 
+/** The part of the registry this law observes that its calibrations change. */
+type ParityView = {
+  files: Array<string>
+  nodes: Record<string, { result: string; reasonsNameTheirSubject: boolean; unportableLocals: Array<string> }>
+}
+
 oracleProperty({
   id: 'contracts-disjoint-fields-and-unportable-parity',
   owns: ['src/contracts.ts#renderFileModule', 'src/contracts.ts#generateFileRegistryModule'],
@@ -1959,7 +1969,7 @@ oracleProperty({
       name: 'missing-unportable-node',
       law: 'disjoint-fields-and-unportable-parity',
       history: { enumerated: 'expressions-typed-by-a-type-parameter' },
-      corrupt: corruptRegistry((value) => {
+      corrupt: corruptRegistry((value: ParityView) => {
         const generic = Object.keys(value.nodes).find((id) => id.includes('#genericCaller:'))!
         delete value.nodes[generic]
         return value
@@ -1969,8 +1979,8 @@ oracleProperty({
       name: 'an-unwritable-result-typed-never',
       law: 'disjoint-fields-and-unportable-parity',
       history: { enumerated: 'file-with-only-unportable-expressions' },
-      corrupt: corruptRegistry((value) => {
-        for (const node of Object.values<any>(value.nodes)) node.result = 'a type a test can write'
+      corrupt: corruptRegistry((value: ParityView) => {
+        for (const node of Object.values(value.nodes)) node.result = 'a type a test can write'
         return value
       }),
     },
@@ -1978,7 +1988,7 @@ oracleProperty({
       name: 'a-reason-that-names-nothing',
       law: 'disjoint-fields-and-unportable-parity',
       history: { enumerated: 'expressions-typed-by-a-type-parameter' },
-      corrupt: corruptRegistry((value) => {
+      corrupt: corruptRegistry((value: ParityView) => {
         value.nodes[Object.keys(value.nodes).find((id) => id.includes('#pick:'))!].reasonsNameTheirSubject = false
         return value
       }),
@@ -1987,8 +1997,8 @@ oracleProperty({
       name: 'a-local-dropped-without-a-reason',
       law: 'disjoint-fields-and-unportable-parity',
       history: { enumerated: 'types-declared-inside-a-function' },
-      corrupt: corruptRegistry((value) => {
-        for (const node of Object.values<any>(value.nodes)) node.unportableLocals = []
+      corrupt: corruptRegistry((value: ParityView) => {
+        for (const node of Object.values(value.nodes)) node.unportableLocals = []
         return value
       }),
     },
@@ -1996,7 +2006,7 @@ oracleProperty({
       name: 'a-global-script-in-the-registry',
       law: 'disjoint-fields-and-unportable-parity',
       history: { enumerated: 'several-files-in-one-plan' },
-      corrupt: corruptRegistry((value) => ({ ...value, files: [...value.files, 'src/script.ts'].sort() })),
+      corrupt: corruptRegistry((value: ParityView) => ({ ...value, files: [...value.files, 'src/script.ts'].sort() })),
     },
   ],
 })
@@ -2025,14 +2035,15 @@ interface TrackedSnapshot {
  */
 function countingOpenSnapshots<T>(run: () => T): { value: T; open: number } {
   const created: Array<TrackedSnapshot> = []
-  const track = (snapshot: any) => {
+  const track = (snapshot: Snapshot): Snapshot => {
     created.push(snapshot)
     const update = snapshot.update
-    Object.defineProperty(snapshot, 'update', { configurable: true, value: (...args: Array<unknown>) => track(update.apply(snapshot, args)) })
+    Object.defineProperty(snapshot, 'update', { configurable: true, value: (...args: Parameters<typeof update>) => track(update.apply(snapshot, args)) })
     return snapshot
   }
-  const create = api.createSnapshot
-  Object.defineProperty(api, 'createSnapshot', { configurable: true, value: (...args: Array<unknown>) => track((create as any).apply(api, args)) })
+  // The wrapper passes on whatever it is called with. `createSnapshot` has that type through its overload without parameters.
+  const create: (...args: Array<unknown>) => Snapshot = api.createSnapshot
+  Object.defineProperty(api, 'createSnapshot', { configurable: true, value: (...args: Array<unknown>) => track(create.apply(api, args)) })
   try {
     const value = run()
     return { value, open: created.filter((snapshot) => !snapshot.isDisposed()).length }
@@ -2089,9 +2100,9 @@ oracleProperty({
       'src/limits.ts': `export function loadLimit(): number { return 5 }\n`,
       'other/extra.ts': `export function extra(n: number) { return n * 2 }\n`,
     })
-    const cache: { snapshot?: TrackedSnapshot } = {}
+    const cache: RegistryCache = {}
     const generate = (targets: ReadonlyArray<string>, warm: boolean) => {
-      const plan = buildTargetPlan({ root, targets, api }) as Plan
+      const plan = buildTargetPlan({ root, targets, api })
       const { text } = generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api, ...(warm ? { cache } : {}) })
       return { plan, text }
     }
@@ -2109,7 +2120,7 @@ oracleProperty({
         observe('reach', 'plan-ahead-of-disk')
         const ahead = `function later(): string { return 'x' }\nexport function work(n: number) { return later() }\n`
         const file = join(root, 'src/app.ts')
-        const plan = buildTargetPlan({ root, targets: ['src/app.ts'], overrides: new Map([[file, ahead]]), api }) as Plan
+        const plan = buildTargetPlan({ root, targets: ['src/app.ts'], overrides: new Map([[file, ahead]]), api })
         const { text } = generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api })
         writeFileSync(file, ahead)
         const { reading } = compileRegistry(api, root, text, plan)
@@ -2396,22 +2407,22 @@ oracleProperty({
       {
         name: 'imported-file-then-target',
         enters: ['imported-file-edited', 'target-edited-after-an-imported-file'],
-        build: (edits) => [{ file: 'imported', variant: 1 }, { file: 'target', variant: 1 }, ...edits.slice(0, 1)],
+        build: (edits): Array<Edit> => [{ file: 'imported', variant: 1 }, { file: 'target', variant: 1 }, ...edits.slice(0, 1)],
       },
       {
         name: 'transitive-import-alone',
         enters: ['transitively-imported-file-edited'],
-        build: (edits) => [{ file: 'transitive', variant: 1 + (edits[0]!.variant % 2) }],
+        build: (edits): Array<Edit> => [{ file: 'transitive', variant: 1 + (edits[0]!.variant % 2) }],
       },
       {
         name: 'global-declaration-alone',
         enters: ['global-declaration-edited'],
-        build: (edits) => [{ file: 'ambient', variant: 1 + (edits[0]!.variant % 2) }],
+        build: (edits): Array<Edit> => [{ file: 'ambient', variant: 1 + (edits[0]!.variant % 2) }],
       },
       {
         name: 'target-imports-a-new-file',
         enters: ['file-created-and-imported'],
-        build: (edits) => [...edits.slice(0, 1), { file: 'target', variant: 3 }],
+        build: (edits): Array<Edit> => [...edits.slice(0, 1), { file: 'target', variant: 3 }],
       },
     ],
   },
@@ -2431,9 +2442,9 @@ oracleProperty({
     const root = createProject(
       Object.fromEntries(Object.values(EDITABLE).map(({ file, variants }) => [file, variants[0]])),
     )
-    const cache: { snapshot?: { dispose: () => void } } = {}
+    const cache: RegistryCache = {}
     const generate = (warm: boolean) => {
-      const plan = buildTargetPlan({ root, targets: ['src/app.ts'], api }) as Plan
+      const plan = buildTargetPlan({ root, targets: ['src/app.ts'], api })
       const { text } = generateFileRegistryModule(plan, {
         fromFile: join(root, 'points.ep'),
         api,
