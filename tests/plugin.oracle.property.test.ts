@@ -683,6 +683,8 @@ function unusedFileSource(host: Host) {
     'block-callback': `function make(n) { let s = 0; [n].forEach((i) => { s += tick(i) }); return { s } }\nreturn { make`,
   }
   return (
+    // What makes the fixture a module; the driver takes it out again to run the code as a function.
+    `export {}\n` +
     `function tick(i) { return i }\n` +
     `function noop(v) { return v }\n` +
     `function nothing() {}\n` +
@@ -744,10 +746,9 @@ oracleProperty({
         return
       }
       const aliases = /import \{ invoke as (\w+), registerFile as (\w+) \}/.exec(res.code)!
-      const body = res.code.replace(
-        /import \{ invoke as \w+, registerFile as \w+ \} from "execution-points-prototype\/runtime";\n/,
-        '',
-      )
+      const body = res.code
+        .replace(/import \{ invoke as \w+, registerFile as \w+ \} from "execution-points-prototype\/runtime";\n/, '')
+        .replace('export {}\n', '')
 
       let runtimeCalls = 0
       let stateReads = 0

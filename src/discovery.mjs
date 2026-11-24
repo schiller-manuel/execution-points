@@ -30,50 +30,80 @@ export function resolveTargetFiles(root, configuredTargets = []) {
   return [...resolved].sort()
 }
 
-function isSelectableExpression(node) {
+const wrapperKinds = new Set([
+  SyntaxKind.ParenthesizedExpression,
+  SyntaxKind.AsExpression,
+  SyntaxKind.TypeAssertionExpression,
+  SyntaxKind.NonNullExpression,
+  SyntaxKind.SatisfiesExpression,
+])
+
+/**
+ * A test can select a call, a binary operation that does not assign, or a ternary, unless
+ * moving it into a function of its own, which is how it is intercepted, would change what the
+ * code does.
+ */
+const isSelectableExpression = (node) =>
+  indexableKinds.has(node.kind) &&
+  !isAssignment(node) &&
+  !standsForAPlace(node) &&
+  !continuesOptionalChain(node) &&
+  !isTiedToItsFunction(node)
+
+const isAssignment = (node) => node.kind === SyntaxKind.BinaryExpression && isAssignmentOp(node.operatorToken.kind)
+
+/** Whether the code around the expression needs more than its value: a place to write to, or something to call. */
+function standsForAPlace(node) {
   let cur = node
-  while (
-    cur.parent &&
-    [
-      SyntaxKind.ParenthesizedExpression,
-      SyntaxKind.AsExpression,
-      SyntaxKind.TypeAssertionExpression,
-      SyntaxKind.NonNullExpression,
-      SyntaxKind.SatisfiesExpression,
-    ].includes(cur.parent.kind)
-  ) {
-    cur = cur.parent
-  }
+  while (wrapperKinds.has(cur.parent.kind)) cur = cur.parent
   const p = cur.parent
-  return (
-    indexableKinds.has(node.kind) &&
-    !(node.kind === SyntaxKind.BinaryExpression && isAssignmentOp(node.operatorToken.kind)) &&
-    !(
-      p &&
-      (((p.kind === SyntaxKind.CallExpression || p.kind === SyntaxKind.NewExpression) && p.expression === cur) ||
-        p.kind === SyntaxKind.TaggedTemplateExpression ||
-        (p.kind === SyntaxKind.BinaryExpression && p.left === cur && isAssignmentOp(p.operatorToken.kind)) ||
-        p.kind === SyntaxKind.DeleteExpression ||
-        p.kind === SyntaxKind.PostfixUnaryExpression ||
-        (p.kind === SyntaxKind.PrefixUnaryExpression &&
-          [SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken].includes(p.operator)))
-    ) &&
-    !hasUnsupportedSyntax(node)
-  )
+  const isPlace =
+    (isAssignment(p) && p.left === cur) ||
+    p.kind === SyntaxKind.DeleteExpression ||
+    p.kind === SyntaxKind.PostfixUnaryExpression ||
+    (p.kind === SyntaxKind.PrefixUnaryExpression &&
+      [SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken].includes(p.operator))
+  const isCalled =
+    ((p.kind === SyntaxKind.CallExpression || p.kind === SyntaxKind.NewExpression) && p.expression === cur) ||
+    p.kind === SyntaxKind.TaggedTemplateExpression
+  // The result of a call carries no receiver, so a call can be replaced where it is called.
+  return isPlace || (isCalled && node.kind !== SyntaxKind.CallExpression)
 }
 
-function hasUnsupportedSyntax(part) {
-  if (
-    [SyntaxKind.AwaitExpression, SyntaxKind.YieldExpression, SyntaxKind.SuperKeyword].includes(part.kind) ||
-    part.questionDotToken ||
-    (part.flags & NodeFlags.OptionalChain) ||
-    (part.kind === SyntaxKind.CallExpression &&
-      (part.expression.kind === SyntaxKind.ImportKeyword ||
-        (part.expression.kind === SyntaxKind.Identifier && part.expression.text === 'eval')))
-  ) {
-    return true
+/**
+ * Whether an optional chain goes on behind the expression without a `?.` of its own: such a
+ * chain ends where the expression yields nothing, which a function of its own would undo.
+ */
+function continuesOptionalChain(node) {
+  const next = node.parent
+  return Boolean(next.flags & NodeFlags.OptionalChain) && next.expression === node && !next.questionDotToken
+}
+
+/**
+ * Whether the code awaits, yields, calls `super(...)`, evaluates code with a direct `eval`, or
+ * imports, outside the functions it contains. Of a nested function, only what its name and
+ * decorators compute runs here.
+ */
+function isTiedToItsFunction(part) {
+  if (part.kind === SyntaxKind.AwaitExpression || part.kind === SyntaxKind.YieldExpression) return true
+  if (part.kind === SyntaxKind.CallExpression) {
+    const callee = part.expression
+    if (
+      callee.kind === SyntaxKind.SuperKeyword ||
+      callee.kind === SyntaxKind.ImportKeyword ||
+      (callee.kind === SyntaxKind.Identifier && callee.text === 'eval')
+    ) {
+      return true
+    }
   }
-  return Boolean(part.forEachChild(hasUnsupportedSyntax))
+  const runsLater = runsItsOwnCode.has(part.kind)
+  return Boolean(
+    part.forEachChild(
+      (child) =>
+        !(runsLater && (child === part.body || child === part.initializer || child.kind === SyntaxKind.Parameter)) &&
+        isTiedToItsFunction(child),
+    ),
+  )
 }
 
 function enclosingFunctionName(node) {
@@ -111,6 +141,12 @@ const functionKinds = new Set([
   SyntaxKind.SetAccessor,
   SyntaxKind.Constructor,
 ])
+/** What does not run where it is written: a function's body and parameters, a field's initializer, a static block. */
+const runsItsOwnCode = new Set([
+  ...functionKinds,
+  SyntaxKind.PropertyDeclaration,
+  SyntaxKind.ClassStaticBlockDeclaration,
+])
 
 /**
  * Code that runs later than, or more often than, the code around it gets a home of its own:
@@ -146,83 +182,151 @@ function callCalleeName(node) {
   return '(anonymous)'
 }
 
-function collectBindingEntries(nameNode, endPos, out) {
-  if (!nameNode) return
-  if (nameNode.kind === SyntaxKind.Identifier) {
-    out.push({ name: nameNode.text, readyAt: endPos })
-    return
-  }
-  for (const el of nameNode.elements) collectBindingEntries(el.name, endPos, out)
+/** The names a binding name or pattern declares; an array pattern can leave an element out. */
+function declaredNames(nameNode, names = []) {
+  if (!nameNode) return names
+  if (nameNode.kind === SyntaxKind.Identifier) names.push(nameNode.text)
+  else for (const element of nameNode.elements) declaredNames(element.name, names)
+  return names
 }
 
-function scopeBindingsOf(node) {
-  if (node.kind === SyntaxKind.SourceFile) return []
-  const entries = []
-  if (node.parameters) {
-    for (const p of node.parameters) collectBindingEntries(p.name, p.end, entries)
+/**
+ * The names `node` declares for the code inside it, as `[name, binding]` pairs. A binding is
+ * initialized from `readyAt` on. A function declaration exists as soon as its block is entered,
+ * so its binding also collects where the function is used: it can run from its first use on.
+ * Those bindings are kept in `functions`, by declaration. A `switch` is one scope, in which a
+ * declaration is initialized only within its own clause.
+ */
+function declarationsOf(node, functions) {
+  const found = []
+  const declare = (nameNode, readyAt, inClause) => {
+    for (const name of declaredNames(nameNode)) found.push([name, { readyAt, inClause }])
   }
-  if (node.variableDeclaration) {
-    collectBindingEntries(node.variableDeclaration.name, node.variableDeclaration.end, entries)
-  }
-  if (
-    (node.kind === SyntaxKind.ForInStatement || node.kind === SyntaxKind.ForOfStatement) &&
-    node.initializer.kind === SyntaxKind.VariableDeclarationList
-  ) {
-    for (const decl of node.initializer.declarations) {
-      collectBindingEntries(decl.name, node.expression.end, entries)
-    }
-    return entries
-  }
-  const statements =
-    node.statements ?? (node.kind === SyntaxKind.ForStatement && node.initializer ? [node.initializer] : [])
-  for (const stmt of statements) {
-    if (stmt.kind === SyntaxKind.FunctionDeclaration) {
-      entries.push({ name: stmt.name.text, readyAt: -1 })
-    } else if (stmt.kind === SyntaxKind.ClassDeclaration) {
-      entries.push({ name: stmt.name.text, readyAt: stmt.end })
-    } else if (stmt.kind === SyntaxKind.VariableStatement) {
-      for (const decl of stmt.declarationList.declarations) collectBindingEntries(decl.name, decl.end, entries)
-    } else if (stmt.kind === SyntaxKind.VariableDeclarationList) {
-      for (const decl of stmt.declarations) collectBindingEntries(decl.name, decl.end, entries)
+  for (const parameter of node.parameters ?? []) declare(parameter.name, parameter.end)
+  if (node.variableDeclaration) declare(node.variableDeclaration.name, node.variableDeclaration.end)
+  // Inside a class expression its name is the class, whatever the name means outside.
+  if (node.kind === SyntaxKind.ClassExpression) declare(node.name, Infinity)
+  if (node.initializer?.kind === SyntaxKind.VariableDeclarationList) {
+    // The head of a loop. A loop over a collection initializes its names once the collection is evaluated.
+    for (const declaration of node.initializer.declarations) {
+      declare(declaration.name, node.expression ? node.expression.end : declaration.end)
     }
   }
-  return entries
+  const lists = node.kind === SyntaxKind.CaseBlock ? node.clauses : node.statements && !isClause(node) ? [node] : []
+  for (const list of lists) {
+    const inClause = list === node ? undefined : list
+    for (const statement of list.statements) {
+      if (statement.kind === SyntaxKind.FunctionDeclaration) {
+        const binding = { readyAt: -1, uses: [], callers: [] }
+        functions.set(statement, binding)
+        found.push([statement.name.text, binding])
+      } else if (statement.kind === SyntaxKind.ClassDeclaration) {
+        declare(statement.name, statement.end, inClause)
+      } else if (statement.kind === SyntaxKind.VariableStatement) {
+        for (const declaration of statement.declarationList.declarations) {
+          declare(declaration.name, declaration.end, inClause)
+        }
+      }
+    }
+  }
+  return found
+}
+
+const isClause = (node) => node.kind === SyntaxKind.CaseClause || node.kind === SyntaxKind.DefaultClause
+
+/** Whether code at `pos`, which reaches the binding's scope through the scope `through`, finds the binding initialized. */
+const isInitialized = (binding, pos, through) =>
+  binding.readyAt <= pos && (!binding.inClause || binding.inClause === through.node)
+
+/** Every place from which the function declaration can be called: its own uses, and those of the functions that use it. */
+function reachOf(fn, seen = new Set()) {
+  if (seen.has(fn)) return []
+  seen.add(fn)
+  return fn.uses.concat(...fn.callers.map((caller) => reachOf(caller, seen)))
 }
 
 /** Index all selectable expressions in a single target module using TypeScript 7.1's AST. */
-export function indexTargetFile(file, source, root, api) {
+export function indexTargetFile(file, source, root, api = getDefaultApi()) {
   const bomOffset = source.charCodeAt(0) === 0xfeff ? 1 : 0
   const lease = api.createSourceFile(file, bomOffset ? source.slice(1) : source)
   try {
     const tree = lease.sourceFile
     const relativeFile = relative(root, file).replaceAll('\\', '/')
     const fnStack = []
-    const localScopeStack = []
     const nthCounters = new Map()
-    const nodes = []
+    const found = []
     const bodies = []
     const homes = [0]
     let homeCount = 0
+    const functions = new Map()
 
-    const activeLocalsAt = (pos) => {
-      const names = new Set()
-      for (const frame of localScopeStack) {
-        for (const entry of frame) {
-          if (entry.readyAt <= pos) names.add(entry.name)
-          else names.delete(entry.name)
-        }
-      }
-      return [...names].sort()
+    /** The scope of the code inside `node`: the names it declares, and the function declaration it is. */
+    const scopeOf = (node, parent) => {
+      const scope = { node, parent, names: new Map(declarationsOf(node, functions)), declares: functions.get(node) }
+      for (const binding of scope.names.values()) binding.home = scope
+      return scope
     }
 
-    const visit = (node) => {
+    /** Records a use of a function declaration: a function can run from its first use on. */
+    const noteUse = (identifier, from) => {
+      let through
+      let caller
+      for (let scope = from; scope; through = scope, scope = scope.parent) {
+        const binding = scope.names.get(identifier.text)
+        if (binding) {
+          if (!binding.uses) return
+          // A use inside another function of the same scope happens whenever that function runs.
+          if (caller?.home === scope) binding.callers.push(caller)
+          else binding.uses.push({ pos: identifier.getStart(tree), through })
+          return
+        }
+        caller = scope.declares ?? caller
+      }
+    }
+
+    /**
+     * The local names that are initialized whenever the code at `pos` runs. The innermost
+     * declaration of a name decides. Inside a function declaration, the names of the scope
+     * that holds it are initialized only if they are at every place the function can be
+     * called from.
+     */
+    const capturesAt = (pos, from) => {
+      const decided = new Set()
+      const names = []
+      let through
+      let via
+      for (let scope = from; scope; through = scope, scope = scope.parent) {
+        for (const [name, binding] of scope.names) {
+          if (decided.has(name)) continue
+          decided.add(name)
+          const ready = via
+            ? (via.reach ??= reachOf(via)).every((use) => isInitialized(binding, use.pos, use.through))
+            : isInitialized(binding, pos, through)
+          if (ready) names.push(name)
+        }
+        if (via?.home === scope) via = undefined
+        via = scope.declares ?? via
+      }
+      return names.sort()
+    }
+
+    const visit = (node, outer) => {
       const fnName = enclosingFunctionName(node)
       if (fnName !== undefined) fnStack.push(fnName)
-      localScopeStack.push(scopeBindingsOf(node))
+      const scope = scopeOf(node, outer)
       const home = homeKind(node)
       if (home) homes.push(++homeCount)
       if (home === 'body') {
         bodies.push({ home: homeCount, start: node.getStart(tree) + bomOffset, end: node.end + bomOffset })
+      }
+
+      // A name that is read, as opposed to a name that is declared or that names a property.
+      if (
+        node.kind === SyntaxKind.Identifier &&
+        (node.parent.name !== node || node.parent.kind === SyntaxKind.ShorthandPropertyAssignment) &&
+        node.parent.propertyName !== node
+      ) {
+        noteUse(node, scope)
       }
 
       if (isSelectableExpression(node)) {
@@ -254,30 +358,36 @@ export function indexTargetFile(file, source, root, api) {
         nthCounters.set(scopePrefix, nth + 1)
         const id = `${scopePrefix}:${nth}`
 
-        nodes.push({
-          id,
-          file,
-          relativeFile,
-          kind,
-          inFunction,
-          ...extra,
-          nth,
-          start,
-          end,
-          captures: activeLocalsAt(treeStart),
-          home: homes.at(-1),
-          startsStatement: startsStatement(node, treeStart, tree),
+        found.push({
+          node: {
+            id,
+            file,
+            relativeFile,
+            kind,
+            inFunction,
+            ...extra,
+            nth,
+            start,
+            end,
+            home: homes.at(-1),
+            startsStatement: startsStatement(node, treeStart, tree),
+          },
+          at: treeStart,
+          scope,
         })
       }
 
-      node.forEachChild(visit)
+      node.forEachChild((child) => visit(child, scope))
 
       if (home) homes.pop()
-      localScopeStack.pop()
       if (fnName !== undefined) fnStack.pop()
     }
 
-    visit(tree)
+    // A file with no import or export is a global script: nothing in it can be selected. What
+    // the module itself declares is never a capture, so the walk starts below the file.
+    if (tree.externalModuleIndicator) tree.forEachChild((child) => visit(child))
+    // Captures wait until every use of every function is known.
+    const nodes = found.map(({ node, at, scope }) => ({ ...node, captures: capturesAt(at, scope) }))
     return { file, relativeFile, source, nodes, bodies }
   } finally {
     lease.dispose()
@@ -289,12 +399,11 @@ export function buildTargetPlan(options) {
   const root = resolve(options.root ?? process.cwd())
   const overrides = options.overrides ?? new Map()
   const read = (file) => (overrides.has(file) ? overrides.get(file) : readFileSync(file, 'utf8'))
-  const api = options.api ?? getDefaultApi()
 
   const files = []
   for (const file of resolveTargetFiles(root, options.targets ?? [])) {
     if (!overrides.has(file) && !existsSync(file)) continue
-    files.push(indexTargetFile(file, read(file), root, api))
+    files.push(indexTargetFile(file, read(file), root, options.api))
   }
   return {
     root,
