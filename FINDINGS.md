@@ -15,8 +15,8 @@ Where things stand on 2026-11-24:
 - **Zero gaps was not the end.** The gap check cannot change a type declaration and does not invent a wrong design. So I wrote 19 plausible wrong implementations and 38 wrong type declarations by hand. Three of the 19 and four of the 38 passed every oracle: a captured number that follows the application's variable, a captured object that is a copy, a captured local that can be assigned, a single point accepted where a list belongs. Each is held by a law now (18 of 19, 37 of 37); the one left is F18. The same work found that the compile error for `pause()` on an expression that is no promise never printed its reason; it does now.
 - **The API changed shape on your decisions:** TypeScript sources built with `tsdown`, replacements that must run, `pause`, `replace` with `using`, `interleavings` as a generator of orders, selection through a Babel-style visitor object, `execution-points list`.
 - **Listing a module as a target costs nothing until a test replaces something in it** (F6: 1.0x, from 30 to 120 times slower).
-- **The benchmark harness cannot measure the new API correctly yet.** It recognizes use of the library only by `withReplacement`, and it grades three of Vitest's assertion forms as plain errors. Harness v2.5 is in work; see "The harness on the new library".
-- **Do not rerun the benchmark yet.** The stored runs describe the old API, the guide was rewritten with their failures in view, and three grading rules wait for you. See "Should the benchmark be rerun".
+- **The benchmark harness can measure the new API since v2.5.** v2.4 recognized use of the library only by `withReplacement`, and graded three of Vitest's assertion forms as plain errors. Both are fixed, each with a self-test case that fails on v2.4; see "The harness on the new library".
+- **Do not rerun the benchmark yet.** The stored runs describe the old API, the guide was rewritten with their failures in view, and three grading rules wait for you (none of them changes a stored verdict). See "Should the benchmark be rerun".
 
 ### Where the review started (`b26e2c1`)
 
@@ -50,7 +50,7 @@ Still open:
 3. The benchmark sequence at the end of this file: approve, or change.
 4. Your global pnpm broke during this work (see "Incidents" below); say whether I should repair it.
 5. F18: one expression selected with a different capture on each way. The compiler accepts it and gives `locals` every captured name; the runtime refuses it as two matches. Either the runtime merges the captures, which is what the types already say and what I recommend, or the compiler refuses it too.
-6. Three grading rules of the benchmark, from the re-evaluation below. Should a failed assertion inside `order.run` count as a reproduction? Should the assertion-only rule apply to new runs only? Should `expect.assertions`, `expect.hasAssertions` and a snapshot mismatch count as assertions? The harness work recommends yes to all three.
+6. Three grading rules of the benchmark, from the re-evaluation below. Should a failed assertion inside `order.run` count as a reproduction? Should the assertion-only rule apply to new runs only? Should `expect.assertions`, `expect.hasAssertions` and a snapshot mismatch count as assertions? The harness work recommends yes to all three. The first and the third are one line each in `bench/classify.mjs` (`UNDECIDED_GRADINGS`), and neither case occurs in the stored matrix.
 7. The wording of six laws written today under your direction that every feature gets oracle coverage: the five of `tests/types-point.oracle.property.test.ts` (values, waiting, options, results, argument kinds) and `runtime-captured-values`. Their rules are the README's and your decisions; the sentences are mine.
 
 ## Work in progress
@@ -62,12 +62,12 @@ Still open:
 | F7 loud replacements: strict by default with `times` and `on`, built-in pause, `point.replace()` with `using`, `point.calls`, `call` in the context; F8 capture-name checks; shorthands `returns`, `throws`, `resolves`, `rejects`; F5 covered by `replace` | done |
 | Type-level laws for the new API (`pause` only on promises, option and value types, results, argument kinds) | done: `tests/types-point.oracle.property.test.ts`, five laws over 741 snippets written from rules; 37 of 37 hand-made wrong declarations rejected |
 | What a captured local holds, and that it cannot be assigned (potential laws 7 and 8) | done: `runtime-captured-values`, and five more histories in the type oracle's capture law |
-| Treatment guide and benchmark witnesses using the new API | done: the guide's library section teaches `pause`, the strict default, `list`, the visitor form and `interleavings`; the witness uses `pause`; the self-test passes (140 checks) |
+| Treatment guide and benchmark witnesses using the new API | done: the guide's library section teaches `pause`, the strict default, `list`, the visitor form and `interleavings`; the witness uses `pause`; the self-test passes |
 | An expression whose type cannot be written can be selected and passed through | done; open: such an expression cannot be paused, because the registry cannot say that its value is a promise |
 | `new X()` and `await` as selectable kinds (feature idea 8) | not built. `new` is like a call. `await` cannot be wrapped the way the others are, so it needs a design first |
 | F1, F2, F3, F10, F15, F16, registry half of F9; potential laws 1, 2 and 4; registry source mappings; an opaque result for unwritable expressions | merged; gaps in `contracts` and `content-mapper` went from 248 to 4, all four an endless loop in the mapper's frame reader |
-| Benchmark harness fixes from the audit (harness v2.4) | merged; since the type-generation merge `--self-test` passes all 140 checks |
-| Benchmark harness v2.5: library use recognized by any operation, `npx execution-points list` in a treatment workspace, a classifier that reads the error's real name, no bench process writing `dist/` | in work in the harness thread |
+| Benchmark harness fixes from the audit (harness v2.4) | merged; since the type-generation merge `--self-test` passes every check |
+| Benchmark harness v2.5: library use recognized by any operation, `npx execution-points list` in a treatment workspace, a classifier that reads the error's real name, no bench process writing `dist/` | merged (`9a8e0a9`); `--self-test` on the merged tree: 156 check lines pass, 0 fail |
 | F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command, the plugin adding the Vitest setup module | merged |
 | Selection by a visitor object with nested traversal (F4), plus `line`, `text` and the receiver of a member call (`object`); `list` shows `object=` and `inside=` | done through discovery, plugin, runtime, registry and CLI, with five new oracles; no gap left in it |
 | Every file under `tests/` type-checks under `strict`, without `any` (F17) | done |
@@ -706,28 +706,28 @@ Ordered by how much evidence there is that users need them. Built: 1, 2, 3, 6, 7
 
 Everything here is recomputed from the three stored `results.jsonl` files or rerun at zero credits. An independent audit of the harness produced several of the points; each one below was rechecked before it went in, and the ones I did not recheck are listed separately.
 
-**State on 2026-11-24.** Harness v2.4 is merged, and its self-test passes all 140 checks on the current library. Nothing was rerun for credits; the stored results were only read. `node bench/analyze.mjs` on the stored matrix prints the numbers of this section (31/40 against 35/40; 66/66, 38/47 with 9 loud breaks, 30/30). What the harness gets wrong about the new API is in the next section; harness v2.5 is in work.
+**State on 2026-11-24.** Harness v2.5 is merged, and its self-test passes on the current library: `Self-test PASSED: 156 check lines passed, 0 failed`, run by me on the merged tree. Nothing was rerun for credits; the stored results were only read. `node bench/analyze.mjs` on the stored matrix prints the numbers of this section (31/40 against 35/40; 66/66, 38/47 with 9 loud breaks, 30/30).
 
 ### The harness on the new library
 
-A re-evaluation by the harness work on 2026-11-24 (v2.4 at `393f6cd`), at zero credits, with the stored results only read. I checked points 1 and 4 in the code. The rest is reported as measured there and not rerun by me.
+A re-evaluation of v2.4 (at `393f6cd`) by the harness work on 2026-11-24, at zero credits, with the stored results only read, and then harness v2.5, which fixes four of the six points. I checked points 1 and 4 in the v2.4 code, read the v2.5 diff, and ran its self-test on the merged tree. The case counts and the re-grades are reported as measured by the harness work and not rerun by me.
 
-**What holds.** The self-test passes all 140 checks; the four typecheck failures of the earlier state went with F1 and F16. The guide's new forms (`pause`, the visitor object, `interleavings`, `{ times: 'any' }`) typecheck in a treatment project, and reproductions written with them are graded `true_red`. The new loud failures (a replacement that ran 0 times, a pause that is never reached) are graded as loud breaks. The barrier recipe of the stored runs still works.
+**What held in v2.4.** Its self-test passed every check; the four typecheck failures of the earlier state went with F1 and F16. The guide's new forms (`pause`, the visitor object, `interleavings`, `{ times: 'any' }`) typecheck in a treatment project, and reproductions written with them are graded `true_red`. The new loud failures (a replacement that ran 0 times, a pause that is never reached) are graded as loud breaks. The barrier recipe of the stored runs still works.
 
-**What is wrong.**
+**What was wrong in v2.4, and what v2.5 did.**
 
 | # | Defect | Effect | State |
 | --- | --- | --- | --- |
-| 1 | Use of the library is recognized only by a call of `withReplacement` (`usesExecutionPoints` in `bench/ast-audit.mjs`). A test that uses `pause()` is filed as `deferred-only`. | The adoption split and the robustness table would count almost every test written with the new API as plain Vitest. | v2.5 |
-| 2 | `npx execution-points list` does not resolve in a treatment workspace. The harness copies the package without a link in `.bin`, so `npx` asks the registry for a package of that name. | The treatment guide tells the agent to run that command, and it fails. | v2.5 |
-| 3 | An assertion that fails inside `order.run(...)` arrives as an `InterleavingFailure` with the `AssertionError` as its `cause`, and is graded as a loud break. The README shows that shape. | A reproduction written the documented way is not counted. | your decision ("Still open", 6) |
-| 4 | The v2.4 classifier reads the error's type from the first line of the stack. Vitest writes `Error:` there for a failed `expect(p).rejects`, `expect(p).resolves` and `expect.poll`, although the object is an `AssertionError`. | Those reproductions are graded `error`. 85 of the 138 stored trials use `.rejects` or `.resolves`. | v2.5 |
-| 5 | Every bench process, and `probes/e2e.mjs`, rebuilds `dist/` in the checkout when it starts, and the build empties the directory first. | A self-test started during a gap check or `tsc` in the same checkout can break that run. | v2.5: build into a temporary directory |
+| 1 | Use of the library is recognized only by a call of `withReplacement` (`usesExecutionPoints` in `bench/ast-audit.mjs`). A test that uses `pause()` is filed as `deferred-only`. | The adoption split and the robustness table would count almost every test written with the new API as plain Vitest. | Fixed in v2.5: a test uses the library when it imports and calls `select` and puts the point to use by any of its eight operations (`withReplacement`, `replace`, `returns`, `throws`, `resolves`, `rejects`, `pause`, or handing it to `interleavings`). Each row records which. Decision D-18 in `PROTOCOL.md`. 18 calibration cases; the v2.4 audit passes none. |
+| 2 | `npx execution-points list` does not resolve in a treatment workspace. The harness copies the package without a link in `.bin`, so `npx` asks the registry for a package of that name. | The treatment guide tells the agent to run that command, and it fails. | Fixed in v2.5: the toolchain installs the package as it ships and links each `bin` command. The self-test runs the command the guide prints, offline. |
+| 3 | An assertion that fails inside `order.run(...)` arrives as an `InterleavingFailure` with the `AssertionError` as its `cause`, and is graded as a loud break. The README shows that shape. | A reproduction written the documented way is not counted. | Your decision ("Still open", 6). v2.5 records the cause chain and keeps today's grading; the rule is one line. |
+| 4 | The v2.4 classifier reads the error's type from the first line of the stack. Vitest writes `Error:` there for a failed `expect(p).rejects`, `expect(p).resolves` and `expect.poll`, although the object is an `AssertionError`. | Those reproductions are graded `error`. 85 of the 138 stored trials use `.rejects` or `.resolves`. | Fixed in v2.5: a reporter of the harness's own writes each error's name and cause chain, and the classifier grades by that; a run whose report is missing or disagrees with Vitest's is `ungradable`. Decision D-19. 33 single errors and 25 real Vitest runs as cases; v2.4 passes 29 and 11. |
+| 5 | Every bench process, and `probes/e2e.mjs`, rebuilds `dist/` in the checkout when it starts, and the build empties the directory first. | A self-test started during a gap check or `tsc` in the same checkout can break that run. | Fixed in v2.5: the build goes into a temporary directory, and the self-test compares `dist/` before and after. Every probe does the same now. |
 | 6 | A re-grade runs old tests on the new runtime, where a replacement that never runs fails the test. | Re-graded numbers are not like for like with the stored ones. | Inherent: a re-grade is a re-analysis |
 
 Points 4 and 5 came from this session: 4 with the assertion-only rule of v2.4, 5 with the move to a built `dist/`.
 
-**The stored matrix re-graded on the new library.** All 80 trials, three runs per variant, none unstable. Twelve verdicts change, all from solved to unsolved:
+**The stored matrix re-graded on the new library.** All 80 trials, three runs per variant, none unstable. Under v2.4 twelve verdicts change, all from solved to unsolved:
 
 | Cause | Control | Treatment |
 | --- | --- | --- |
@@ -735,14 +735,15 @@ Points 4 and 5 came from this session: 4 with the assertion-only rule of v2.4, 5
 | Assertion-only rule: an awaited call rejects | 3 | 2 |
 | New runtime: a replacement must run | 0 | 1 |
 
-| Solved (control, treatment) | Stored | Re-graded | Re-graded, point 4 corrected |
+| Solved (control, treatment) | Stored | Re-graded with v2.4 | Re-graded with v2.5 |
 | --- | --- | --- | --- |
 | `retry-storm` | 4/4, 4/4 | 2/4, 3/4 | 4/4, 4/4 |
 | `double-submit` | 4/4, 4/4 | 0/4, 0/4 | 1/4, 2/4 |
 | `stale-cache` | 0/4, 3/4 | 0/4, 2/4 | 0/4, 2/4 |
+| The other seven tasks | 23/28, 24/28 | 23/28, 24/28 | 23/28, 24/28 |
 | All ten tasks | 31/40, 35/40 | 25/40, 29/40 | 28/40, 32/40 |
 
-The last column is derived from the failure text, not measured; v2.5 measures it. The arms differ by four trials in every column. All five flips under the rule are one mutant of `double-submit`: the tests wrote `expect(await p)` where `await expect(p).resolves` would have counted, and they were written before the guide stated the rule. This is a re-analysis, not a new record.
+The last column was first derived from the failure text and then measured with v2.5: the same numbers. The arms differ by four trials in every column. Against the stored verdicts v2.5 changes six, all to unsolved: five under the assertion-only rule and one from the new runtime. Neither of the two undecided gradings occurs in any of the 80 trials. Library use is the same 23 of 40 treatment trials as stored, all through `withReplacement`. The analyzer on the v2.5 rows gives 6 treatment-only and 2 control-only pairs (p = 0.289); strata B and C stay 23/28 against 24/28, and stratum A becomes 5/12 against 8/12. All five flips under the rule are one mutant of `double-submit`: the tests wrote `expect(await p)` where `await expect(p).resolves` would have counted, and they were written before the guide stated the rule. This is a re-analysis, not a new record.
 
 **What it means for the experiment.**
 
@@ -750,6 +751,8 @@ The last column is derived from the failure text, not measured; v2.5 measures it
 - The library section of the treatment guide grew from 411 to 576 words with the stored failures in view. The control guide did not change. A rerun on the same ten tasks measures that too.
 - A pause that is never reached now fails at once instead of timing out, so of the robustness counts only the combined "stopped testing" stays comparable.
 - `interleavings` cannot order disk or timers. The README says so and the guide does not, and two tasks are real-async.
+
+**Not verified by v2.5.** The 58 pilot trials are not re-graded. Each re-grade ran once. Recognizing `pause` and `interleavings` as library use is verified on calibration cases only, because no stored test uses them. The provenance hash (`toolSha256`) covers `src/` and `package.json`, not the built files a workspace receives. The guide's command is tested offline only, and everything ran on macOS.
 
 ### What the stored data shows
 
@@ -809,16 +812,15 @@ Not as a whole, and not yet.
 **Why a full rerun is the wrong next step:**
 
 1. It cannot answer the primary question. See the power row above.
-2. The harness cannot yet tell a test that uses the new API from a plain one, and it grades three of Vitest's assertion forms as errors (v2.5).
-3. Three grading rules are undecided ("Still open", 6).
-4. The treatment guide was rewritten with the stored failures in view, and the same ten tasks would measure that.
-5. The tasks avoid what the old library could not do (generics, optional chains, Node types). It can do those now, and nothing in the task set would show it.
-6. The API is not frozen: the names under "Still open" may still change.
+2. Three grading rules are undecided ("Still open", 6).
+3. The treatment guide was rewritten with the stored failures in view, and the same ten tasks would measure that.
+4. The tasks avoid what the old library could not do (generics, optional chains, Node types). It can do those now, and nothing in the task set would show it.
+5. The API is not frozen: the names under "Still open" may still change.
 
 **What I would do instead, in order:**
 
 1. Library: fix F1 and F16, land F6, decide F7. Then freeze the library at a tagged commit. *Every finding is fixed. The freeze waits for your answers under "Still open".*
-2. Harness: grade every variant several times and require agreement; typecheck every reference and valid fix in a treatment workspace during `--self-test`; require `AssertionError` for a reproduction; print still-red, loud-break, and timeout counts per arm; pair on the requested model and warn on every unmatched row. *Done in v2.4. For the new API: v2.5, in work.*
+2. Harness: grade every variant several times and require agreement; typecheck every reference and valid fix in a treatment workspace during `--self-test`; require `AssertionError` for a reproduction; print still-red, loud-break, and timeout counts per arm; pair on the requested model and warn on every unmatched row. *Done in v2.4, and for the new API in v2.5.*
 3. Guides: give both arms both recipes with placeholder names, and freeze them. *Both arms share one guide, and the treatment guide's library section and the witness are rewritten for the new API. Still to do: freeze, once you have accepted the API.*
 4. Tasks: replace the ceiling tasks with ones that have headroom on the fix itself and look like ordinary code (generics, `?.`, Node types, several hundred lines, more than one module). Keep `stale-cache` as a labeled capability demonstration outside the pooled numbers. Make reproduction quality its own pre-registered endpoint.
 5. Then run one pre-registered matrix with at least three trials per cell, sized from the power table, and print the split by adoption next to the intention-to-treat result.
@@ -863,7 +865,9 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 | `p32-what-the-compiler-says-about-a-point.mjs` | what the compiler says about each thing a test can do with a selected point: 37 calls, 24 of them rejected, and the message each gets |
 | `p33-one-expression-two-captures.mjs` | F18 |
 
-`probes/lib.mjs`, `probes/types.mjs`, and `probes/e2e.mjs` are shared helpers. `e2e.mjs` builds a real consumer project with the package copied into its `node_modules`, the way `bench/toolchain.mjs` does, and runs the real `tsc` and Vitest on it.
+`probes/lib.mjs`, `probes/types.mjs`, and `probes/e2e.mjs` are shared helpers. `e2e.mjs` builds a real consumer project with the package copied into its `node_modules`, the way `bench/toolchain.mjs` does, and runs the real `tsc` and Vitest on it. A probe that needs what the package ships builds it from the sources into its own temporary directory (`buildLibrary` in `lib.mjs`), so no probe needs `pnpm build` first and none writes the checkout's `dist/`.
+
+All 33 probes were rerun on 2026-11-24 after the merge of harness v2.5, and all exit 0. Four things had stopped working along the way, each through an earlier change of mine, and are repaired. The helper through which nine probes read the registry's expressions (`nodeLines` in `types.mjs`) expected the layout the registry had before the selector work, so it found none, and `p21` failed outright. `p10` installed a replacement that is not meant to run, which the strict default refuses. `p24` had a comment with backticks inside a template string. `p05` lost its two third-party packages when the throwaway projects moved to the OS temp directory.
 
 ## Changelog
 
@@ -882,6 +886,7 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 - 2026-11-24: gap check on the finished selector work: 2,100 of 2,117 noticed; the four mapper timeouts remain, three gaps in the listing closed afterwards. An expression whose type cannot be written can be selected and passed through. The benchmark's treatment guide and witness use the new API; the self-test passes.
 - 2026-11-24: the last gaps closed. The mapper's frame reader walks a finite list of header ends instead of looping until done (four timeouts became four kills), `serve(input, output)` replaces the standard-input block (ten unowned mutants became owned and killed), and a new oracle generates streams of frames cut at arbitrary places.
 - 2026-11-24: the full gap check over all six sources is clean (2,114 of 2,114, nothing unowned). Wrong versions written by hand then found what it cannot see: 3 of 19 implementations and 4 of 38 type declarations passed every oracle. New oracle file `types-point` (five laws for what a point's methods take and give back), new law `runtime-captured-values`, five more histories in the type oracle's capture law; `checks/wrong-declarations.mjs` and `checks/wrong-versions/` keep the hand-written wrong versions rerunnable. One defect fixed oracle first: the compile error for `pause()` on an expression that is no promise now says why. New F18 (one expression, two captures). The benchmark harness was re-evaluated on the new library: six defects, v2.5 in work. The short version at the top now says where things stand. The full gap check was run again on that commit (`9210720`): 2,114 of 2,114, nothing unowned.
+- 2026-11-24: benchmark harness v2.5 merged (`9a8e0a9`): library use by any operation on a point (D-18), error types from a reporter of the harness's own (D-19), the guide's `list` command in a treatment workspace, no bench process or probe writing the checkout's `dist/`. Its self-test passes on the merged tree (156 check lines). The stored matrix re-graded with it gives 28/40 against 32/40, the numbers first derived. All 33 probes rerun; the ones that had stopped working are repaired.
 
 ## Incidents
 

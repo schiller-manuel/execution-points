@@ -1,4 +1,5 @@
 // Shared helpers for probes. Every probe runs against the UNCHANGED repo code.
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -12,6 +13,26 @@ export const { executionPoints } = await import(`${REPO}/src/plugin.ts`)
 export const runtime = await import(`${REPO}/src/runtime.ts`)
 export const discovery = await import(`${REPO}/src/discovery.ts`)
 export const contracts = await import(`${REPO}/src/contracts.ts`)
+
+/**
+ * What the package ships, built from the sources as they are now: the directory that holds
+ * `runtime.d.mts` and the rest of `dist`. Built once per probe run and into the probe's own
+ * directory, so it is never older than the sources, and the checkout's `dist/` is not written
+ * while a type check or a gap check may be reading it.
+ */
+let built
+export function buildLibrary() {
+  if (built) return built
+  const out = join(realpathSync(mkdtempSync(join(WORK, 'dist-'))), 'dist')
+  const result = spawnSync(
+    process.execPath,
+    [join(REPO, 'node_modules/tsdown/dist/run.mjs'), '--logLevel', 'error', '--out-dir', out],
+    { cwd: REPO, encoding: 'utf8' },
+  )
+  if (result.status !== 0) throw new Error(`The library did not build:\n${result.stdout}${result.stderr}`)
+  built = out
+  return built
+}
 
 /** Create a throwaway project directory from { 'rel/path.ts': source }. */
 export function project(files) {

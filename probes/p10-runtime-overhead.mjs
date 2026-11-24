@@ -39,7 +39,10 @@ const cases = [
 // measured for both functions before the next kind of replacement is installed.
 const base = cases.map(([, plainFn]) => time(plainFn, 20))
 const untouched = cases.map(([, , instFn]) => time(instFn, 20))
-const otherFunction = cases.map(([, , instFn]) => elsewhere.withReplacement(({ original }) => original(), () => time(instFn, 20)))
+// The replacement in the other function is there to be active, not to run.
+const otherFunction = cases.map(([, , instFn]) =>
+  elsewhere.withReplacement(({ original }) => original(), () => time(instFn, 20), { times: 'any' }),
+)
 const ownExpression = cases.map(([, , instFn, point]) => point.withReplacement(({ original }) => original(), () => time(instFn)))
 cases.forEach(([label], i) => {
   const x = (ms) => `${ms.toFixed(1)} ms (${(ms / base[i]).toFixed(ms / base[i] < 10 ? 1 : 0)}x)`

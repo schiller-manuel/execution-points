@@ -18,7 +18,7 @@ const cases = {
 }
 
 for (const [label, source] of Object.entries(cases)) {
-  const reg = registry({ 'src/app.ts': source }, ['src/app.ts'])
+  const reg = registry({ 'src/app.ts': source }, ['src/app.ts'], { packages: ['magic-string', 'vite'] })
   const nodes = nodeLines(reg.text)
   const errors = typecheck(reg)
   console.log(`\n## ${label}`)

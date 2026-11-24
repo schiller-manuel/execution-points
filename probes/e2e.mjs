@@ -3,26 +3,9 @@
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
-import { REPO, WORK } from './lib.mjs'
+import { REPO, WORK, buildLibrary } from './lib.mjs'
 
 export { REPO }
-
-// A consumer gets what the package ships: `dist`. Built once per probe run, so it is never older
-// than the sources, and built into the probe's own directory: the checkout's `dist/` is not
-// written, because a type check or a gap check may be reading it at that moment.
-let built
-function buildLibrary() {
-  if (built) return built
-  const out = join(realpathSync(mkdtempSync(join(WORK, 'dist-'))), 'dist')
-  const result = spawnSync(
-    process.execPath,
-    [join(REPO, 'node_modules/tsdown/dist/run.mjs'), '--logLevel', 'error', '--out-dir', out],
-    { cwd: REPO, encoding: 'utf8' },
-  )
-  if (result.status !== 0) throw new Error(`The library did not build:\n${result.stdout}${result.stderr}`)
-  built = out
-  return built
-}
 
 export function consumer(files, { targets = ['src/**/*.ts'] } = {}) {
   const root = realpathSync(mkdtempSync(join(WORK, 'e2e-')))

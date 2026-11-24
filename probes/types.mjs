@@ -1,10 +1,10 @@
 // Type-level probe helper: generate the real virtual registry for a throwaway project and
 // typecheck it (plus an optional test snippet) with TypeScript 7.1, the way tsc would see it.
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { API } from 'typescript/sync'
 import { createFileSystemLayer } from 'typescript/fs'
-import { REPO, contracts, discovery, project } from './lib.mjs'
+import { REPO, buildLibrary, contracts, discovery, project } from './lib.mjs'
 
 export const api = new API()
 export const TSCONFIG = JSON.stringify({
@@ -14,8 +14,12 @@ export const TSCONFIG = JSON.stringify({
   },
 })
 
-export function registry(files, targets) {
+/** `packages` names the repository's own dependencies that the throwaway project imports. */
+export function registry(files, targets, { packages = [] } = {}) {
   const root = project({ 'tsconfig.json': TSCONFIG, ...files })
+  // The project lives under the OS temp directory, where no package is installed.
+  if (packages.length) mkdirSync(join(root, 'node_modules'))
+  for (const name of packages) symlinkSync(realpathSync(join(REPO, 'node_modules', name)), join(root, 'node_modules', name))
   const plan = discovery.buildTargetPlan({ root, targets, api })
   const fromFile = join(root, 'points.ep')
   const { text } = contracts.generateFileRegistryModule(plan, { fromFile, api })
@@ -29,7 +33,7 @@ export function typecheck({ root, text, targets }, snippet) {
       name: 'execution-points-prototype', type: 'module',
       exports: { '.': { types: './dist/runtime.d.mts', default: './dist/runtime.mjs' } },
     })],
-    [join(root, 'node_modules/execution-points-prototype/dist/runtime.d.mts'), readFileSync(`${REPO}/dist/runtime.d.mts`, 'utf8')],
+    [join(root, 'node_modules/execution-points-prototype/dist/runtime.d.mts'), readFileSync(join(buildLibrary(), 'runtime.d.mts'), 'utf8')],
     [join(root, '__registry.ts'), text],
   ])
   const rootFiles = [...targets.map((t) => join(root, t)), join(root, '__registry.ts')]
@@ -52,12 +56,12 @@ export function typecheck({ root, text, targets }, snippet) {
   }
 }
 
-/** Registry lines for one file key, trimmed to the interesting fields. */
+/** The registry's expressions (one `type __EPNode… = { … }` line each), trimmed to the interesting fields. */
 export function nodeLines(text) {
-  return text.split('\n').filter((l) => l.trim().startsWith('| {')).map((l) => {
+  return text.split('\n').filter((l) => l.startsWith('type __EPNode')).map((l) => {
     const id = /readonly id: ("[^"]*")/.exec(l)?.[1]
     const result = /readonly result: (.*); readonly locals: /.exec(l)?.[1]
-    const locals = /readonly locals: (\{.*\}) \}/.exec(l)?.[1]
+    const locals = /readonly locals: (\{.*\}) \};?$/.exec(l)?.[1]
     const unportable = /readonly __unportable: ("(?:[^"\\]|\\.)*")/.exec(l)?.[1]
     return { id, result, locals, unportable }
   })
