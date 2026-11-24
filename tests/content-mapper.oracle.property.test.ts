@@ -69,7 +69,7 @@ import { differs, oracleProperty, pass } from '@tanstack/oracles'
 import { generateFileRegistryModule } from '../src/contracts.ts'
 import { handleInputChunk } from '../src/content-mapper.ts'
 import { buildTargetPlan } from '../src/discovery.ts'
-import { type Plan, type RegistryReading, compileRegistry, createProject, removeProject, repoRoot } from './registry-harness'
+import { type RegistryReading, compileRegistry, createProject, removeProject, repoRoot } from './registry-harness'
 
 const api = new API({ cwd: repoRoot })
 afterAll(() => {
@@ -108,18 +108,33 @@ function sendFramedPayloads(rawChunks: ReadonlyArray<Buffer>): Array<Record<stri
   return messages
 }
 
-function callRpc(method: string, params?: unknown, splitAt?: number): any {
+/** The mapper's methods, by the name a request calls them with. */
+type Methods = Pick<typeof import('../src/content-mapper.ts'), 'initialize' | 'openProject' | 'transform' | 'closeProject'>
+
+/**
+ * A reply as it is read back from the wire: the result of the method, or an
+ * error. Nothing checks the JSON against this type. A driver that reads a
+ * part that is not there throws, and observes that as a crash.
+ */
+type Reply<Method extends string> = {
+  jsonrpc: string
+  id: number
+  result?: Method extends keyof Methods ? ReturnType<Methods[Method]> : unknown
+  error?: { code: number; message: string }
+}
+
+function callRpc<Method extends string>(method: Method, params?: unknown, splitAt?: number): Reply<Method> | null {
   const id = nextRpcId++
   const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id, method, params }), 'utf8')
   const framed = Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'), body])
   const chunks = splitAt !== undefined ? [framed.subarray(0, splitAt), framed.subarray(splitAt)] : [framed]
-  return sendFramedPayloads(chunks).find((response) => response.id === id) ?? null
+  return (sendFramedPayloads(chunks).find((response) => response.id === id) as Reply<Method> | undefined) ?? null
 }
 
 /** The file keys of a registry, and the callee of each call node, as TypeScript reads the compiled text. */
 function readRegistry(root: string, text: string) {
   const files = ['src/app.ts', 'src/extra.ts', 'src/lib/deep.ts']
-  const plan = buildTargetPlan({ root, targets: files, api }) as Plan
+  const plan = buildTargetPlan({ root, targets: files, api })
   const { reading } = compileRegistry(api, root, text, plan)
   return {
     files: reading.files,
@@ -135,17 +150,18 @@ const relativeTo = (root: string, files: ReadonlyArray<string>) =>
 
 const judge =
   (law: string, checkpoint: string) =>
-  (_history: unknown, observations: ReadonlyArray<Observation>, expected: unknown) => {
+  <History>(_history: History, observations: ReadonlyArray<Observation>, expected: unknown) => {
     const crash = observations.find((entry) => entry.checkpoint === 'crash')
     if (crash) return differs('crash', law, crash.value, 'no crash') ?? pass
     return differs(checkpoint, law, observations.find((entry) => entry.checkpoint === checkpoint)?.value, expected) ?? pass
   }
 
+/** Changes what was observed at one checkpoint. `Value` is the part of that observation the change reads. */
 const corrupt =
-  (checkpoint: string, change: (value: any) => unknown) =>
+  <Value = Record<string, unknown>>(checkpoint: string, change: (value: Value) => unknown) =>
   (trace: ReadonlyArray<Observation>) =>
     trace.map((entry) =>
-      entry.checkpoint === checkpoint ? { ...entry, value: change(structuredClone(entry.value)) } : entry,
+      entry.checkpoint === checkpoint ? { ...entry, value: change(structuredClone(entry.value) as Value) } : entry,
     )
 
 // ---------------------------------------------------------------------------
@@ -500,13 +516,13 @@ oracleProperty({
       name: 'a-string-read-as-a-list-of-letters',
       law: 'manifest-validation',
       history: { enumerated: 'targets-is-a-string' },
-      corrupt: corrupt('manifest', (value) => ({ ...value, watched: [...value.watched, 's', 'r', 'c'].sort() })),
+      corrupt: corrupt('manifest', (value: { watched: Array<string> }) => ({ ...value, watched: [...value.watched, 's', 'r', 'c'].sort() })),
     },
     {
       name: 'nodes-mapped-to-another-entry',
       law: 'manifest-validation',
       history: { enumerated: 'glob-and-path-listing-one-file-twice' },
-      corrupt: corrupt('manifest', (value) => ({ ...value, mappings: [...value.mappings].reverse() })),
+      corrupt: corrupt('manifest', (value: { mappings: Array<unknown> }) => ({ ...value, mappings: [...value.mappings].reverse() })),
     },
   ],
 })
@@ -535,7 +551,7 @@ type LifecycleScenario = (typeof LIFECYCLE_SCENARIOS)[number]
 const programsBuilt: Array<{ isDisposed: () => boolean }> = []
 const sourceFilesOpen = new Set<unknown>()
 const serversUsed = new Set<unknown>()
-function wrapApiMethod(method: 'createSnapshot' | 'createSourceFile', record: (result: any) => void) {
+function wrapApiMethod<Method extends 'createSnapshot' | 'createSourceFile'>(method: Method, record: (result: ReturnType<API[Method]>) => void) {
   const accessor = Object.getOwnPropertyDescriptor(API.prototype, method)!
   Object.defineProperty(API.prototype, method, {
     configurable: true,
@@ -704,10 +720,10 @@ oracleProperty({
         const root = createProject({ 'src/app.ts': first, 'src/extra.ts': extra, 'points.ep': manifest })
         try {
           countingPrograms((built) => {
-            const open = () => callRpc('openProject', { projectHandle: 'proj-1', configFileName: join(root, 'tsconfig.json') }).result
+            const open = () => callRpc('openProject', { projectHandle: 'proj-1', configFileName: join(root, 'tsconfig.json') })!.result!
             const transform = () =>
-              callRpc('transform', { projectHandle: 'proj-1', fileName: join(root, 'points.ep'), content: manifest }).result
-            const init = callRpc('initialize', { protocolVersion: 1 })
+              callRpc('transform', { projectHandle: 'proj-1', fileName: join(root, 'points.ep'), content: manifest })!.result!
+            const init = callRpc('initialize', { protocolVersion: 1 })!
             const opened = open()
             const again = open()
             const calleesBeforeEdit = callees(root, transform().text)
@@ -722,9 +738,9 @@ oracleProperty({
             callRpc('closeProject', { projectHandle: 'proj-1' })
             observe('lifecycle', {
               jsonrpcVersion: init.jsonrpc,
-              initProtocolVersion: init.result.protocolVersion,
-              initEncoding: init.result.positionEncoding,
-              initSource: init.result.diagnosticSource,
+              initProtocolVersion: init.result!.protocolVersion,
+              initEncoding: init.result!.positionEncoding,
+              initSource: init.result!.diagnosticSource,
               watched: relativeTo(root, opened.watchedFiles),
               identityIsStable: opened.configIdentity.length > 0 && opened.configIdentity === again.configIdentity,
               identityChangedAfterTargetEdit: again.configIdentity !== afterTarget.configIdentity,
@@ -746,13 +762,13 @@ oracleProperty({
         const root = createProject(IMPORT_PROJECT)
         try {
           countingPrograms((built) => {
-            const open = () => callRpc('openProject', { projectHandle: 'proj-imports', configFileName: join(root, 'tsconfig.json') }).result
+            const open = () => callRpc('openProject', { projectHandle: 'proj-imports', configFileName: join(root, 'tsconfig.json') })!.result!
             const transform = () =>
-              callRpc('transform', { projectHandle: 'proj-imports', fileName: join(root, 'points.ep'), content: IMPORT_PROJECT['points.ep'] })
-                .result.text as string
+              callRpc('transform', { projectHandle: 'proj-imports', fileName: join(root, 'points.ep'), content: IMPORT_PROJECT['points.ep'] })!.result!
+                .text
             // What a mapper started afresh returns: the registry generated with no warm program.
             const cold = () => {
-              const plan = buildTargetPlan({ root, targets: ['src/app.ts'], api }) as Plan
+              const plan = buildTargetPlan({ root, targets: ['src/app.ts'], api })
               return { plan, text: generateFileRegistryModule(plan, { fromFile: join(root, 'points.ep'), api }).text }
             }
             const opened = open()
@@ -806,14 +822,14 @@ oracleProperty({
               projectHandle: 'proj-2',
               configFileName: join(root, 'nonexistent-tsconfig.json'),
               options: { configFile: 'config/custom.ep' },
-            }).result
+            })!.result!
             const calleesOfCustomManifest = callees(
               root,
               callRpc('transform', {
                 projectHandle: 'proj-2',
                 fileName: join(root, 'config/custom.ep'),
                 content: JSON.stringify({ targets: ['src/extra.ts'] }),
-              }).result.text,
+              })!.result!.text,
             )
             const customProgram = built[0]
             callRpc('closeProject', { projectHandle: 'proj-2' })
@@ -822,10 +838,10 @@ oracleProperty({
 
             callRpc('openProject', { projectHandle: 'proj-2', configFileName: join(root, 'tsconfig.json') })
             const transform = (content: string) =>
-              callRpc('transform', { projectHandle: 'proj-2', fileName: join(root, 'points.ep'), content }).result.text as string
+              callRpc('transform', { projectHandle: 'proj-2', fileName: join(root, 'points.ep'), content })!.result!.text
             const firstText = transform(manifestOne)
             const secondText = transform(manifestTwo)
-            const closed = callRpc('closeProject', { projectHandle: 'proj-2' })
+            const closed = callRpc('closeProject', { projectHandle: 'proj-2' })!
             callRpc('openProject', { projectHandle: 'proj-2', configFileName: join(root, 'tsconfig.json') })
             const programsBuilt = built.length
             callRpc('closeProject', { projectHandle: 'proj-2' })
@@ -835,8 +851,8 @@ oracleProperty({
               projectHandle: 'proj-2',
               fileName: join(elsewhere, 'points.ep'),
               content: JSON.stringify({ targets: ['sub.ts'] }),
-            }).result.text as string
-            const subPlan = buildTargetPlan({ root: elsewhere, targets: ['sub.ts'], api }) as Plan
+            })!.result!.text
+            const subPlan = buildTargetPlan({ root: elsewhere, targets: ['sub.ts'], api })
             observe('lifecycle', {
               customManifestWatched: relativeTo(root, custom.watchedFiles),
               calleesOfCustomManifest,
@@ -870,12 +886,12 @@ oracleProperty({
         const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root)
         try {
           callRpc('openProject', { projectHandle: 'proj-app', configFileName: join(root, 'tsconfig.app.json') })
-          const text = callRpc('transform', { projectHandle: 'proj-app', fileName: join(root, 'points.ep'), content: manifest }).result
-            .text as string
+          const text = callRpc('transform', { projectHandle: 'proj-app', fileName: join(root, 'points.ep'), content: manifest })!.result!
+            .text
           callRpc('closeProject', { projectHandle: 'proj-app' })
-          const plan = buildTargetPlan({ root, targets: ['src/app.ts'], api }) as Plan
+          const plan = buildTargetPlan({ root, targets: ['src/app.ts'], api })
           const { reading } = compileRegistry(api, root, text, plan, { tsconfig: 'tsconfig.app.json' })
-          const withoutConfig = callRpc('openProject', { projectHandle: 'proj-none', configFileName: '' }).result
+          const withoutConfig = callRpc('openProject', { projectHandle: 'proj-none', configFileName: '' })!.result!
           callRpc('closeProject', { projectHandle: 'proj-none' })
           observe('lifecycle', {
             namedConfigIsUsed: reading.registryErrors.length === 0 && Object.keys(reading.nodes).length === 1 && everyNodeFits(reading),

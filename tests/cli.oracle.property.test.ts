@@ -59,7 +59,6 @@ import { differs, oracleProperty, pass } from '@tanstack/oracles'
 import { executionPoints } from '../src/plugin.ts'
 
 const CLI_FILE = fileURLToPath(new URL('../src/cli.ts', import.meta.url))
-type Run = (argv: Array<string>, io: { cwd: string; out: (line: string) => void; err: (line: string) => void }) => number
 
 // ---------------------------------------------------------------------------
 // Law L1: The listing is what the plugin registers, with the place and text of each expression
@@ -307,7 +306,7 @@ oracleProperty({
       {
         name: 'one-file-of-three',
         enters: ['lists-one-file'],
-        build: (base) => ({
+        build: (base): ListHistory => ({
           ...base,
           files: [oneFile([plain(0)]), oneFile([plain(1), plain(4)]), oneFile([plain(2)])],
           ask: 1,
@@ -317,7 +316,7 @@ oracleProperty({
       {
         name: 'every-target',
         enters: ['lists-every-target'],
-        build: (base) => ({
+        build: (base): ListHistory => ({
           ...base,
           files: [oneFile([plain(3)]), { isModule: true, top: [plain(0)], functions: [{ name: 1, statements: [plain(0), plain(0)] }] }],
           ask: 'all',
@@ -327,12 +326,12 @@ oracleProperty({
       {
         name: 'as-json',
         enters: ['lists-as-json'],
-        build: (base) => ({ ...base, files: [oneFile([plain(4), plain(5)])], ask: 'all', json: true }),
+        build: (base): ListHistory => ({ ...base, files: [oneFile([plain(4), plain(5)])], ask: 'all', json: true }),
       },
       {
         name: 'behind-a-mark-and-crlf',
         enters: ['expression-behind-a-mark-and-crlf'],
-        build: (base) => ({
+        build: (base): ListHistory => ({
           ...base,
           files: [{ isModule: true, top: [{ template: 0, indent: 0, broken: false }], functions: [{ name: 0, statements: [plain(1)] }] }],
           bom: true,
@@ -343,7 +342,7 @@ oracleProperty({
       {
         name: 'over-several-lines',
         enters: ['expression-over-several-lines'],
-        build: (base) => ({
+        build: (base): ListHistory => ({
           ...base,
           files: [oneFile([{ template: 4, indent: 3, broken: true }, plain(0)])],
           crlf: false,
@@ -353,7 +352,7 @@ oracleProperty({
       {
         name: 'over-several-lines-with-crlf',
         enters: ['expression-over-several-lines', 'expression-behind-a-mark-and-crlf'],
-        build: (base) => ({
+        build: (base): ListHistory => ({
           ...base,
           files: [oneFile([{ template: 4, indent: 1, broken: true }])],
           bom: true,
@@ -364,22 +363,22 @@ oracleProperty({
       {
         name: 'long-expression',
         enters: ['excerpt-cut'],
-        build: (base) => ({ ...base, files: [oneFile([plain(6), { template: 6, indent: 0, broken: true }])], ask: 0 }),
+        build: (base): ListHistory => ({ ...base, files: [oneFile([plain(6), { template: 6, indent: 0, broken: true }])], ask: 0 }),
       },
       {
         name: 'expression-of-72-characters',
         enters: ['excerpt-as-long-as-allowed'],
-        build: (base) => ({ ...base, files: [oneFile([plain(7)])], ask: 0 }),
+        build: (base): ListHistory => ({ ...base, files: [oneFile([plain(7)])], ask: 0 }),
       },
       {
         name: 'global-script',
         enters: ['global-script-lists-nothing'],
-        build: (base) => ({ ...base, files: [oneFile([plain(0)], false)], ask: 0 }),
+        build: (base): ListHistory => ({ ...base, files: [oneFile([plain(0)], false)], ask: 0 }),
       },
       {
         name: 'manifest-lists-a-missing-file',
         enters: ['missing-target-left-out', 'lists-every-target'],
-        build: (base) => ({ ...base, files: [oneFile([plain(0)])], listedBy: 'paths', listsMissingFile: true, ask: 'all' }),
+        build: (base): ListHistory => ({ ...base, files: [oneFile([plain(0)])], listedBy: 'paths', listsMissingFile: true, ask: 'all' }),
       },
     ],
   },
@@ -402,7 +401,7 @@ oracleProperty({
       writeProject(history, dir)
       const out: Array<string> = []
       const err: Array<string> = []
-      const { run } = (await import('../src/cli.ts')) as { run: Run }
+      const { run } = await import('../src/cli.ts')
       const exit = run(['list', ...(asked === undefined ? [] : [asked]), ...(history.json ? ['--json'] : [])], {
         cwd: dir,
         out: (line) => out.push(line),
@@ -423,7 +422,7 @@ oracleProperty({
       // The same command line with no directory given, and with the current one given.
       const here = (io: { cwd?: string }) => {
         const lines: Array<string> = []
-        const code = run(['list', '--json'], { ...io, out: (line) => lines.push(line), err: (line) => lines.push(line) } as never)
+        const code = run(['list', '--json'], { ...io, out: (line) => lines.push(line), err: (line) => lines.push(line) })
         return JSON.stringify([code, lines])
       }
       observe('list', {
@@ -573,13 +572,13 @@ oracleProperty({
         else if (history.refusal !== 'no-manifest') {
           writeFileSync(join(dir, 'points.ep'), JSON.stringify({ targets: ['src/app.ts', 'src/gone.ts'] }))
         }
-        const { run } = (await import('../src/cli.ts')) as { run: Run }
+        const { run } = await import('../src/cli.ts')
         const code = run([...argv], { cwd: dir, out: (line) => out.push(line), err: (line) => err.push(line) })
         observe('refusal', { exit: code, ...firstLines(), says: err.join('\n').includes(says) ? says : err.join('\n') })
         return
       }
 
-      const { run } = (await import('../src/cli.ts')) as { run: Run }
+      const { run } = await import('../src/cli.ts')
       if (history.load === 'help' || history.load === 'help-short') {
         observe('reach', 'helped')
         const code = run([history.load === 'help' ? '--help' : '-h'], { cwd: dir, out: (line) => out.push(line), err: (line) => err.push(line) })

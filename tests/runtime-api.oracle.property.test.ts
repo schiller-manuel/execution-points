@@ -92,7 +92,7 @@ import { AsyncResource } from 'node:async_hooks'
 import fc from 'fast-check'
 import { afterEach } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { invoke, registerFile, select, verifyReplacements } from '../src/runtime.ts'
+import { type Context, invoke, registerFile, select, verifyReplacements } from '../src/runtime.ts'
 
 // The drivers leave replacements behind on purpose (asynchronous scopes, unused ones). The
 // library's own check after each test is not what these laws are about, so it finds nothing.
@@ -110,8 +110,8 @@ const REPLACED = 100
 type AnyPoint = {
   calls: number
   capture: (...keys: Array<string>) => AnyPoint
-  withReplacement: <T>(handler: (context: any) => unknown, action: () => T, options?: object) => T
-  replace: (handler: (context: any) => unknown, options?: object) => AnyReplacement
+  withReplacement: <T>(handler: (context: AnyContext) => unknown, action: () => T, options?: object) => T
+  replace: (handler: (context: AnyContext) => unknown, options?: object) => AnyReplacement
   returns: (value: unknown, options?: object) => AnyReplacement
   throws: (error: unknown, options?: object) => AnyReplacement
   resolves: (value: unknown, options?: object) => AnyReplacement
@@ -124,6 +124,8 @@ type AnyPoint = {
   }
 }
 type AnyReplacement = { calls: number; restore: () => void; [Symbol.dispose]: () => void }
+/** What a handler is called with, whatever the expression and its captures. */
+type AnyContext = Context<unknown, Record<string, unknown>>
 
 let fixtures = 0
 
