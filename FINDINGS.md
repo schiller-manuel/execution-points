@@ -35,7 +35,8 @@ Still open:
 2. New benchmark tasks: which, and in which stratum.
 3. The benchmark sequence at the end of this file: approve, or change.
 4. Your global pnpm broke during this work (see "Incidents" below); say whether I should repair it.
-5. The details of `interleavings` that your decision did not fix: each order is an object with `run(action)`, `schedule` and `released` (instead of a bare callback); the options `schedule` (one order again) and `choose` (pick every order, endless); taking the next order before the current one ran, and running an order twice, throw. They are built and listed as proposals in the oracle's limits.
+5. Four laws the type-generation work added or reworded without your named approval. Confirm or strike: `contracts-one-copy-per-private-type` (one helper per private type, two brands for two nominal types); `contracts-cost-of-names` (three relations between counts of TypeScript requests, standing in for a work bound); the mapper's watch set is the tsconfig, the targets, and every project file the analysis read; a reason for an unselectable expression must name its subject.
+6. The details of `interleavings` that your decision did not fix: each order is an object with `run(action)`, `schedule` and `released` (instead of a bare callback); the options `schedule` (one order again) and `choose` (pick every order, endless); taking the next order before the current one ran, and running an order twice, throw. They are built and listed as proposals in the oracle's limits.
 
 ## Work in progress
 
@@ -46,7 +47,7 @@ Still open:
 | F7 loud replacements: strict by default with `times` and `on`, built-in pause, `point.replace()` with `using`, `point.calls`, `call` in the context; F8 capture-name checks; shorthands `returns`, `throws`, `resolves`, `rejects`; F5 covered by `replace` | done |
 | Type-level laws for the new API (`pause` only on promises, option and value types) | queued behind the type-generation merge, which rewrites the type oracle's compile step |
 | Treatment guide and benchmark witnesses using the new API | queued behind the harness merge |
-| F1, F2, F3, F10, F15, F16, registry half of F9; potential laws 1 to 4; registry source mappings | in a separate checkout, to be merged |
+| F1, F2, F3, F10, F15, F16, registry half of F9; potential laws 1, 2 and 4; registry source mappings; an opaque result for unwritable expressions | merged; gaps in `contracts` and `content-mapper` went from 248 to 4, all four an endless loop in the mapper's frame reader |
 | Benchmark harness fixes from the audit (harness v2.4) | merged; `--self-test` passes 138 checks and fails 4, all the treatment typecheck of fixes that use `AbortController` or `fs.Stats` (F16, F1) |
 | F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command | queued behind the fast path, which edits the same files |
 | Schedule exploration: `interleavings(points)` as a generator of orders, with `schedule`, `choose`, and the `InterleavingFailure` error | done |
@@ -60,7 +61,9 @@ Still open:
 
 Ordered by how much a user would be hurt.
 
-### F1. The registry names types that do not resolve, and `tsc` fails for the whole project
+### F1. The registry names types that do not resolve, and `tsc` fails for the whole project (fixed)
+
+**Fixed 2026-11-24.** The registry now writes a type the way it resolves from the registry's own position: `import("fs").Stats`, `import("./src/app").Status.Ok`. `p18` now prints 0 of 38 (it was 22 of 38). The red run also showed four more forms of the same class, fixed with it: a member of a private enum, `T[K]` and `keyof T` written raw, `Uppercase` without its argument, and `typeof Class` written as the instance type. The contracts oracle went red first (38 of 106 tests) and compiles the generated registry as `.ts` now, which is what was missing.
 
 **Kind:** possible bug. For Node built-ins the behavior is what an adopted law prescribes, so the law is part of the finding.
 
@@ -108,7 +111,9 @@ points.ep(9,303): error TS2503: Cannot find namespace 'Status'.
 
 **Direction:** emit `import("node:fs").Stats` when the declaration sits in a string-named ambient module, anchor enum members to their enum's import path, and keep bare names only for declarations with no module parent. The law to hold it is potential law 1 below.
 
-### F2. The editor keeps stale types when a non-target file changes
+### F2. The editor keeps stale types when a non-target file changes (fixed)
+
+**Fixed 2026-11-24.** The mapper watches the tsconfig, the targets, and every project file the analysis read, and its identity changes when one of them does. `p07`: the warm result after editing an imported file is now `string`, the same as a cold run.
 
 **Kind:** possible bug.
 
@@ -131,7 +136,9 @@ after ALSO editing the target (mapper re-runs, warm cache): ... loadLimit() resu
 
 **Direction:** watch the transitive imports of the targets (the program already knows them), and include their content in `configIdentity` and in the snapshot update.
 
-### F3. Types the project declares outside the targets are invisible to the generator
+### F3. Types the project declares outside the targets are invisible to the generator (fixed)
+
+**Fixed 2026-11-24.** The analysis program holds the tsconfig's own files. `p19`: a global declared in another file now gives `result: ("EU" | "US")` instead of an unselectable expression.
 
 **Kind:** possible bug.
 
@@ -313,6 +320,8 @@ The `TypeError` is thrown from inside the application call.
 
 ### F9. The type checker and the runtime disagree about which files exist
 
+**Half fixed 2026-11-24.** The registry now includes a file that starts with a byte order mark (`p06`: both sides see 1 node). The other half, a global script that the plugin instruments differently, is in the discovery branch.
+
 **Kind:** inconsistency.
 
 ```text
@@ -324,7 +333,9 @@ CRLF line endings                  | types: file present with 1 node(s) | runtim
 
 For a file with a byte-order mark, `select('src/app.ts', ...)` is a compile error although it works at runtime. For a global script, `README.md:173` says "Global scripts are skipped". The registry does skip them, and the contracts oracle holds that (Law C4, `global-script-ignored`), but the plugin instruments them and adds an `import` to a file that had none. The plugin oracle covers BOM files for instrumentation only. No law compares the set of files the registry lists with the set the plugin registers. Probe: `p06-compile-runtime-parity.mjs`.
 
-### F10. `points.ep` is not validated
+### F10. `points.ep` is not validated (fixed)
+
+**Fixed 2026-11-24.** A manifest with an unknown key, a `targets` that is not a list, a target that is not a string, or a target that matches no file gets a diagnostic at that entry (`p06`). One consequence for the benchmark: a manifest that lists a missing file now fails the treatment typecheck.
 
 **Kind:** possible bug.
 
@@ -421,7 +432,9 @@ The error is thrown inside the application call, and the registry gives the capt
 
 **How often:** both shapes tried. Probe: `p16-capture-and-original-semantics.mjs`.
 
-### F15. Two shapes where the registry's type is not the expression's type
+### F15. Two shapes where the registry's type is not the expression's type (fixed)
+
+**Fixed 2026-11-24.** `p21`: 0 of 4 shapes are wrong (it was 4 of 4).
 
 **Kind:** possible bug.
 
@@ -432,7 +445,9 @@ The error is thrown inside the application call, and the registry gives the capt
 
 `README.md:61` says the replacement's result must match the selected expression's inferred type. Both shapes tried are wrong; the control passes. Probe: `p21-registry-type-fidelity.mjs`.
 
-### F16. A type that cannot be written as a helper leaves its name behind
+### F16. A type that cannot be written as a helper leaves its name behind (fixed)
+
+**Fixed 2026-11-24.** A helper that cannot be written takes its name and its inner declarations back. `p22`: `controller: AbortController`, no dangling names. This is the defect behind the four failures of the benchmark self-test.
 
 **Kind:** possible bug.
 
@@ -687,6 +702,8 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 | `p25-e2e-loud-at-test-end.mjs` | F7: a replacement that never ran fails the test through the Vitest hook |
 | `p26-interleavings.mjs` | schedule exploration: each order and what it left behind, a failure from a check inside `run`, a replay from a schedule, a sample, an unreached expression, a run that waits on a timer, an order that was not run |
 | `p27-what-the-type-check-covers.mjs` | F17 |
+| `p28-registry-error-location.mjs` | an error inside the registry is reported at the manifest entry that lists the file |
+| `p29-unportable-local-reason.mjs` | a local that cannot be captured carries its reason in the registry |
 
 `probes/lib.mjs`, `probes/types.mjs`, and `probes/e2e.mjs` are shared helpers. `e2e.mjs` builds a real consumer project with the package copied into its `node_modules`, the way `bench/toolchain.mjs` does, and runs the real `tsc` and Vitest on it.
 
@@ -701,10 +718,11 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 - 2026-11-24: `interleavings` rebuilt as a primitive after the maintainer's decision: a generator of orders (`order.run(action)`, `order.schedule`, `order.released`) with the caller's own loop and checks. Oracle, example, README section and probe `p26` rewritten for it. A negative or fractional schedule entry is now refused; the first form took `-1` as "the last waiting evaluation". Benchmark harness v2.4 merged.
 - 2026-11-24: the four runtime oracle files are type-checked (`include` widened, `tests/loose-select.ts`, `src/runtime.d.mts`). `checks/no-any.mjs` removed again at the maintainer's request. Decision recorded: TypeScript sources built with `tsdown`.
 - 2026-11-24: the runtime is TypeScript (`src/runtime.ts` holds the implementation and the types that were in `runtime.d.ts`), built with `tsdown` into `dist/`. Three laws changed on the maintainer's decision: runtime Law 4, the replace-everywhere and pause laws of the new API, and `interleavings` no longer promise a `TypeError` for an argument of the wrong kind. The type oracle now compiles against the built declarations.
+- 2026-11-24: type-generation fixes merged (F1, F2, F3, F10, F15, F16, half of F9). I reran `p06`, `p07`, `p18`, `p19`, `p21` and `p22` on the merged code; each shows the fixed behavior quoted in its finding.
 
 ## Incidents
 
-**The pnpm store on this machine was emptied (cause unknown).** At about 14:55 on 2026-11-24 `~/Library/pnpm/store` became empty and the pnpm shim at `~/Library/pnpm/bin/pnpm` stopped working, because the pnpm it starts was a link into that store. The repository and the delegated checkouts are unaffected (their `node_modules` hold their own files). At that minute a gap check of mine and a delegate's re-grading loop of the benchmark were running; neither the commands I could read nor the harness code touches `~/Library/pnpm`. The harness delegate's own account of that quarter of an hour: no `pnpm` command, one `rm` inside its scratch directory, and benchmark processes that delete only temp directories they created. The disk was 93% full. `/opt/homebrew/bin/pnpm` still works. Until this is repaired, the validation commands run through Node directly: `node node_modules/typescript/bin/tsc --noEmit --runExternalCode`, `node checks/verify.mjs`, and `node node_modules/@tanstack/oracles/oracle-gaps/index.mjs --package . --source … --seed 42`.
+**The pnpm store on this machine was emptied (cause unknown).** At about 14:55 on 2026-11-24 `~/Library/pnpm/store` became empty and the pnpm shim at `~/Library/pnpm/bin/pnpm` stopped working, because the pnpm it starts was a link into that store. The repository and the delegated checkouts are unaffected (their `node_modules` hold their own files). At that minute a gap check of mine and a delegate's re-grading loop of the benchmark were running; neither the commands I could read nor the harness code touches `~/Library/pnpm`. The harness delegate's own account of that quarter of an hour: no `pnpm` command, one `rm` inside its scratch directory, and benchmark processes that delete only temp directories they created. The type-generation delegate's account: it ran `pnpm verify`, which ended at 14:55:07, the second that `~/Library/pnpm` was last modified; the store directory changed at 14:55:35, while only `node probes/…` was running there; its next `pnpm` call at 14:56:56 already failed. So the closest thing to a cause is pnpm's own launcher during an ordinary `pnpm verify`. `node_modules` here was created by pnpm 12.21.0, and the shim may have been switching versions; that is a guess, not a finding. The disk was 93% full. `/opt/homebrew/bin/pnpm` still works. Until this is repaired, the validation commands run through Node directly: `node node_modules/typescript/bin/tsc --noEmit --runExternalCode`, `node checks/verify.mjs`, and `node node_modules/@tanstack/oracles/oracle-gaps/index.mjs --package . --source … --seed 42`.
 
 **The benchmark harness deleted packages through a symlinked `node_modules` (caused by me, repaired).** I ran `bench/run.mjs --self-test` in a scratch copy of the repository whose `node_modules` was a symlink to the real one. Toolchain preparation copies `node_modules` and strips packages from the copy; the copy of a symlink is a symlink, so it removed `@tanstack/oracles` and `fast-check` from the real `node_modules` and wrote a stray `execution-points-prototype` into it. `pnpm install --frozen-lockfile` restored it and the baseline was verified afterwards. Nothing tracked by git was touched. Since v2.4 the harness refuses a symlinked `node_modules`.
 

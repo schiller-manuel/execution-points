@@ -110,3 +110,16 @@ A running log. Each entry says what I was doing, what happened, and what would h
 
 **What happened:** `let heldAtEnd` became `let heldAtEnd = false` to give it a type. The value is always assigned before it is read, so the mutant `false → true` survived as `not-observed`. Correct of the tool, and a useful catch: the fix was `let heldAtEnd: boolean | undefined`, not a history. Noted here because the directive for `not-observed` points at the oracle, and the cheaper answer was that production had gained dead code.
 
+### Reported by the type-generation work (a delegated session, same day)
+
+These are another session's notes, taken over as written and not rechecked by me.
+
+- The gap check prints only the first failing test of a file, with no observed or owed value. Seeing the values took the printed replay command plus a custom Vitest reporter that reads `error.actual` and `error.expected`.
+- A failing generated property shows only the shrunk counterexample, which had failed for a different reason than the constructed history it was shrunk from.
+- The `work` bound does not judge tests that hold I/O open, so mutants that delete a cache came back `not-observed` instead of `extra-work`.
+- Owners are judged per file, and every history runs about three times (test, determinism, calibration). A full run over two source files took 17 minutes for 837 mutants on a loaded machine.
+- A gap line for an optional chain shows only `` ` ?. ` → ` . ` `` and a line number. Which `?.` of the line it is has to be read from `position` in `results.jsonl`.
+- The class `not-judged` appeared twice with no entry in the legend.
+- A synchronous endless loop is reported as a `timeout` gap; four such gaps remain in the mapper's frame reader.
+- A run leaves `.oracle-gaps-<pid>/` in the package directory while it runs.
+
