@@ -140,3 +140,22 @@ Another session's notes, taken over as written and not rechecked by me.
 
 **Would have helped:** the run directory under the OS temp directory, or the setup skill adding `.oracle-gaps-*/` to `.gitignore`.
 
+### Reported by the work that typed the oracle files (a delegated session, same day)
+
+Another session's notes, taken over as written and not rechecked by me.
+
+- `TPlan` is inferred from the parameters of `check` and `model`. A shared helper typed `(_history: unknown, …)` and passed as `check:` silently turned the plan into `unknown`, and the 34 resulting errors appeared in the `model` and `driver` bodies, far from the cause. `NoInfer<TPlan>` on those parameters would leave the histories as the only source.
+- The return of `ConstructedHistory.build` is an inference site for the history type, so literals widen and every `build` needs a return annotation (19 were added). `build: (generated: THistory) => NoInfer<THistory>` would make them unnecessary.
+
+### A history must be data, and the message says so
+
+**Doing:** a type-level oracle whose cases each carry a function that judges the compiler's diagnostics.
+
+**What happened:** I put the function into the history. The oracle file "did not load: history 1 .rejectedWith: a function is not history data". The message was exact and I fixed it in a minute by keeping the cases in a table and letting each history name its case. Noted as something that worked well.
+
+### Every type-driven addition to production showed up as a gap
+
+**Doing:** converting the JavaScript modules to TypeScript.
+
+**What happened:** three times I added something only to satisfy the compiler (`let heldAtEnd = false` for an inferred type, `start: 0` on an object typed wider than what is read, `return {}` where `undefined` spreads the same), and each time the gap check reported the addition as a gap, `not-observed` or `not-distinguished`. Each fix was to take the addition out and give the value the type of what is actually read. The tool was right every time. The directive for these classes points at the oracle's histories; for this kind of gap a second sentence, "or the code is dead: remove it", would have saved a look.
+
