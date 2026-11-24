@@ -159,7 +159,8 @@ function instrument(code: string, file: string, entry: IndexedFile, header: stri
   const flags = `const ${[...ownedHomes].map((home) => `${flag(home)} = ${names.file}[${home}]`).join(', ')};\n`
 
   // Selectable expressions and function bodies nest; `children` holds what lies directly inside.
-  const root: Item = { start: 0, end: Infinity, children: [] }
+  // The file itself is the outermost parent: it has an end and children, and nothing reads where it starts.
+  const root: Pick<Item, 'end' | 'children'> = { end: Infinity, children: [] }
   const open = [root]
   const items: Item[] = [
     ...entry.nodes.map((node) => ({ node, start: node.start, end: node.end, children: [] })),
