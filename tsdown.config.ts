@@ -4,7 +4,7 @@ import { defineConfig } from 'tsdown'
 // the runtime: instrumented code imports it as `execution-points-prototype/runtime`, tests as
 // `execution-points-prototype`.
 export default defineConfig({
-  entry: ['src/runtime.ts', 'src/vitest.ts'],
+  entry: ['src/runtime.ts', 'src/vitest.ts', 'src/plugin.ts', 'src/content-mapper.ts', 'src/cli.ts'],
   format: 'esm',
   platform: 'node',
   unbundle: true,

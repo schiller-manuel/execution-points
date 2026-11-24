@@ -1,22 +1,76 @@
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { indexTargetFile, loadManifest, resolveTargetFiles } from './discovery.mjs'
+import { type IndexedFile, type IndexedNode, indexTargetFile, loadManifest, resolveTargetFiles } from './discovery.ts'
 
 const runtimeModule = 'execution-points-prototype/runtime'
 const setupModule = 'execution-points-prototype/vitest'
+
+export interface ExecutionPointsOptions {
+  /** The project root. Defaults to Vite's root. */
+  readonly root?: string
+  /** The target modules: paths and glob patterns. Defaults to the ones points.ep in the root lists. */
+  readonly targets?: readonly string[]
+  /** The manifest the targets were read from, when the caller read it: it is watched. */
+  readonly manifestPath?: string
+}
+
+/** What the plugin needs from the context Vite calls a hook with. */
+interface HookContext {
+  addWatchFile?(file: string): void
+}
+
+/** A version 3 source map from the instrumented code back to the module as written. */
+export interface InstrumentedSourceMap {
+  readonly version: 3
+  readonly sources: string[]
+  readonly sourcesContent: string[]
+  readonly names: string[]
+  readonly mappings: string
+}
+
+export interface Instrumented {
+  readonly code: string
+  readonly map: InstrumentedSourceMap
+}
+
+/** The plugin's hooks. Structurally a Vite `Plugin`; declared here so that this module needs none of Vite's types. */
+export interface ExecutionPointsPlugin {
+  readonly name: string
+  readonly enforce: 'pre'
+  config(): { test: { setupFiles: string[] } }
+  configResolved(config: { readonly root: string }): void
+  buildStart(this: HookContext): void
+  watchChange(): void
+  transform(this: HookContext, code: string, id: string): Instrumented | null
+}
+
+interface Names {
+  readonly invoke: string
+  readonly register: string
+  readonly file: string
+}
+
+/** A selectable expression or a function body, with what lies directly inside it. */
+interface Item {
+  readonly node?: IndexedNode
+  readonly body?: IndexedFile['bodies'][number]
+  readonly start: number
+  readonly end: number
+  readonly children: Item[]
+}
 
 /**
  * Instruments the target modules; test files need no transformation. The targets are
  * `options.targets`, or else the ones that points.ep in the root lists.
  */
-export function executionPoints(options = {}) {
+export function executionPoints(options: ExecutionPointsOptions = {}): ExecutionPointsPlugin {
   let root = resolve(options.root ?? process.cwd())
   // The target files, until a watched file changes, and each target as it was last instrumented.
-  let targets
-  const indexed = new Map()
+  let targets: Set<string> | undefined
+  const indexed = new Map<string, IndexedFile>()
 
-  function resolveTargets(context) {
+  function resolveTargets(context: HookContext): Set<string> {
     // Explicit targets win. Without them, points.ep in the root is the one list of targets.
     const { targets: listed, manifestPath } = options.targets ? options : loadManifest(root)
     targets = new Set(resolveTargetFiles(root, listed))
@@ -68,7 +122,7 @@ export function executionPoints(options = {}) {
         )
       }
 
-      const names = {
+      const names: Names = {
         invoke: uniqueName(code, '__epInvoke'),
         register: uniqueName(code, '__epRegister'),
         file: uniqueName(code, '__epFile'),
@@ -97,17 +151,17 @@ export function executionPoints(options = {}) {
  * An ordinary function decides once per call, so its original body runs untouched; code
  * outside such a body decides at each outermost selectable expression.
  */
-function instrument(code, file, entry, header, names) {
+function instrument(code: string, file: string, entry: IndexedFile, header: string, names: Names): Instrumented {
   const out = createEmitter(code, file)
   // Each home keeps its flag in a constant of its own, which is what lets V8 read it for free.
-  const flag = (home) => `${names.file}$${home}`
+  const flag = (home: number): string => `${names.file}$${home}`
   const ownedHomes = new Set(entry.nodes.map((node) => node.home))
   const flags = `const ${[...ownedHomes].map((home) => `${flag(home)} = ${names.file}[${home}]`).join(', ')};\n`
 
   // Selectable expressions and function bodies nest; `children` holds what lies directly inside.
-  const root = { end: Infinity, children: [] }
+  const root: Item = { start: 0, end: Infinity, children: [] }
   const open = [root]
-  const items = [
+  const items: Item[] = [
     ...entry.nodes.map((node) => ({ node, start: node.start, end: node.end, children: [] })),
     ...entry.bodies
       .filter((body) => ownedHomes.has(body.home))
@@ -115,11 +169,11 @@ function instrument(code, file, entry, header, names) {
   ].sort((a, b) => a.start - b.start || b.end - a.end)
   for (const item of items) {
     open.length = open.findLastIndex((parent) => item.start < parent.end) + 1
-    open.at(-1).children.push(item)
+    open.at(-1)!.children.push(item)
     open.push(item)
   }
 
-  const between = (children, from, to, each) => {
+  const between = (children: readonly Item[], from: number, to: number, each: (child: Item) => void): void => {
     let cursor = from
     for (const child of children) {
       out.source(cursor, child.start)
@@ -129,7 +183,7 @@ function instrument(code, file, entry, header, names) {
     out.source(cursor, to)
   }
 
-  const wrapped = (item) => {
+  const wrapped = (item: Item): void => {
     const { node } = item
     if (node) out.text(`${names.invoke}(${JSON.stringify(node.id)}, () => (`)
     between(item.children, item.start, item.end, wrapped)
@@ -140,8 +194,10 @@ function instrument(code, file, entry, header, names) {
   }
 
   // `home` names the code that has already decided to run its original statements.
-  const original = (item, home) => {
-    const { node, body } = item
+  const original = (item: Item, home: number | undefined): void => {
+    const { body } = item
+    // An item that is not a function body is a selectable expression.
+    const node = item.node!
     if (body) {
       out.text(`{if(!${flag(body.home)}.on){`)
       between(item.children, item.start + 1, item.end - 1, (child) => original(child, body.home))
@@ -170,7 +226,7 @@ function instrument(code, file, entry, header, names) {
 
 const base64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
-function vlq(value) {
+function vlq(value: number): string {
   let rest = value < 0 ? (-value << 1) | 1 : value << 1
   let text = ''
   do {
@@ -182,7 +238,7 @@ function vlq(value) {
 }
 
 /** Builds the output and a source map that sends each copied token back to where it was written. */
-function createEmitter(code, file) {
+function createEmitter(code: string, file: string) {
   const lineOf = new Uint32Array(code.length)
   const columnOf = new Uint32Array(code.length)
   let line = 0
@@ -196,41 +252,41 @@ function createEmitter(code, file) {
     }
   })
 
-  const lines = [[]]
+  const lines: string[][] = [[]]
   let generated = ''
   let sinceSegment = 0
   let lastLine = 0
   let lastColumn = 0
 
   // A segment starts where the generated line stands; its fields are relative to the previous one.
-  const segment = (fields) => {
-    lines.at(-1).push(vlq(sinceSegment) + fields)
+  const segment = (fields: string): void => {
+    lines.at(-1)!.push(vlq(sinceSegment) + fields)
     sinceSegment = 0
   }
-  const advance = (text) => {
+  const advance = (text: string): void => {
     generated += text
     const rows = text.split('\n')
     for (const _ of rows.slice(1)) lines.push([])
-    sinceSegment = rows.at(-1).length
+    sinceSegment = rows.at(-1)!.length
   }
 
   return {
     /** Code of ours: it maps to nothing. */
-    text(text) {
+    text(text: string): void {
       segment('')
       advance(text)
     },
     /** Code copied from the original, token by token. */
-    source(from, to) {
+    source(from: number, to: number): void {
       for (const [token] of code.slice(from, to).matchAll(/[\w$]+|[^\w$\n]+|\n/g)) {
-        segment(vlq(0) + vlq(lineOf[from] - lastLine) + vlq(columnOf[from] - lastColumn))
-        lastLine = lineOf[from]
-        lastColumn = columnOf[from]
+        segment(vlq(0) + vlq(lineOf[from]! - lastLine) + vlq(columnOf[from]! - lastColumn))
+        lastLine = lineOf[from]!
+        lastColumn = columnOf[from]!
         advance(token)
         from += token.length
       }
     },
-    finish() {
+    finish(): Instrumented {
       return {
         code: generated,
         map: {
@@ -245,7 +301,7 @@ function createEmitter(code, file) {
   }
 }
 
-function readSource(file) {
+function readSource(file: string): string | undefined {
   try {
     return readFileSync(file, 'utf8')
   } catch {
@@ -253,22 +309,22 @@ function readSource(file) {
   }
 }
 
-function sourceFileName(id) {
-  const [file, query] = id.split('?', 2)
+function sourceFileName(id: string): string | undefined {
+  const [file, query] = id.split('?', 2) as [string, string | undefined]
   if (query && /(?:^|&)(?:raw|url|worker|sharedworker)(?:&|=|$)/.test(query)) return undefined
   if (file.startsWith('file:')) return resolve(fileURLToPath(file))
   if (file.startsWith('/@fs/')) return resolve(file.slice(4))
   return isAbsolute(file) ? resolve(file) : undefined
 }
 
-function uniqueName(source, base) {
+function uniqueName(source: string, base: string): string {
   let candidate = base
   let suffix = 0
   while (source.includes(candidate)) candidate = `${base}_${++suffix}`
   return candidate
 }
 
-function importOffset(source) {
+function importOffset(source: string): number {
   let offset = source.charCodeAt(0) === 0xfeff ? 1 : 0
   if (source.startsWith('#!', offset)) {
     const lineEnd = source.indexOf('\n', offset)

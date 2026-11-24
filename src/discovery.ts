@@ -1,47 +1,162 @@
 import { existsSync, globSync, readFileSync } from 'node:fs'
 import { relative, resolve } from 'node:path'
 import { API } from 'typescript/sync'
-import { NodeFlags, SyntaxKind } from 'typescript/ast'
+import { type Node, NodeFlags, type SourceFile, SyntaxKind } from 'typescript/ast'
 
-const isAssignmentOp = (k) => k >= SyntaxKind.FirstAssignment && k <= SyntaxKind.LastAssignment
-const indexableKinds = new Set([
-  SyntaxKind.CallExpression,
-  SyntaxKind.BinaryExpression,
-  SyntaxKind.ConditionalExpression,
-])
-let defaultApi
-const getDefaultApi = () => (defaultApi ??= new API())
+/**
+ * A syntax node as this module reads it. The walk asks nodes of many kinds for the same few
+ * fields, and a node of a kind that lacks one answers `undefined`.
+ */
+interface Syntax extends Node {
+  readonly parent: Syntax
+  forEachChild<T>(visitor: (node: Syntax) => T): T | undefined
+  readonly name?: Syntax
+  readonly propertyName?: Syntax
+  readonly text?: string
+  readonly expression?: Syntax
+  readonly argumentExpression?: Syntax
+  readonly left?: Syntax
+  readonly operator?: SyntaxKind
+  readonly operatorToken?: Syntax
+  readonly questionDotToken?: Syntax
+  readonly asteriskToken?: Syntax
+  readonly body?: Syntax
+  readonly initializer?: Syntax
+  readonly parameters?: readonly Syntax[]
+  readonly variableDeclaration?: Syntax
+  readonly declarations?: readonly Syntax[]
+  readonly declarationList?: Syntax
+  readonly statements?: readonly Syntax[]
+  readonly clauses?: readonly Syntax[]
+  readonly elements?: readonly Syntax[]
+  readonly externalModuleIndicator?: unknown
+}
 
-const isString = (value) => typeof value === 'string'
+/** What points.ep holds, and where it was read from. */
+export interface Manifest {
+  readonly root: string
+  readonly manifestPath: string
+  readonly targets: readonly string[]
+  readonly tsconfig?: string
+  readonly $schema?: string
+}
+
+/** One selectable expression of a target module. */
+export interface IndexedNode {
+  readonly id: string
+  readonly file: string
+  readonly relativeFile: string
+  readonly kind: 'CallExpression' | 'BinaryExpression' | 'ConditionalExpression'
+  readonly inFunction: string | null
+  readonly callee?: string
+  readonly operator?: string
+  readonly nth: number
+  readonly start: number
+  readonly end: number
+  /** Which of the file's homes evaluates the expression: see `homeKind`. */
+  readonly home: number
+  readonly startsStatement: boolean
+  /** The locals that are initialized whenever the expression runs. */
+  readonly captures: readonly string[]
+}
+
+export interface IndexedFile {
+  readonly file: string
+  readonly relativeFile: string
+  readonly source: string
+  readonly nodes: readonly IndexedNode[]
+  /** The blocks of ordinary functions: each decides once per call which form of its statements runs. */
+  readonly bodies: ReadonlyArray<{ readonly home: number; readonly start: number; readonly end: number }>
+  /** Where the file's leading directives end, or 0. */
+  readonly directivesEnd: number
+}
+
+export interface TargetPlan {
+  readonly root: string
+  readonly tsconfig: string
+  readonly files: IndexedFile[]
+}
+
+export interface TargetPlanOptions {
+  readonly root?: string
+  readonly targets?: readonly string[]
+  readonly tsconfig?: string
+  /** Text to index in place of what is on disk, by file. */
+  readonly overrides?: ReadonlyMap<string, string>
+  readonly api?: API
+}
+
+/** A place from which a function declaration is used, and the scope through which it is reached. */
+interface Use {
+  readonly pos: number
+  readonly through: Scope | undefined
+}
+
+/** A local name. It is initialized from `readyAt` on, and inside a `switch` only within its own clause. */
+interface VariableBinding {
+  readonly readyAt: number
+  readonly inClause?: Syntax
+  home?: Scope
+  readonly uses?: undefined
+  readonly callers?: undefined
+}
+
+/** A function declaration: it exists as soon as its block is entered, and can run from its first use on. */
+interface FunctionBinding {
+  readonly readyAt: number
+  readonly inClause?: undefined
+  home?: Scope
+  readonly uses: Use[]
+  readonly callers: FunctionBinding[]
+  reach?: Use[]
+}
+
+type Binding = VariableBinding | FunctionBinding
+
+interface Scope {
+  readonly node: Syntax
+  readonly parent: Scope | undefined
+  readonly names: Map<string, Binding>
+  /** The function declaration this scope is the inside of. */
+  readonly declares: FunctionBinding | undefined
+}
+
+const isAssignmentOp = (k: SyntaxKind): boolean => k >= SyntaxKind.FirstAssignment && k <= SyntaxKind.LastAssignment
+const indexableKinds = new Set([SyntaxKind.CallExpression, SyntaxKind.BinaryExpression, SyntaxKind.ConditionalExpression])
+let defaultApi: API | undefined
+const getDefaultApi = (): API => (defaultApi ??= new API())
+
+const isString = (value: unknown): boolean => typeof value === 'string'
 /** What a manifest may hold, as points.schema.json describes it. */
-const manifestKeys = new Map([
+const manifestKeys = new Map<string, (value: unknown) => boolean>([
   ['$schema', isString],
   ['tsconfig', isString],
   ['targets', (value) => Array.isArray(value) && value.every(isString)],
 ])
 
 /** The manifest of a project: its targets and its tsconfig. Anything else in its place is refused by name. */
-export function loadManifest(root = process.cwd(), file = 'points.ep') {
+export function loadManifest(root: string = process.cwd(), file = 'points.ep'): Manifest {
   const manifestPath = resolve(root, file)
-  let manifest
+  let manifest: unknown
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   } catch (error) {
-    throw new Error(`[execution-points] Cannot read the manifest ${manifestPath}: ${error.message}`)
+    throw new Error(`[execution-points] Cannot read the manifest ${manifestPath}: ${(error as Error).message}`)
   }
   // Only a JSON object has a key named "targets": a list, a text, or a number has none.
-  const keys = Object.keys(Object(manifest))
-  if (!keys.includes('targets') || !keys.every((key) => manifestKeys.get(key)?.(manifest[key]))) {
+  const held = Object(manifest) as Record<string, unknown>
+  const keys = Object.keys(held)
+  if (!keys.includes('targets') || !keys.every((key) => manifestKeys.get(key)?.(held[key]))) {
     throw new Error(
       `[execution-points] ${manifestPath} is not a manifest: it must hold a JSON object with a "targets" array of paths, ` +
         'and may name a "tsconfig" and a "$schema" (see points.schema.json).',
     )
   }
-  return { root: resolve(root), manifestPath, ...manifest }
+  return { root: resolve(root), manifestPath, ...(held as Pick<Manifest, 'targets' | 'tsconfig' | '$schema'>) }
 }
 
-export function resolveTargetFiles(root, configuredTargets = []) {
-  const resolved = new Set()
+export function resolveTargetFiles(root: string, configuredTargets: readonly string[] = []): string[] {
+  const resolved = new Set<string>()
   for (const entry of configuredTargets) {
     if (/[*?[\]{}]/.test(entry)) {
       for (const match of globSync(entry, { cwd: root })) resolved.add(resolve(root, match))
@@ -65,17 +180,18 @@ const wrapperKinds = new Set([
  * moving it into a function of its own, which is how it is intercepted, would change what the
  * code does.
  */
-const isSelectableExpression = (node) =>
+const isSelectableExpression = (node: Syntax): boolean =>
   indexableKinds.has(node.kind) &&
   !isAssignment(node) &&
   !standsForAPlace(node) &&
   !continuesOptionalChain(node) &&
   !isTiedToItsFunction(node)
 
-const isAssignment = (node) => node.kind === SyntaxKind.BinaryExpression && isAssignmentOp(node.operatorToken.kind)
+const isAssignment = (node: Syntax): boolean =>
+  node.kind === SyntaxKind.BinaryExpression && isAssignmentOp(node.operatorToken!.kind)
 
 /** Whether the code around the expression needs more than its value: a place to write to, or something to call. */
-function standsForAPlace(node) {
+function standsForAPlace(node: Syntax): boolean {
   let cur = node
   while (wrapperKinds.has(cur.parent.kind)) cur = cur.parent
   const p = cur.parent
@@ -84,7 +200,7 @@ function standsForAPlace(node) {
     p.kind === SyntaxKind.DeleteExpression ||
     p.kind === SyntaxKind.PostfixUnaryExpression ||
     (p.kind === SyntaxKind.PrefixUnaryExpression &&
-      [SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken].includes(p.operator))
+      [SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken].includes(p.operator!))
   const isCalled =
     ((p.kind === SyntaxKind.CallExpression || p.kind === SyntaxKind.NewExpression) && p.expression === cur) ||
     p.kind === SyntaxKind.TaggedTemplateExpression
@@ -96,7 +212,7 @@ function standsForAPlace(node) {
  * Whether an optional chain goes on behind the expression without a `?.` of its own: such a
  * chain ends where the expression yields nothing, which a function of its own would undo.
  */
-function continuesOptionalChain(node) {
+function continuesOptionalChain(node: Syntax): boolean {
   const next = node.parent
   return Boolean(next.flags & NodeFlags.OptionalChain) && next.expression === node && !next.questionDotToken
 }
@@ -106,10 +222,10 @@ function continuesOptionalChain(node) {
  * imports, outside the functions it contains. Of a nested function, only what its name and
  * decorators compute runs here.
  */
-function isTiedToItsFunction(part) {
+function isTiedToItsFunction(part: Syntax): boolean {
   if (part.kind === SyntaxKind.AwaitExpression || part.kind === SyntaxKind.YieldExpression) return true
   if (part.kind === SyntaxKind.CallExpression) {
-    const callee = part.expression
+    const callee = part.expression!
     if (
       callee.kind === SyntaxKind.SuperKeyword ||
       callee.kind === SyntaxKind.ImportKeyword ||
@@ -128,7 +244,7 @@ function isTiedToItsFunction(part) {
   )
 }
 
-function enclosingFunctionName(node) {
+function enclosingFunctionName(node: Syntax): string | undefined {
   switch (node.kind) {
     case SyntaxKind.FunctionDeclaration:
     case SyntaxKind.MethodDeclaration:
@@ -141,11 +257,11 @@ function enclosingFunctionName(node) {
     case SyntaxKind.ArrowFunction: {
       if (node.name) return node.name.text
       const { parent } = node
-      if (parent.kind === SyntaxKind.VariableDeclaration && parent.name.kind === SyntaxKind.Identifier) {
-        return parent.name.text
+      if (parent.kind === SyntaxKind.VariableDeclaration && parent.name!.kind === SyntaxKind.Identifier) {
+        return parent.name!.text
       }
       if (parent.kind === SyntaxKind.PropertyAssignment) {
-        return parent.name.text ?? '(anonymous)'
+        return parent.name!.text ?? '(anonymous)'
       }
       return '(anonymous)'
     }
@@ -164,11 +280,7 @@ const functionKinds = new Set([
   SyntaxKind.Constructor,
 ])
 /** What does not run where it is written: a function's body and parameters, a field's initializer, a static block. */
-const runsItsOwnCode = new Set([
-  ...functionKinds,
-  SyntaxKind.PropertyDeclaration,
-  SyntaxKind.ClassStaticBlockDeclaration,
-])
+const runsItsOwnCode = new Set([...functionKinds, SyntaxKind.PropertyDeclaration, SyntaxKind.ClassStaticBlockDeclaration])
 
 /**
  * Code that runs later than, or more often than, the code around it gets a home of its own:
@@ -176,40 +288,40 @@ const runsItsOwnCode = new Set([
  * and `'deferred'` for everything else that a call, a construction, or a resumption evaluates
  * (parameter defaults, expression bodies, generator and constructor bodies, field initializers).
  */
-function homeKind(node) {
+function homeKind(node: Syntax): 'body' | 'deferred' | undefined {
   if (functionKinds.has(node.kind) || node.kind === SyntaxKind.PropertyDeclaration) return 'deferred'
   const fn = node.parent
   if (node.kind !== SyntaxKind.Block || fn.body !== node || !functionKinds.has(fn.kind)) return undefined
   // A directive must stay the first statement of its function, so such a body is left whole.
-  return fn.kind === SyntaxKind.Constructor || fn.asteriskToken || isDirective(node.statements[0]) ? undefined : 'body'
+  return fn.kind === SyntaxKind.Constructor || fn.asteriskToken || isDirective(node.statements![0]) ? undefined : 'body'
 }
 
 /** A string that stands as a statement of its own: a directive such as `'use strict'`, where it comes first. */
-const isDirective = (statement) =>
-  statement?.kind === SyntaxKind.ExpressionStatement && statement.expression.kind === SyntaxKind.StringLiteral
+const isDirective = (statement: Syntax | undefined): boolean =>
+  statement?.kind === SyntaxKind.ExpressionStatement && statement.expression!.kind === SyntaxKind.StringLiteral
 
 /** Whether the expression begins an expression statement: only there can it follow a line that lacks its `;`. */
-function startsStatement(node, start, tree) {
+function startsStatement(node: Syntax, start: number, tree: SourceFile): boolean {
   let cur = node
   while (cur.parent.kind !== SyntaxKind.ExpressionStatement && cur.parent.getStart(tree) === start) cur = cur.parent
   return cur.parent.kind === SyntaxKind.ExpressionStatement
 }
 
-function callCalleeName(node) {
-  const expr = node.expression
-  if (expr.kind === SyntaxKind.Identifier) return expr.text
-  if (expr.kind === SyntaxKind.PropertyAccessExpression) return expr.name.text
-  if (expr.kind === SyntaxKind.ElementAccessExpression && expr.argumentExpression.kind === SyntaxKind.StringLiteral) {
-    return expr.argumentExpression.text
+function callCalleeName(node: Syntax): string {
+  const expr = node.expression!
+  if (expr.kind === SyntaxKind.Identifier) return expr.text!
+  if (expr.kind === SyntaxKind.PropertyAccessExpression) return expr.name!.text!
+  if (expr.kind === SyntaxKind.ElementAccessExpression && expr.argumentExpression!.kind === SyntaxKind.StringLiteral) {
+    return expr.argumentExpression!.text!
   }
   return '(anonymous)'
 }
 
 /** The names a binding name or pattern declares; an array pattern can leave an element out. */
-function declaredNames(nameNode, names = []) {
+function declaredNames(nameNode: Syntax | undefined, names: string[] = []): string[] {
   if (!nameNode) return names
-  if (nameNode.kind === SyntaxKind.Identifier) names.push(nameNode.text)
-  else for (const element of nameNode.elements) declaredNames(element.name, names)
+  if (nameNode.kind === SyntaxKind.Identifier) names.push(nameNode.text!)
+  else for (const element of nameNode.elements!) declaredNames(element.name, names)
   return names
 }
 
@@ -220,9 +332,9 @@ function declaredNames(nameNode, names = []) {
  * Those bindings are kept in `functions`, by declaration. A `switch` is one scope, in which a
  * declaration is initialized only within its own clause.
  */
-function declarationsOf(node, functions) {
-  const found = []
-  const declare = (nameNode, readyAt, inClause) => {
+function declarationsOf(node: Syntax, functions: Map<Syntax, FunctionBinding>): Array<[string, Binding]> {
+  const found: Array<[string, Binding]> = []
+  const declare = (nameNode: Syntax | undefined, readyAt: number, inClause?: Syntax): void => {
     for (const name of declaredNames(nameNode)) found.push([name, { readyAt, inClause }])
   }
   for (const parameter of node.parameters ?? []) declare(parameter.name, parameter.end)
@@ -231,22 +343,22 @@ function declarationsOf(node, functions) {
   if (node.kind === SyntaxKind.ClassExpression) declare(node.name, Infinity)
   if (node.initializer?.kind === SyntaxKind.VariableDeclarationList) {
     // The head of a loop. A loop over a collection initializes its names once the collection is evaluated.
-    for (const declaration of node.initializer.declarations) {
+    for (const declaration of node.initializer.declarations!) {
       declare(declaration.name, node.expression ? node.expression.end : declaration.end)
     }
   }
-  const lists = node.kind === SyntaxKind.CaseBlock ? node.clauses : node.statements && !isClause(node) ? [node] : []
+  const lists = node.kind === SyntaxKind.CaseBlock ? node.clauses! : node.statements && !isClause(node) ? [node] : []
   for (const list of lists) {
     const inClause = list === node ? undefined : list
-    for (const statement of list.statements) {
+    for (const statement of list.statements!) {
       if (statement.kind === SyntaxKind.FunctionDeclaration) {
-        const binding = { readyAt: -1, uses: [], callers: [] }
+        const binding: FunctionBinding = { readyAt: -1, uses: [], callers: [] }
         functions.set(statement, binding)
-        found.push([statement.name.text, binding])
+        found.push([statement.name!.text!, binding])
       } else if (statement.kind === SyntaxKind.ClassDeclaration) {
         declare(statement.name, statement.end, inClause)
       } else if (statement.kind === SyntaxKind.VariableStatement) {
-        for (const declaration of statement.declarationList.declarations) {
+        for (const declaration of statement.declarationList!.declarations!) {
           declare(declaration.name, declaration.end, inClause)
         }
       }
@@ -255,52 +367,53 @@ function declarationsOf(node, functions) {
   return found
 }
 
-const isClause = (node) => node.kind === SyntaxKind.CaseClause || node.kind === SyntaxKind.DefaultClause
+const isClause = (node: Syntax): boolean => node.kind === SyntaxKind.CaseClause || node.kind === SyntaxKind.DefaultClause
 
 /** Whether code at `pos`, which reaches the binding's scope through the scope `through`, finds the binding initialized. */
-const isInitialized = (binding, pos, through) =>
-  binding.readyAt <= pos && (!binding.inClause || binding.inClause === through.node)
+const isInitialized = (binding: Binding, pos: number, through: Scope | undefined): boolean =>
+  binding.readyAt <= pos && (!binding.inClause || binding.inClause === through!.node)
 
 /** Every place from which the function declaration can be called: its own uses, and those of the functions that use it. */
-function reachOf(fn, seen = new Set()) {
+function reachOf(fn: FunctionBinding, seen = new Set<FunctionBinding>()): Use[] {
   if (seen.has(fn)) return []
   seen.add(fn)
   return fn.uses.concat(...fn.callers.map((caller) => reachOf(caller, seen)))
 }
 
 /** Index all selectable expressions in a single target module using TypeScript 7.1's AST. */
-export function indexTargetFile(file, source, root, api = getDefaultApi()) {
+export function indexTargetFile(file: string, source: string, root: string, api: API = getDefaultApi()): IndexedFile {
   const bomOffset = source.charCodeAt(0) === 0xfeff ? 1 : 0
   const lease = api.createSourceFile(file, bomOffset ? source.slice(1) : source)
   try {
-    const tree = lease.sourceFile
+    const sourceFile = lease.sourceFile
+    const tree = sourceFile as unknown as Syntax
     const relativeFile = relative(root, file).replaceAll('\\', '/')
-    const fnStack = []
-    const nthCounters = new Map()
-    const found = []
-    const bodies = []
+    const fnStack: string[] = []
+    const nthCounters = new Map<string, number>()
+    const found: Array<{ node: Omit<IndexedNode, 'captures'>; at: number; scope: Scope }> = []
+    const bodies: Array<{ home: number; start: number; end: number }> = []
     const homes = [0]
     let homeCount = 0
-    const functions = new Map()
+    const functions = new Map<Syntax, FunctionBinding>()
 
     /** The scope of the code inside `node`: the names it declares, and the function declaration it is. */
-    const scopeOf = (node, parent) => {
-      const scope = { node, parent, names: new Map(declarationsOf(node, functions)), declares: functions.get(node) }
+    const scopeOf = (node: Syntax, parent: Scope | undefined): Scope => {
+      const scope: Scope = { node, parent, names: new Map(declarationsOf(node, functions)), declares: functions.get(node) }
       for (const binding of scope.names.values()) binding.home = scope
       return scope
     }
 
     /** Records a use of a function declaration: a function can run from its first use on. */
-    const noteUse = (identifier, from) => {
-      let through
-      let caller
-      for (let scope = from; scope; through = scope, scope = scope.parent) {
-        const binding = scope.names.get(identifier.text)
+    const noteUse = (identifier: Syntax, from: Scope): void => {
+      let through: Scope | undefined
+      let caller: FunctionBinding | undefined
+      for (let scope: Scope | undefined = from; scope; through = scope, scope = scope.parent) {
+        const binding = scope.names.get(identifier.text!)
         if (binding) {
           if (!binding.uses) return
           // A use inside another function of the same scope happens whenever that function runs.
           if (caller?.home === scope) binding.callers.push(caller)
-          else binding.uses.push({ pos: identifier.getStart(tree), through })
+          else binding.uses.push({ pos: identifier.getStart(sourceFile), through })
           return
         }
         caller = scope.declares ?? caller
@@ -313,12 +426,12 @@ export function indexTargetFile(file, source, root, api = getDefaultApi()) {
      * that holds it are initialized only if they are at every place the function can be
      * called from.
      */
-    const capturesAt = (pos, from) => {
-      const decided = new Set()
-      const names = []
-      let through
-      let via
-      for (let scope = from; scope; through = scope, scope = scope.parent) {
+    const capturesAt = (pos: number, from: Scope): string[] => {
+      const decided = new Set<string>()
+      const names: string[] = []
+      let through: Scope | undefined
+      let via: FunctionBinding | undefined
+      for (let scope: Scope | undefined = from; scope; through = scope, scope = scope.parent) {
         for (const [name, binding] of scope.names) {
           if (decided.has(name)) continue
           decided.add(name)
@@ -333,14 +446,14 @@ export function indexTargetFile(file, source, root, api = getDefaultApi()) {
       return names.sort()
     }
 
-    const visit = (node, outer) => {
+    const visit = (node: Syntax, outer?: Scope): void => {
       const fnName = enclosingFunctionName(node)
       if (fnName !== undefined) fnStack.push(fnName)
       const scope = scopeOf(node, outer)
       const home = homeKind(node)
       if (home) homes.push(++homeCount)
       if (home === 'body') {
-        bodies.push({ home: homeCount, start: node.getStart(tree) + bomOffset, end: node.end + bomOffset })
+        bodies.push({ home: homeCount, start: node.getStart(sourceFile) + bomOffset, end: node.end + bomOffset })
       }
 
       // A name that is read, as opposed to a name that is declared or that names a property.
@@ -353,25 +466,24 @@ export function indexTargetFile(file, source, root, api = getDefaultApi()) {
       }
 
       if (isSelectableExpression(node)) {
-        const treeStart = node.getStart(tree)
+        const treeStart = node.getStart(sourceFile)
         const start = treeStart + bomOffset
         const end = node.end + bomOffset
-        const inFunction =
-          fnStack.findLast((name) => name !== '(anonymous)') ?? (fnStack.length ? '(anonymous)' : null)
+        const inFunction = fnStack.findLast((name) => name !== '(anonymous)') ?? (fnStack.length ? '(anonymous)' : null)
         const kind =
           node.kind === SyntaxKind.CallExpression
             ? 'CallExpression'
             : node.kind === SyntaxKind.BinaryExpression
               ? 'BinaryExpression'
               : 'ConditionalExpression'
-        const extra =
+        const extra: { callee?: string; operator?: string } =
           kind === 'CallExpression'
             ? { callee: callCalleeName(node) }
             : kind === 'BinaryExpression'
               ? {
                   operator: source.slice(
-                    node.operatorToken.getStart(tree) + bomOffset,
-                    node.operatorToken.end + bomOffset,
+                    node.operatorToken!.getStart(sourceFile) + bomOffset,
+                    node.operatorToken!.end + bomOffset,
                   ),
                 }
               : {}
@@ -392,8 +504,8 @@ export function indexTargetFile(file, source, root, api = getDefaultApi()) {
             nth,
             start,
             end,
-            home: homes.at(-1),
-            startsStatement: startsStatement(node, treeStart, tree),
+            home: homes.at(-1)!,
+            startsStatement: startsStatement(node, treeStart, sourceFile),
           },
           at: treeStart,
           scope,
@@ -412,8 +524,9 @@ export function indexTargetFile(file, source, root, api = getDefaultApi()) {
     // Captures wait until every use of every function is known.
     const nodes = found.map(({ node, at, scope }) => ({ ...node, captures: capturesAt(at, scope) }))
     // Where the file's leading directives end: they must stay its first statements.
-    const leading = tree.statements.findIndex((statement) => !isDirective(statement))
-    const directivesEnd = leading ? tree.statements.at(leading - 1).end + bomOffset : 0
+    const statements = tree.statements!
+    const leading = statements.findIndex((statement) => !isDirective(statement))
+    const directivesEnd = leading ? statements.at(leading - 1)!.end + bomOffset : 0
     return { file, relativeFile, source, nodes, bodies, directivesEnd }
   } finally {
     lease.dispose()
@@ -421,12 +534,12 @@ export function indexTargetFile(file, source, root, api = getDefaultApi()) {
 }
 
 /** Index all target modules configured in points.ep. */
-export function buildTargetPlan(options) {
+export function buildTargetPlan(options: TargetPlanOptions): TargetPlan {
   const root = resolve(options.root ?? process.cwd())
-  const overrides = options.overrides ?? new Map()
-  const read = (file) => (overrides.has(file) ? overrides.get(file) : readFileSync(file, 'utf8'))
+  const overrides = options.overrides ?? new Map<string, string>()
+  const read = (file: string): string => (overrides.has(file) ? overrides.get(file)! : readFileSync(file, 'utf8'))
 
-  const files = []
+  const files: IndexedFile[] = []
   for (const file of resolveTargetFiles(root, options.targets ?? [])) {
     if (!overrides.has(file) && !existsSync(file)) continue
     files.push(indexTargetFile(file, read(file), root, options.api))

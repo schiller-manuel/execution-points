@@ -15,8 +15,8 @@ import { dirname, join } from 'node:path'
 import { type API, SymbolFlags, TypeFlags } from 'typescript/sync'
 import { createFileSystemLayer } from 'typescript/fs'
 import { SyntaxKind } from 'typescript/ast'
-import { generateFileRegistryModule } from '../src/contracts.mjs'
-import { buildTargetPlan } from '../src/discovery.mjs'
+import { generateFileRegistryModule } from '../src/contracts.ts'
+import { buildTargetPlan } from '../src/discovery.ts'
 
 export const repoRoot = process.cwd()
 

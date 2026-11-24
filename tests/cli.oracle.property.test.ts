@@ -2,7 +2,7 @@
  * This oracle owns the `execution-points list` command: what it prints for the target modules
  * of a project, and how it answers when it cannot list. It is checked on the lines that
  * `run(argv, { cwd, out, err })` writes and on the exit code it returns, and it owns
- * `src/cli.mjs`.
+ * `src/cli.ts`.
  *
  * ```ts
  * run(['list', 'src/app.ts'], { cwd }) // → 0, one line per selectable expression of the file:
@@ -56,9 +56,9 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import fc from 'fast-check'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { executionPoints } from '../src/plugin.mjs'
+import { executionPoints } from '../src/plugin.ts'
 
-const CLI_FILE = fileURLToPath(new URL('../src/cli.mjs', import.meta.url))
+const CLI_FILE = fileURLToPath(new URL('../src/cli.ts', import.meta.url))
 type Run = (argv: Array<string>, io: { cwd: string; out: (line: string) => void; err: (line: string) => void }) => number
 
 // ---------------------------------------------------------------------------
@@ -279,7 +279,7 @@ const plain = (template: number): StatementSpec => ({ template, indent: 2, broke
 
 oracleProperty({
   id: 'cli-lists-what-the-plugin-registers',
-  owns: ['src/cli.mjs'],
+  owns: ['src/cli.ts'],
   law: {
     statement:
       'For every project and every target file, `execution-points list` prints exactly the expressions the plugin registers for that file, in the same order, each on one line with its id, kind, callee or operator, inFunction, and nth, the line and column where it starts (both from 1, a byte-order mark counting for nothing), and its text with every run of whitespace as one space, cut to 72 characters; without a file it lists every existing target in the order of their paths; --json prints the same entries as a JSON array; and it returns 0.',
@@ -402,7 +402,7 @@ oracleProperty({
       writeProject(history, dir)
       const out: Array<string> = []
       const err: Array<string> = []
-      const { run } = (await import('../src/cli.mjs')) as { run: Run }
+      const { run } = (await import('../src/cli.ts')) as { run: Run }
       const exit = run(['list', ...(asked === undefined ? [] : [asked]), ...(history.json ? ['--json'] : [])], {
         cwd: dir,
         out: (line) => out.push(line),
@@ -540,7 +540,7 @@ let loads = 0
 
 oracleProperty({
   id: 'cli-refuses-with-a-reason',
-  owns: ['src/cli.mjs'],
+  owns: ['src/cli.ts'],
   law: {
     statement:
       'For every command line that cannot be listed, run prints nothing on the output stream, says why on the error stream, and returns 1 for a file that is not a target, a file that does not exist, and a missing or broken manifest, and 2 for a command line it does not understand; --help prints the usage and returns 0; and loading the module runs the command line only when the module is the program Node was started with, directly or through a link.',
@@ -573,13 +573,13 @@ oracleProperty({
         else if (history.refusal !== 'no-manifest') {
           writeFileSync(join(dir, 'points.ep'), JSON.stringify({ targets: ['src/app.ts', 'src/gone.ts'] }))
         }
-        const { run } = (await import('../src/cli.mjs')) as { run: Run }
+        const { run } = (await import('../src/cli.ts')) as { run: Run }
         const code = run([...argv], { cwd: dir, out: (line) => out.push(line), err: (line) => err.push(line) })
         observe('refusal', { exit: code, ...firstLines(), says: err.join('\n').includes(says) ? says : err.join('\n') })
         return
       }
 
-      const { run } = (await import('../src/cli.mjs')) as { run: Run }
+      const { run } = (await import('../src/cli.ts')) as { run: Run }
       if (history.load === 'help' || history.load === 'help-short') {
         observe('reach', 'helped')
         const code = run([history.load === 'help' ? '--help' : '-h'], { cwd: dir, out: (line) => out.push(line), err: (line) => err.push(line) })
@@ -604,7 +604,7 @@ oracleProperty({
       console.error = (line: string) => err.push(line)
       let exit: number | string
       try {
-        await import(/* @vite-ignore */ `../src/cli.mjs?loaded=${(loads += 1)}`)
+        await import(/* @vite-ignore */ `../src/cli.ts?loaded=${(loads += 1)}`)
         exit = process.exitCode ?? 'none'
       } finally {
         Object.assign(console, { log: saved.log, error: saved.error })

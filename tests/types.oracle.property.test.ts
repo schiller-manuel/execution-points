@@ -160,7 +160,7 @@ function t1Model(c: T1Case) {
 
 oracleProperty({
   id: 'types-minimal-select-and-parity',
-  owns: ['dist/runtime.d.mts', 'src/contracts.mjs#renderFileModule'],
+  owns: ['dist/runtime.d.mts', 'src/contracts.ts#renderFileModule'],
   law: {
     statement:
       'For every target module, select(file, visitor) accepts minimal callee/operator narrowing with && short-circuit returns without requiring kind, rejects callee typos with TS2367, lists __matched node IDs on multiple matches, and keeps unportable generic nodes in the compile-time match count while rejecting direct selection with an explicit error.',

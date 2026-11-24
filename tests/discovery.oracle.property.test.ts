@@ -2,7 +2,7 @@
  * This oracle owns what `execution-points-prototype` lets a test select and capture in a
  * target module: which expressions are indexed, how each one is addressed, and which local
  * names can be captured at it. It is checked on the output of `indexTargetFile`,
- * `resolveTargetFiles`, `loadManifest`, and `buildTargetPlan`, and it owns `src/discovery.mjs`.
+ * `resolveTargetFiles`, `loadManifest`, and `buildTargetPlan`, and it owns `src/discovery.ts`.
  *
  * ```ts
  * indexTargetFile(file, 'export async function f(o) { return retry(async () => { await load(o?.id) }) }', root, api)
@@ -98,8 +98,8 @@ import {
   indexTargetFile,
   loadManifest,
   resolveTargetFiles,
-} from '../src/discovery.mjs'
-import { executionPoints } from '../src/plugin.mjs'
+} from '../src/discovery.ts'
+import { executionPoints } from '../src/plugin.ts'
 import {
   CONTENTS,
   POSITIONS,
@@ -205,7 +205,7 @@ const shape = (
 
 oracleProperty({
   id: 'discovery-selectable-expressions',
-  owns: ['src/discovery.mjs#isSelectableExpression', 'src/discovery.mjs#indexTargetFile'],
+  owns: ['src/discovery.ts#isSelectableExpression', 'src/discovery.ts#indexTargetFile'],
   law: {
     statement:
       'For every TypeScript module, indexTargetFile indexes every call, every binary operation that does not assign, and every ternary, except where wrapping it in an arrow function would change what the code does: where JavaScript needs a place and not a value (assignment target, operand of delete, ++, or --); a binary operation or ternary that is called, constructed, or used as a template tag; an expression that itself, outside the functions it contains, awaits, yields, calls super(...), evaluates code with a direct eval, or imports; and an expression behind which an optional chain goes on without a ?. of its own. A file with no import or export is a global script and indexes nothing. indexTargetFile disposes its source-file lease.',
@@ -566,9 +566,9 @@ function buildMetadataSource(history: MetadataHistory, withExtraNoise: boolean):
 oracleProperty({
   id: 'discovery-node-metadata-and-id',
   owns: [
-    'src/discovery.mjs#enclosingFunctionName',
-    'src/discovery.mjs#callCalleeName',
-    'src/discovery.mjs#indexTargetFile',
+    'src/discovery.ts#enclosingFunctionName',
+    'src/discovery.ts#callCalleeName',
+    'src/discovery.ts#indexTargetFile',
   ],
   law: {
     statement:
@@ -757,10 +757,10 @@ function capturesStates(history: ScopeShape): Array<string> {
 oracleProperty({
   id: 'discovery-tdz-safe-captures',
   owns: [
-    'src/discovery.mjs#declarationsOf',
-    'src/discovery.mjs#declaredNames',
-    'src/discovery.mjs#reachOf',
-    'src/discovery.mjs#indexTargetFile',
+    'src/discovery.ts#declarationsOf',
+    'src/discovery.ts#declaredNames',
+    'src/discovery.ts#reachOf',
+    'src/discovery.ts#indexTargetFile',
   ],
   law: {
     statement:
@@ -1160,15 +1160,15 @@ function planModel(history: PlanHistory) {
 oracleProperty({
   id: 'discovery-target-plan-and-manifest',
   owns: [
-    'src/discovery.mjs#loadManifest',
-    'src/discovery.mjs#resolveTargetFiles',
-    'src/discovery.mjs#buildTargetPlan',
+    'src/discovery.ts#loadManifest',
+    'src/discovery.ts#resolveTargetFiles',
+    'src/discovery.ts#buildTargetPlan',
   ],
   law: {
     statement:
       'For every manifest and target list of explicit paths and globs, loadManifest, resolveTargetFiles, and buildTargetPlan resolve matching files relative to root in sorted order, apply in-memory overrides, skip missing unoverridden files, and index each target module.',
     authority:
-      'README.md:122 ("points.ep lists the target application modules to index (explicit paths or glob patterns)") and src/discovery.mjs:12-28, 204-224.',
+      'README.md:122 ("points.ep lists the target application modules to index (explicit paths or glob patterns)") and src/discovery.ts:12-28, 204-224.',
     limits:
       'Unoverridden target paths that do not exist on disk are skipped by buildTargetPlan.',
   },

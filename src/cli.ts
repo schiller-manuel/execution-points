@@ -2,7 +2,7 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { indexTargetFile, loadManifest, resolveTargetFiles } from './discovery.mjs'
+import { type IndexedFile, type IndexedNode, indexTargetFile, loadManifest, resolveTargetFiles } from './discovery.ts'
 
 const usage = `Usage: execution-points list [file] [--json]
 
@@ -15,15 +15,38 @@ its text.
 
 const excerptLength = 72
 
+/** One expression as the command reports it. */
+export interface ListedExpression {
+  readonly file: string
+  readonly line: number
+  readonly column: number
+  readonly id: string
+  readonly kind: IndexedNode['kind']
+  readonly callee?: string
+  readonly operator?: string
+  readonly inFunction: string | null
+  readonly nth: number
+  readonly text: string
+}
+
+export interface RunOptions {
+  readonly cwd?: string
+  readonly out?: (line: string) => void
+  readonly err?: (line: string) => void
+}
+
 /** One expression as the command reports it: where an editor shows it, what a visitor sees of it, and its text on one line. */
-function entryOf({ source, relativeFile }, { id, kind, callee, operator, inFunction, nth, start, end }) {
+function entryOf(
+  { source, relativeFile }: IndexedFile,
+  { id, kind, callee, operator, inFunction, nth, start, end }: IndexedNode,
+): ListedExpression {
   // A byte-order mark is no character of the first line.
   const linesBefore = source.slice(source.charCodeAt(0) === 0xfeff ? 1 : 0, start).split(/\r\n|\r|\n/)
   const text = source.slice(start, end).replace(/\s+/g, ' ')
   return {
     file: relativeFile,
     line: linesBefore.length,
-    column: linesBefore.at(-1).length + 1,
+    column: linesBefore.at(-1)!.length + 1,
     id,
     kind,
     ...(callee !== undefined ? { callee } : {}),
@@ -35,14 +58,14 @@ function entryOf({ source, relativeFile }, { id, kind, callee, operator, inFunct
 }
 
 /** The line for one entry: its place, its fields under the names a visitor reads, and its text. */
-function lineOf({ file, line, column, id, text, ...fields }) {
+function lineOf({ file, line, column, id, text, ...fields }: ListedExpression): string {
   const named = Object.entries(fields).map(([name, value]) => `${name}=${value}`)
   // The id is the longest field and the least read one, so it comes last.
   return `${file}:${line}:${column}  ${named.join(' ')} id=${id}  ${text}`
 }
 
 /** Runs one command line in the project at `cwd`, and returns its exit code. */
-export function run(argv, { cwd = process.cwd(), out = console.log, err = console.error } = {}) {
+export function run(argv: readonly string[], { cwd = process.cwd(), out = console.log, err = console.error }: RunOptions = {}): number {
   const flags = argv.filter((arg) => arg.startsWith('-'))
   const [command, asked, ...more] = argv.filter((arg) => !arg.startsWith('-'))
   if (flags.includes('--help') || flags.includes('-h')) {
@@ -54,7 +77,7 @@ export function run(argv, { cwd = process.cwd(), out = console.log, err = consol
     return 2
   }
 
-  let files
+  let files: string[]
   try {
     const manifest = loadManifest(cwd)
     const targets = resolveTargetFiles(cwd, manifest.targets)
@@ -68,7 +91,7 @@ export function run(argv, { cwd = process.cwd(), out = console.log, err = consol
     // A target that the manifest lists and the disk lacks is left out, as the plugin leaves it out.
     files = file ? [file] : targets.filter((target) => existsSync(target))
   } catch (error) {
-    err(error.message)
+    err((error as Error).message)
     return 1
   }
 

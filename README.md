@@ -20,7 +20,7 @@ pnpm verify
 
 | Command | Purpose |
 | --- | --- |
-| `pnpm build` | Build the TypeScript sources into `dist/` with `tsdown`: JavaScript and declarations. Tests run against `src/`; a project that installs the package gets `dist/`. |
+| `pnpm build` | Build the TypeScript sources into `dist/` with `tsdown`: JavaScript and declarations. Tests run against `src/`; a project that installs the package gets `dist/`. TypeScript starts the content mapper from `dist/`, so `pnpm check`, `pnpm test` and `pnpm verify` build first. |
 | `pnpm check` | Run regular `tsc --noEmit --runExternalCode` using the TypeScript 7.1 content mapper (`points.ep`). |
 | `pnpm test` | Run the instrumented Vitest examples. |
 | `pnpm verify` | Verify real `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and that no generated files are written. |
@@ -342,9 +342,9 @@ To have VS Code check `points.ep` against its schema, treat the file as JSON: `"
 
 TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfig.json` `"contentMappers"`). Rather than rewriting `.ts` files, scanning test files, or writing `.d.ts` files to disk:
 
-1. **Single `.ep` anchor (`points.ep`).** `tsconfig.json` registers `src/content-mapper.mjs` for `.ep` files with `"dynamicConfig": true`. The mapper watches the tsconfig, the targets, and every project file the analysis read, so a change to a file that a target imports refreshes the types. A manifest that is wrong (an unknown key, a target that matches no file) gets a diagnostic at the entry that is wrong.
-2. **Index target ASTs with TypeScript 7.1 (`src/discovery.mjs`).** Walks each target module via `api.createSourceFile` to index selectable expressions (`CallExpression`, non-assignment `BinaryExpression`, `ConditionalExpression`) with enclosing function name, `callee`/`operator`, `nth`, and safe pre-expression local bindings.
-3. **Analyze with warm incremental snapshots (`src/contracts.mjs`).** A persistent `typescript/sync` snapshot analyzes target `.ts` files (excluding `.ep` and `contentMappers`, preventing recursion) and updates incrementally via `snapshot.update(...)` on file saves. Result types come from the unmodified target AST; narrowed local types come from a nested incremental probe.
+1. **Single `.ep` anchor (`points.ep`).** `tsconfig.json` registers the package's content mapper for `.ep` files with `"dynamicConfig": true`; TypeScript starts it from the built package (`dist/content-mapper.mjs`, from `src/content-mapper.ts`). The mapper watches the tsconfig, the targets, and every project file the analysis read, so a change to a file that a target imports refreshes the types. A manifest that is wrong (an unknown key, a target that matches no file) gets a diagnostic at the entry that is wrong.
+2. **Index target ASTs with TypeScript 7.1 (`src/discovery.ts`).** Walks each target module via `api.createSourceFile` to index selectable expressions (`CallExpression`, non-assignment `BinaryExpression`, `ConditionalExpression`) with enclosing function name, `callee`/`operator`, `nth`, and safe pre-expression local bindings.
+3. **Analyze with warm incremental snapshots (`src/contracts.ts`).** A persistent `typescript/sync` snapshot analyzes target `.ts` files (excluding `.ep` and `contentMappers`, preventing recursion) and updates incrementally via `snapshot.update(...)` on file saves. Result types come from the unmodified target AST; narrowed local types come from a nested incremental probe.
 4. **Emit virtual file schema.** `transform("points.ep")` returns a virtual `.ts` file augmenting `ExecutionPointFileRegistry` with the discriminated union of each target file's nodes. Every type is written the way it resolves from the registry: types of other modules as `import("fs").Stats`, export-reachable private types (`Quote`, `User`, `Order`) through the export that reaches them, unreachable private types as structural or unique-symbol-branded helpers. An error inside the registry is reported at the manifest entry that lists the file.
 5. **Native `tsc` and VS Code checking.** `select()` (control-flow narrowing) derives its full types directly from `ExecutionPointFileRegistry`—so editing tests never triggers the content mapper and updates on every keystroke (~4 ms).
 
@@ -369,10 +369,10 @@ TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfi
 | File | Responsibility |
 | --- | --- |
 | `points.ep` | Target manifest and TypeScript 7.1 content-mapper anchor. |
-| `src/discovery.mjs` | Index selectable expressions, the function bodies they belong to, and safe local bindings over TypeScript 7.1 ASTs. |
-| `src/contracts.mjs` | Extract result types and narrowed locals via warm incremental snapshots and emit virtual `ExecutionPointFileRegistry`. |
-| `src/content-mapper.mjs` | TypeScript 7.1 STDIO JSON-RPC content mapper server. |
-| `src/plugin.mjs` | Instrument configured target modules, keeping each function's original statements beside its wrapped form, and register node metadata through Vite (test files are untouched). |
+| `src/discovery.ts` | Index selectable expressions, the function bodies they belong to, and safe local bindings over TypeScript 7.1 ASTs. |
+| `src/contracts.ts` | Extract result types and narrowed locals via warm incremental snapshots and emit virtual `ExecutionPointFileRegistry`. |
+| `src/content-mapper.ts` | TypeScript 7.1 STDIO JSON-RPC content mapper server. |
+| `src/plugin.ts` | Instrument configured target modules, keeping each function's original statements beside its wrapped form, and register node metadata through Vite (test files are untouched). |
 | `src/runtime.ts` | The runtime and its types: `ExecutionPointFileRegistry`, the narrowing visitor `select()`, `Point`, `Replacement`, `Pause`, `interleavings()`; and, for instrumented code, `registerFile()` with the per-function flags and `invoke()`. |
 | `src/vitest.ts` | Vitest setup module: after each test, fail it when a replacement did not run as often as the test said. |
 | `tsdown.config.ts`, `tsconfig.build.json` | The build: one output file per source file in `dist/`, with declarations. |

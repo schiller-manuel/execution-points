@@ -415,14 +415,14 @@ export function prepareToolchains(repoRoot, parentDir = realpathSync(tmpdir())) 
   cloneDirCoW(controlNm, treatmentNm)
   const epDest = path.join(treatmentNm, 'execution-points-prototype')
   mkdirSync(epDest, { recursive: true })
-  // The package ships its built runtime in `dist`, next to the modules that are not built yet.
-  // Build it here, so a workspace never gets a runtime older than the sources.
+  // The package ships `dist`. Build it here, so a workspace never gets a library older than the
+  // sources.
   execFileSync(process.execPath, [path.join(repoRoot, 'node_modules/tsdown/dist/run.mjs'), '--logLevel', 'error'], {
     cwd: repoRoot,
     stdio: ['ignore', 'ignore', 'inherit'],
   })
   cpSync(path.join(repoRoot, 'package.json'), path.join(epDest, 'package.json'))
-  cpSync(path.join(repoRoot, 'src'), path.join(epDest, 'src'), { recursive: true })
+  cpSync(path.join(repoRoot, 'points.schema.json'), path.join(epDest, 'points.schema.json'))
   cpSync(path.join(repoRoot, 'dist'), path.join(epDest, 'dist'), { recursive: true })
   rewriteBinShims(treatmentNm, repoRoot)
 

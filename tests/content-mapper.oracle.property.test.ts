@@ -1,8 +1,8 @@
 /**
  * This oracle owns the TypeScript 7.1 content mapper for `points.ep`
- * (`src/content-mapper.mjs`), checked on the `Content-Length` framed JSON-RPC
+ * (`src/content-mapper.ts`), checked on the `Content-Length` framed JSON-RPC
  * responses to `initialize`, `openProject`, `transform`, and `closeProject`.
- * It owns `src/content-mapper.mjs`.
+ * It owns `src/content-mapper.ts`.
  *
  * ```ts
  * rpc('transform', { fileName: '/app/points.ep', content: '{"targets":["src/app.ts"]}' })
@@ -66,9 +66,9 @@ import { dirname, join } from 'node:path'
 import { API } from 'typescript/sync'
 import { afterAll, vi } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { generateFileRegistryModule } from '../src/contracts.mjs'
-import { handleInputChunk } from '../src/content-mapper.mjs'
-import { buildTargetPlan } from '../src/discovery.mjs'
+import { generateFileRegistryModule } from '../src/contracts.ts'
+import { handleInputChunk } from '../src/content-mapper.ts'
+import { buildTargetPlan } from '../src/discovery.ts'
 import { type Plan, type RegistryReading, compileRegistry, createProject, removeProject, repoRoot } from './registry-harness'
 
 const api = new API({ cwd: repoRoot })
@@ -361,7 +361,7 @@ function owedMappings(history: ManifestHistory) {
 
 oracleProperty({
   id: 'content-mapper-manifest-validation',
-  owns: ['src/content-mapper.mjs#parseManifest', 'src/content-mapper.mjs#transform', 'src/content-mapper.mjs#scanProject'],
+  owns: ['src/content-mapper.ts#parseManifest', 'src/content-mapper.ts#transform', 'src/content-mapper.ts#scanProject'],
   law: {
     statement:
       'For every manifest, either the registry reflects exactly the listed targets that exist, or a diagnostic names what is wrong: empty content is an empty registry with no diagnostic, invalid JSON is diagnostic 90100, JSON that is not an object with a "targets" array is diagnostic 90101, and a key that points.schema.json does not describe, a wrong value, an entry that is not a string, and an entry that matches no file each get a diagnostic at that text. Each registry file’s nodes are mapped to the entry that lists the file, for diagnostics and for go-to-definition.',
@@ -593,12 +593,12 @@ const IMPORT_PROJECT = {
 oracleProperty({
   id: 'content-mapper-lifecycle-and-live-refresh',
   owns: [
-    'src/content-mapper.mjs#scanProject',
-    'src/content-mapper.mjs#initialize',
-    'src/content-mapper.mjs#openProject',
-    'src/content-mapper.mjs#transform',
-    'src/content-mapper.mjs#closeProject',
-    'src/content-mapper.mjs#handleInputChunk',
+    'src/content-mapper.ts#scanProject',
+    'src/content-mapper.ts#initialize',
+    'src/content-mapper.ts#openProject',
+    'src/content-mapper.ts#transform',
+    'src/content-mapper.ts#closeProject',
+    'src/content-mapper.ts#handleInputChunk',
   ],
   law: {
     statement:
@@ -893,7 +893,7 @@ oracleProperty({
       const listeners = () => process.stdin.listenerCount('data') + process.stdin.listenerCount('end')
       const listenersBeforeImport = listeners()
       vi.resetModules()
-      await import('../src/content-mapper.mjs')
+      await import('../src/content-mapper.ts')
       const listenersAfterImport = listeners()
       // A header without a length, a frame that is not JSON, and a notification get no reply.
       const notification = Buffer.from(JSON.stringify({ jsonrpc: '2.0', method: 'initialized' }), 'utf8')

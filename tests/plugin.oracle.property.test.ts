@@ -3,7 +3,7 @@
  * modules it instruments, what the instrumented code does, and what the plugin costs. It is
  * checked on what the hooks `config`, `configResolved`, `buildStart`, `watchChange`, and
  * `transform(code, id)` return, on the instrumented code as it runs, and on the files the
- * plugin reads. It owns `src/plugin.mjs`.
+ * plugin reads. It owns `src/plugin.ts`.
  *
  * ```ts
  * executionPoints() // → instruments the targets that points.ep in the Vite root lists
@@ -102,7 +102,7 @@ import fs, { mkdirSync, readFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import fc from 'fast-check'
 import { mergeConfig } from 'vite'
-import { indexTargetFile } from '../src/discovery.mjs'
+import { indexTargetFile } from '../src/discovery.ts'
 import {
   CONTENTS,
   POSITIONS,
@@ -124,7 +124,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { executionPoints } from '../src/plugin.mjs'
+import { executionPoints } from '../src/plugin.ts'
 import { invoke, registerFile, select, verifyReplacements } from '../src/runtime.ts'
 
 // The drivers leave replacements behind on purpose (asynchronous scopes, unused ones). The
@@ -205,7 +205,7 @@ function filterModel(history: FilterHistory) {
 
 oracleProperty({
   id: 'plugin-module-filtering-and-sync',
-  owns: ['src/plugin.mjs#executionPoints', 'src/plugin.mjs#sourceFileName'],
+  owns: ['src/plugin.ts#executionPoints', 'src/plugin.ts#sourceFileName'],
   law: {
     statement:
       'For every Vite module id and code, transform(code, id) returns null for virtual modules (\\0*), asset/worker queries (?raw, ?url, ?worker, ?sharedworker), non-absolute IDs, non-target files, target files that are global scripts (no import or export), and target files with zero selectable expressions; resolves file://, /@fs/, and non-asset query IDs; and throws an Error when code differs from the indexed target source.',
@@ -423,9 +423,9 @@ function ownCodeMappedToSource(generated: string, map: unknown, flagRead: string
 oracleProperty({
   id: 'plugin-expression-instrumentation-and-collision-safety',
   owns: [
-    'src/plugin.mjs#executionPoints',
-    'src/plugin.mjs#uniqueName',
-    'src/plugin.mjs#importOffset',
+    'src/plugin.ts#executionPoints',
+    'src/plugin.ts#uniqueName',
+    'src/plugin.ts#importOffset',
   ],
   law: {
     statement:
@@ -816,7 +816,7 @@ const runnableShape =
 
 oracleProperty({
   id: 'plugin-instrumented-code-behaves-as-written',
-  owns: ['src/plugin.mjs#executionPoints', 'src/discovery.mjs#isSelectableExpression'],
+  owns: ['src/plugin.ts#executionPoints', 'src/discovery.ts#isSelectableExpression'],
   law: {
     statement:
       'For every target module, the instrumented code does what the module does as written, call for call, with the same receivers, arguments, order, results, and errors: while its flags are off, and while they are on and nothing is replaced. Replacing one registered expression by a value does what the module does with that value written in the expression\'s place, and the registered expressions are the selectable ones.',
@@ -1130,7 +1130,7 @@ function unusedFileSource(host: Host) {
 
 oracleProperty({
   id: 'plugin-unused-file-runs-original-statements',
-  owns: ['src/plugin.mjs#executionPoints', 'src/discovery.mjs#indexTargetFile'],
+  owns: ['src/plugin.ts#executionPoints', 'src/discovery.ts#indexTargetFile'],
   law: {
     statement:
       'For every target module, a function body evaluates its original statements and never calls the runtime until a replacement is installed for one of its own expressions: a call of an ordinary function reads its flag once however many expressions it evaluates, and code outside such a body reads its flag once per outermost selectable expression; a replacement installed for one function leaves every other function of the file on its original statements, and a replacement applies to exactly the evaluations inside its scope.',
@@ -1504,7 +1504,7 @@ const steps =
 
 oracleProperty({
   id: 'plugin-watch-and-rebuild',
-  owns: ['src/plugin.mjs#executionPoints', 'src/plugin.mjs#readSource'],
+  owns: ['src/plugin.ts#executionPoints', 'src/plugin.ts#readSource'],
   law: {
     statement:
       'For every project and every sequence of edits and transforms, executionPoints adopts config.root when options.root is omitted, registers every target file via addWatchFile whenever it resolves the targets (at buildStart, and on the first use after watchChange()), and instruments a target as the file is on disk now. The plugin reads a target file only in the transform call that instruments it, and only when the code it is handed is not the code it instrumented last; no other call reads a file or scans a directory, whatever the number of targets, except that the targets are resolved once at buildStart and once after watchChange().',
@@ -1815,7 +1815,7 @@ function manifestModel(history: ManifestHistory) {
 
 oracleProperty({
   id: 'plugin-targets-from-manifest',
-  owns: ['src/plugin.mjs#executionPoints', 'src/discovery.mjs#loadManifest'],
+  owns: ['src/plugin.ts#executionPoints', 'src/discovery.ts#loadManifest'],
   law: {
     statement:
       'For every project, executionPoints() without `targets` instruments exactly the targets that points.ep in the Vite root lists, reads the manifest once each time it resolves the targets, and watches it; explicit `targets` win and leave the manifest unread; a manifest that is missing, is not JSON, or is not what points.schema.json describes stops the build with an error that names the file.',
@@ -2009,7 +2009,7 @@ function setupModel(history: SetupHistory) {
 
 oracleProperty({
   id: 'plugin-adds-vitest-setup',
-  owns: ['src/plugin.mjs#executionPoints'],
+  owns: ['src/plugin.ts#executionPoints'],
   law: {
     statement:
       'For every user config, the plugin\'s config() hook contributes the library\'s Vitest setup module, execution-points-prototype/vitest, so that Vite\'s merge keeps every setup file of the user and adds the library\'s exactly once, and changes nothing else in the config.',

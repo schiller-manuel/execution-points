@@ -57,9 +57,11 @@ pnpm test
 pnpm verify
 ```
 
-`pnpm build` writes `dist/`. Tests and the gap check run against `src/`, but
-the type oracle compiles its fixtures against the built declarations, so build
-before running either.
+`pnpm build` writes `dist/`. Every module in `src/` is TypeScript; nothing
+there is run by a consumer. Tests and the gap check run against `src/`, but
+`tsc` starts the content mapper from `dist/`, and the type oracle compiles its
+fixtures against the built declarations, so build before running any of them
+(the package scripts do).
 
 The virtual compiler check is separate from Vitest. Passing runtime tests alone
 does not establish that replacement callbacks are type-correct. Do not claim
@@ -140,6 +142,6 @@ optimization project.
   `node_modules/@tanstack/oracles/skills/oracles-evaluate-review/SKILL.md` in
   full.
 - Lint: not available here (typescript-eslint does not support TypeScript 7.1 yet; its TypeScript peer range ends before 7).
-- Oracle files: `tests/**/*oracle*.test.ts`. Gap check: `pnpm build && pnpm exec oracle-gaps --package . --source src/runtime.ts,src/discovery.mjs,src/plugin.mjs,src/contracts.mjs,src/content-mapper.mjs,src/cli.mjs --seed 42`.
+- Oracle files: `tests/**/*oracle*.test.ts`. Gap check: `pnpm build && pnpm exec oracle-gaps --package . --source src/runtime.ts,src/discovery.ts,src/plugin.ts,src/contracts.ts,src/content-mapper.ts,src/cli.ts --seed 42`.
 
 <!-- END @tanstack/oracles -->

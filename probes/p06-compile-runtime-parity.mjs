@@ -32,7 +32,7 @@ for (const [label, source] of Object.entries(cases)) {
 }
 
 // A target path that does not exist, and malformed manifests: what does the mapper say, and where?
-const { parseManifest, scanProject } = await import(`${REPO}/src/content-mapper.mjs`)
+const { parseManifest, scanProject } = await import(`${REPO}/src/content-mapper.ts`)
 const reg = registry({ 'src/app.ts': cases['ordinary module'] }, ['src/app.ts', 'src/typo-does-not-exist.ts'])
 console.log(`\nmissing target path -> registry keys: ${[...reg.text.matchAll(/^    (".*"): \w+;$/gm)].map((m) => m[1]).join(', ')}`)
 for (const manifest of [

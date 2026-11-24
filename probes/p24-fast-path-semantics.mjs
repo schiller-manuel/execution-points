@@ -82,7 +82,8 @@ test('3 a callback created earlier is replaced when called inside a scope, and o
   expect(earlyCallback(1)).toBe(2)
 })
 test('4 an async call that began outside any scope is not replaced when it continues', async () => {
-  const result = twiceIn('slow', 1).withReplacement(ten, () => { releaseEarly(); return earlyAsync })
+  // The replacement must not run: the call began before the scope did. `times: 0` says so.
+  const result = twiceIn('slow', 1).withReplacement(ten, () => { releaseEarly(); return earlyAsync }, { times: 0 })
   expect(await result).toBe(4)
 })
 test('5 an async call that begins inside a scope is replaced after its await', async () => {

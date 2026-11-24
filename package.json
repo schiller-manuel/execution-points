@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Experimental AST-selected expression replacement with local capture and virtual TypeScript checking",
   "bin": {
-    "execution-points": "./src/cli.mjs"
+    "execution-points": "./dist/cli.mjs"
   },
   "engines": {
     "node": ">=24"
@@ -20,33 +20,31 @@
       "types": "./dist/runtime.d.mts",
       "default": "./dist/runtime.mjs"
     },
-    "./vite": "./src/plugin.mjs",
+    "./vite": {
+      "types": "./dist/plugin.d.mts",
+      "default": "./dist/plugin.mjs"
+    },
     "./vitest": "./dist/vitest.mjs"
   },
   "files": [
     "dist",
-    "src/plugin.mjs",
-    "src/discovery.mjs",
-    "src/contracts.mjs",
-    "src/content-mapper.mjs",
-    "src/cli.mjs",
     "points.schema.json"
   ],
   "typescript": {
     "contentMapper": {
       "exec": [
         "node",
-        "./src/content-mapper.mjs"
+        "./dist/content-mapper.mjs"
       ],
       "dynamicConfig": true
     }
   },
   "scripts": {
     "build": "tsdown",
-    "check": "tsc --noEmit --runExternalCode",
+    "check": "tsdown && tsc --noEmit --runExternalCode",
     "test": "tsdown && vitest run",
     "test:oracles": "tsdown && vitest run tests/",
-    "verify": "node checks/verify.mjs"
+    "verify": "tsdown && node checks/verify.mjs"
   },
   "dependencies": {
     "magic-string": "1.4.5",

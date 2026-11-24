@@ -1,5 +1,5 @@
 import { defineConfig } from 'vitest/config'
-import { executionPoints } from './src/plugin.mjs'
+import { executionPoints } from './src/plugin.ts'
 
 // Tests, and the code the plugin instruments, run against the sources, not against `dist`.
 const source = (name) => new URL(`./src/${name}`, import.meta.url).pathname

@@ -10,7 +10,7 @@ const c = consumer({
   'src/b.ts': `export function b(n: number) { return n * 2 }\n`,
   'points.ep': `{\n  "tsconfig": "tsconfig.json",\n  "targets": [\n    "src/a.ts",\n    "src/b.ts"\n  ]\n}\n`,
 })
-const copy = join(c.root, 'node_modules/execution-points-prototype/src/contracts.mjs')
+const copy = join(c.root, 'node_modules/execution-points-prototype/dist/contracts.mjs')
 const source = readFileSync(copy, 'utf8')
 const marker = 'emitted.result = emitter.emit(types[i], expression)'
 if (!source.includes(marker)) throw new Error(`The generator no longer contains: ${marker}`)

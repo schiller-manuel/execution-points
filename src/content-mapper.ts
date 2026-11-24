@@ -3,13 +3,58 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { API } from 'typescript/sync'
-import { generateFileRegistryModule } from './contracts.mjs'
-import { buildTargetPlan, resolveTargetFiles } from './discovery.mjs'
+import type { Node } from 'typescript/ast'
+import { type GeneratedRegistry, type RegistryCache, generateFileRegistryModule } from './contracts.ts'
+import { type TargetPlan, buildTargetPlan, resolveTargetFiles } from './discovery.ts'
 
-const projects = new Map()
-let sharedApi
-const getApi = () => (sharedApi ??= new API())
-const safeRead = (file) => { try { return readFileSync(file, 'utf8') } catch { return undefined } }
+/** A diagnostic of the mapper's own, at a range of the manifest's text. */
+export interface ManifestDiagnostic {
+  readonly messageText: string
+  readonly start: number
+  readonly length: number
+  readonly code: number
+}
+
+/** One entry of `targets` that is a string: the files it resolves to, and where it stands in the manifest. */
+export interface ManifestTarget {
+  readonly entry: string
+  readonly files: string[]
+  readonly start: number
+  readonly length: number
+}
+
+export interface ParsedManifest {
+  readonly targets: ManifestTarget[]
+  readonly diagnostics: ManifestDiagnostic[]
+  tsconfig?: string
+  /** The content is not a JSON object at all. */
+  fatal?: boolean
+}
+
+/** A span of the registry mapped onto a span of the manifest: generated start and length, original start and length, kind, features. */
+export type Mapping = [number, number, number, number, number, number]
+
+interface Project {
+  readonly configFileName: string
+  readonly projectRoot: string
+  readonly cache: RegistryCache
+}
+
+/** The fields of TypeScript's JSON syntax tree that the manifest reader follows. */
+interface JsonSyntax extends Node {
+  readonly text: string
+  readonly name: JsonSyntax
+  readonly initializer: JsonSyntax
+  readonly expression: JsonSyntax
+  readonly properties: readonly JsonSyntax[]
+  readonly elements: readonly JsonSyntax[]
+  readonly statements: readonly JsonSyntax[]
+}
+
+const projects = new Map<unknown, Project>()
+let sharedApi: API | undefined
+const getApi = (): API => (sharedApi ??= new API())
+const safeRead = (file: string): string | undefined => { try { return readFileSync(file, 'utf8') } catch { return undefined } }
 
 const SHAPE = 'points.ep must contain a JSON object with a "targets" array.'
 // Span map: a segment of kind "atom" maps a block as a whole; the feature mask says which editor
@@ -23,36 +68,38 @@ const FEATURE_DEFINITION = 8
  * `diagnostics` names everything that is wrong, at the text that is wrong.
  * `fatal` is set when the content is not a JSON object at all.
  */
-export function parseManifest(content, manifestFile, root) {
+export function parseManifest(content: string | undefined, manifestFile: string, root: string): ParsedManifest {
   const text = content ?? ''
   const body = text.trim()
-  const manifest = { targets: [], diagnostics: [] }
-  const report = (code, messageText, start = 0, length = text.length) => {
+  const manifest: ParsedManifest = { targets: [], diagnostics: [] }
+  const report = (code: number, messageText: string, start = 0, length = text.length): void => {
     manifest.diagnostics.push({ messageText, start, length, code })
   }
   if (!body) return manifest
 
-  let parsed
+  let parsed: unknown
   try {
     parsed = JSON.parse(body)
   } catch (error) {
-    report(90100, `Invalid JSON in ${path.basename(manifestFile)}: ${error.message}`)
+    report(90100, `Invalid JSON in ${path.basename(manifestFile)}: ${(error as Error).message}`)
   }
   if (parsed === undefined || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     if (parsed !== undefined) report(90101, SHAPE)
     manifest.fatal = true
     return manifest
   }
+  const held = parsed as { readonly targets?: unknown; readonly tsconfig?: unknown; readonly $schema?: unknown }
 
   // TypeScript's JSON syntax tree says where each key and each element stands.
   const lease = getApi().createSourceFile(`${manifestFile}.json`, body)
   try {
     const lead = text.indexOf(body)
-    const at = (node) => {
+    const at = (node: JsonSyntax): [number, number] => {
       const start = node.getStart(lease.sourceFile)
       return [lead + start, node.end - start]
     }
-    const properties = new Map(lease.sourceFile.statements[0].expression.properties.map((property) => [property.name.text, property]))
+    const tree = lease.sourceFile as unknown as JsonSyntax
+    const properties = new Map(tree.statements[0]!.expression.properties.map((property) => [property.name.text, property]))
     for (const [key, property] of properties) {
       if (key !== 'targets' && key !== 'tsconfig' && key !== '$schema') {
         report(90102, `Unknown key ${JSON.stringify(key)}. The keys of a manifest are "targets", "tsconfig" and "$schema".`, ...at(property.name))
@@ -60,26 +107,27 @@ export function parseManifest(content, manifestFile, root) {
     }
 
     const schema = properties.get('$schema')
-    if (schema && typeof parsed.$schema !== 'string') {
+    if (schema && typeof held.$schema !== 'string') {
       report(90106, '"$schema" must be the location of points.schema.json, in a string.', ...at(schema.initializer))
     }
 
     const tsconfig = properties.get('tsconfig')
-    if (tsconfig && typeof parsed.tsconfig !== 'string') {
+    if (tsconfig && typeof held.tsconfig !== 'string') {
       report(90103, '"tsconfig" must be the path of a tsconfig file.', ...at(tsconfig.initializer))
-    } else if (tsconfig && !existsSync(path.resolve(root, parsed.tsconfig))) {
-      report(90103, `The tsconfig file ${JSON.stringify(parsed.tsconfig)} does not exist.`, ...at(tsconfig.initializer))
+    } else if (tsconfig && !existsSync(path.resolve(root, held.tsconfig as string))) {
+      report(90103, `The tsconfig file ${JSON.stringify(held.tsconfig)} does not exist.`, ...at(tsconfig.initializer))
     } else {
-      manifest.tsconfig = parsed.tsconfig
+      manifest.tsconfig = held.tsconfig as string | undefined
     }
 
     const targets = properties.get('targets')
-    if (!Array.isArray(parsed.targets)) {
+    const listed = held.targets
+    if (!Array.isArray(listed)) {
       report(90101, SHAPE, ...(targets ? at(targets.initializer) : []))
       return manifest
     }
-    targets.initializer.elements.forEach((element, index) => {
-      const entry = parsed.targets[index]
+    targets!.initializer.elements.forEach((element, index) => {
+      const entry: unknown = listed[index]
       const [start, length] = at(element)
       if (typeof entry !== 'string') {
         report(90104, `A target must be a path or a glob in a string, not ${JSON.stringify(entry)}.`, start, length)
@@ -103,9 +151,15 @@ export function parseManifest(content, manifestFile, root) {
  * file only onto its own `.ep` text, so the entry is as near to the target
  * expression as a mapping can point.
  */
-function analyze(root, tsconfigHint, manifestFile, content, cache) {
+function analyze(
+  root: string,
+  tsconfigHint: string | undefined,
+  manifestFile: string,
+  content: string,
+  cache: RegistryCache | undefined,
+): { manifest: ParsedManifest; plan: TargetPlan; registry: GeneratedRegistry; mappings: Mapping[] } {
   const manifest = parseManifest(content, manifestFile, root)
-  const order = new Map()
+  const order = new Map<string, number>()
   manifest.targets.forEach(({ files }, index) => {
     for (const file of files) if (!order.has(file)) order.set(file, index)
   })
@@ -115,12 +169,12 @@ function analyze(root, tsconfigHint, manifestFile, content, cache) {
     targets: manifest.targets.map(({ entry }) => entry),
     api: getApi(),
   })
-  plan.files.sort((a, b) => order.get(a.file) - order.get(b.file))
+  plan.files.sort((a, b) => order.get(a.file)! - order.get(b.file)!)
   const registry = generateFileRegistryModule(plan, { fromFile: manifestFile, api: getApi(), cache })
 
-  const mappings = []
+  const mappings: Mapping[] = []
   for (const span of registry.spans) {
-    const target = manifest.targets[order.get(span.file)]
+    const target = manifest.targets[order.get(span.file)!]!
     const last = mappings.at(-1)
     if (last?.[2] === target.start) last[1] = span.end - last[0]
     else mappings.push([span.start, span.end - span.start, target.start, target.length, SPAN_ATOM, FEATURE_DEFINITION])
@@ -133,7 +187,12 @@ function analyze(root, tsconfigHint, manifestFile, content, cache) {
  * (so that a missing one is seen when it appears), and every file of the
  * project that the analysis read.
  */
-export function scanProject(projectRoot, configFileName, options, cache) {
+export function scanProject(
+  projectRoot: string,
+  configFileName: string,
+  options: { readonly configFile?: string } | undefined,
+  cache: RegistryCache | undefined,
+): { configIdentity: string; watchedFiles: string[] } {
   const manifestFile = path.resolve(projectRoot, options?.configFile ?? 'points.ep')
   const manifestText = safeRead(manifestFile) ?? ''
   const { manifest, plan, registry } = analyze(projectRoot, configFileName, manifestFile, manifestText, cache)
@@ -148,7 +207,11 @@ export function scanProject(projectRoot, configFileName, options, cache) {
   return { configIdentity: hash.digest('hex'), watchedFiles }
 }
 
-export function initialize(params) {
+export function initialize(params: { readonly protocolVersion?: unknown }): {
+  protocolVersion: unknown
+  positionEncoding: 'utf-16'
+  diagnosticSource: 'execution-points'
+} {
   return {
     protocolVersion: params.protocolVersion,
     positionEncoding: 'utf-16',
@@ -157,7 +220,11 @@ export function initialize(params) {
 }
 
 /** One warm TypeScript program per open project, kept until the project closes. */
-export function openProject(params) {
+export function openProject(params: {
+  readonly projectHandle: unknown
+  readonly configFileName?: string
+  readonly options?: { readonly configFile?: string }
+}): { configIdentity: string; watchedFiles: string[] } {
   const configFileName = params.configFileName || ''
   const projectRoot = configFileName ? path.dirname(configFileName) : process.cwd()
   const cache = projects.get(params.projectHandle)?.cache ?? {}
@@ -166,7 +233,12 @@ export function openProject(params) {
   return scanned
 }
 
-export function transform(params) {
+export function transform(params: { readonly projectHandle: unknown; readonly fileName: string; readonly content?: string }): {
+  extension: '.ts'
+  text: string
+  diagnostics: ManifestDiagnostic[]
+  mappings: Mapping[]
+} {
   const project = projects.get(params.projectHandle)
   const root = project?.projectRoot ?? path.dirname(params.fileName)
   const { manifest, registry, mappings } = analyze(root, project?.configFileName, params.fileName, params.content ?? '', project?.cache)
@@ -176,20 +248,21 @@ export function transform(params) {
   return { extension: '.ts', text: registry.text, diagnostics: manifest.diagnostics, mappings }
 }
 
-export function closeProject(params) {
+export function closeProject(params: { readonly projectHandle: unknown }): {} {
   projects.get(params.projectHandle)?.cache.snapshot?.dispose()
   projects.delete(params.projectHandle)
   return {}
 }
 
-const handlers = { initialize, openProject, transform, closeProject }
+// Each handler says what it needs of its params; the frame reader hands over what the message holds.
+const handlers: Record<string, ((params: never) => unknown) | undefined> = { initialize, openProject, transform, closeProject }
 
-function formatFrame(payload) {
+function formatFrame(payload: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(payload), 'utf8')
   return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'), body])
 }
 
-export function handleInputChunk(state, chunk, write) {
+export function handleInputChunk(state: { buffer: Buffer }, chunk: Buffer, write: (frame: Buffer) => void): void {
   state.buffer = Buffer.concat([state.buffer, chunk])
   for (;;) {
     const headerEnd = state.buffer.indexOf('\r\n\r\n')
@@ -203,7 +276,7 @@ export function handleInputChunk(state, chunk, write) {
     if (state.buffer.length < messageEnd) return
     const raw = state.buffer.subarray(headerEnd + 4, messageEnd).toString('utf8')
     state.buffer = state.buffer.subarray(messageEnd)
-    let message
+    let message: { readonly id?: unknown; readonly method: string; readonly params?: unknown }
     try {
       message = JSON.parse(raw)
     } catch {
@@ -216,7 +289,7 @@ export function handleInputChunk(state, chunk, write) {
       continue
     }
     try {
-      write(formatFrame({ jsonrpc: '2.0', id: message.id, result: handler(message.params) }))
+      write(formatFrame({ jsonrpc: '2.0', id: message.id, result: handler(message.params as never) }))
     } catch (err) {
       write(formatFrame({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: String(err) } }))
     }
@@ -226,7 +299,7 @@ export function handleInputChunk(state, chunk, write) {
 // Serve standard input only when this file is the mapper process, not when it is imported.
 if (import.meta.main) {
   const stdioState = { buffer: Buffer.alloc(0) }
-  process.stdin.on('data', (chunk) => {
+  process.stdin.on('data', (chunk: Buffer) => {
     handleInputChunk(stdioState, chunk, (frame) => process.stdout.write(frame))
   })
   process.stdin.on('end', () => {

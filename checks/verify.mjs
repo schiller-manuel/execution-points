@@ -10,8 +10,8 @@ import { API, ModuleKind, ModuleResolutionKind } from 'typescript/sync'
 import { createFileSystemLayer } from 'typescript/fs'
 import { ScriptTarget } from 'typescript/ast'
 
-import { generateFileRegistryModule } from '../src/contracts.mjs'
-import { buildTargetPlan, loadManifest } from '../src/discovery.mjs'
+import { generateFileRegistryModule } from '../src/contracts.ts'
+import { buildTargetPlan, loadManifest } from '../src/discovery.ts'
 
 const execFileAsync = promisify(execFile)
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')

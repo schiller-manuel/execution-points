@@ -8,10 +8,10 @@ export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 // Throwaway projects live outside the repository, under the OS temp directory.
 export const WORK = realpathSync(mkdtempSync(join(tmpdir(), 'ep-probe-')))
 
-export const { executionPoints } = await import(`${REPO}/src/plugin.mjs`)
+export const { executionPoints } = await import(`${REPO}/src/plugin.ts`)
 export const runtime = await import(`${REPO}/src/runtime.ts`)
-export const discovery = await import(`${REPO}/src/discovery.mjs`)
-export const contracts = await import(`${REPO}/src/contracts.mjs`)
+export const discovery = await import(`${REPO}/src/discovery.ts`)
+export const contracts = await import(`${REPO}/src/contracts.ts`)
 
 /** Create a throwaway project directory from { 'rel/path.ts': source }. */
 export function project(files) {

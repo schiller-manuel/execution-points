@@ -2,7 +2,7 @@
  * This oracle owns the types that `generateFileRegistryModule` writes into the
  * virtual `ExecutionPointFileRegistry`, checked on what TypeScript says about
  * that registry once it is compiled as `.ts` beside `points.ep`. It owns
- * `src/contracts.mjs`.
+ * `src/contracts.ts`.
  *
  * ```ts
  * generateFileRegistryModule(plan, { fromFile, api, cache })
@@ -76,8 +76,8 @@ import fc from 'fast-check'
 import { API } from 'typescript/sync'
 import { afterAll } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { generateFileRegistryModule } from '../src/contracts.mjs'
-import { buildTargetPlan } from '../src/discovery.mjs'
+import { generateFileRegistryModule } from '../src/contracts.ts'
+import { buildTargetPlan } from '../src/discovery.ts'
 import {
   ABSENT,
   type Fit,
@@ -554,7 +554,7 @@ export function run() {
 
 oracleProperty({
   id: 'contracts-registry-compiles-and-fits',
-  owns: ['src/contracts.mjs#generateFileRegistryModule'],
+  owns: ['src/contracts.ts#generateFileRegistryModule'],
   law: {
     statement:
       'For every target whose expressions and locals have types the project can name, the generated registry compiled as .ts beside the target has no diagnostics of its own, and each node’s result and locals are mutually assignable with the type TypeScript gives the original expression.',
@@ -751,7 +751,7 @@ export function work(opts: { a: number }) {
 
 oracleProperty({
   id: 'contracts-primitive-and-collection-types',
-  owns: ['src/contracts.mjs#createTypeEmitter'],
+  owns: ['src/contracts.ts#createTypeEmitter'],
   law: {
     statement:
       'For every selectable expression and in-scope local binding whose type is a primitive, literal, any, union, intersection, function signature, tuple (including readonly, optional ?, and ...rest elements), or object with properties and index signatures ([key: K]: V), generateFileRegistryModule emits valid TypeScript type syntax preserving those modifiers.',
@@ -886,7 +886,7 @@ const NARROWING_FIXTURES: ReadonlyArray<ProjectHistory> = [
 
 oracleProperty({
   id: 'contracts-control-flow-narrowing',
-  owns: ['src/contracts.mjs#projectNested', 'src/contracts.mjs#generateFileRegistryModule'],
+  owns: ['src/contracts.ts#projectNested', 'src/contracts.ts#generateFileRegistryModule'],
   law: {
     statement:
       'For every selectable expression preceded by an if guard, type predicate (u is T), or assertion call (asserts u is T), generateFileRegistryModule emits the control-flow-narrowed type of each captured local at that expression.',
@@ -1348,10 +1348,10 @@ const identityView = (reading: RegistryReading) => ({
 oracleProperty({
   id: 'contracts-export-paths-and-helpers',
   owns: [
-    'src/contracts.mjs#createTypeEmitter',
-    'src/contracts.mjs#buildExportIndex',
-    'src/contracts.mjs#isNominalUnexported',
-    'src/contracts.mjs#hasLocalDeclaration',
+    'src/contracts.ts#createTypeEmitter',
+    'src/contracts.ts#buildExportIndex',
+    'src/contracts.ts#isNominalUnexported',
+    'src/contracts.ts#hasLocalDeclaration',
   ],
   law: {
     statement:
@@ -1561,7 +1561,7 @@ export function work(r: Row) {
 
 oracleProperty({
   id: 'contracts-one-copy-per-private-type',
-  owns: ['src/contracts.mjs#createTypeEmitter', 'src/contracts.mjs#generateFileRegistryModule'],
+  owns: ['src/contracts.ts#createTypeEmitter', 'src/contracts.ts#generateFileRegistryModule'],
   law: {
     statement:
       'For every private module-scope type, every result and local of that type refers to one copy, declared once, so a value of the type read from a local or returned by original() is accepted wherever the type is expected; two different nominal private types get two brands; and a type that cannot be copied leaves no name behind.',
@@ -1848,14 +1848,14 @@ export function unknownCall() { return gone() }
 
 oracleProperty({
   id: 'contracts-disjoint-fields-and-unportable-parity',
-  owns: ['src/contracts.mjs#renderFileModule', 'src/contracts.mjs#generateFileRegistryModule'],
+  owns: ['src/contracts.ts#renderFileModule', 'src/contracts.ts#generateFileRegistryModule'],
   law: {
     statement:
       'For every selectable expression indexed in a target module, generateFileRegistryModule emits disjoint optional-undefined callee/operator properties by kind, and emits an expression whose type cannot be written with __unportable, its locals, and an opaque result type of its own that only original() can produce, so compile-time node count equals runtime node count.',
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: disjoint callee/operator discriminators and compile/runtime parity for unportable expressions. README.md:173 ("Global scripts are skipped."). Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: a local whose type cannot be written carries the reason. Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: an expression whose type cannot be written stays selectable with an opaque result type that only original() can produce; this replaces result: never. That a reason names its subject: approved by Manuel Schiller (GitHub schiller-manuel), 2026-11-24.',
     limits:
-      'Applies to CallExpression, BinaryExpression, and ConditionalExpression nodes indexed by discovery.mjs. The reason is checked for being present and for naming the type or the cause that the history states, not word for word. Opaque means: not any, unknown, or never, and not assignable from the expression’s own type, from {}, or from string; whether select() accepts such a node is the type layer’s law.',
+      'Applies to CallExpression, BinaryExpression, and ConditionalExpression nodes indexed by discovery.ts. The reason is checked for being present and for naming the type or the cause that the history states, not word for word. Opaque means: not any, unknown, or never, and not assignable from the expression’s own type, from {}, or from string; whether select() accepts such a node is the type layer’s law.',
   },
   histories: {
     enumerated: PARITY_HISTORIES,
@@ -2045,7 +2045,7 @@ const IMPORTING_TARGET = `import { loadLimit } from './limits'\nexport function 
 
 oracleProperty({
   id: 'contracts-incremental-snapshot-cache',
-  owns: ['src/contracts.mjs#renderFileModule', 'src/contracts.mjs#generateFileRegistryModule'],
+  owns: ['src/contracts.ts#renderFileModule', 'src/contracts.ts#generateFileRegistryModule'],
   law: {
     statement:
       'For every target plan and snapshot cache, generateFileRegistryModule returns an empty ExecutionPointFileRegistry when plan.files is empty or contains only global scripts, reuses cache.snapshot when sources are unchanged, and updates cache.snapshot incrementally when target sources change.',
@@ -2241,7 +2241,7 @@ export function work() { return leafOf().v }
 
 oracleProperty({
   id: 'contracts-cost-of-names',
-  owns: ['src/contracts.mjs#createTypeEmitter', 'src/contracts.mjs#buildExportIndex'],
+  owns: ['src/contracts.ts#createTypeEmitter', 'src/contracts.ts#buildExportIndex'],
   law: {
     statement:
       'For every type, the requests the generator makes to TypeScript for its name do not grow with how often the type is used; for every module, its exports are walked once however many private types are looked up in it; and for every export-reachable type, each member is read once.',
@@ -2371,7 +2371,7 @@ const afterEdit = (edits: ReadonlyArray<Edit>, file: EditedFile, then: EditedFil
 
 oracleProperty({
   id: 'contracts-warm-registry-equals-cold',
-  owns: ['src/contracts.mjs#generateFileRegistryModule'],
+  owns: ['src/contracts.ts#generateFileRegistryModule'],
   law: {
     statement:
       'For every sequence of edits to targets and to the files they import, the registry the warm mapper returns equals the registry a cold mapper returns.',

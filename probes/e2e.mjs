@@ -7,8 +7,8 @@ import { REPO, WORK } from './lib.mjs'
 
 export { REPO }
 
-// A consumer gets what the package ships: the built runtime in `dist`, next to the modules that
-// are not built yet. Built once per probe run, so it is never older than the sources.
+// A consumer gets what the package ships: `dist`. Built once per probe run, so it is never older
+// than the sources.
 let built = false
 function buildLibrary() {
   if (built) return
@@ -32,7 +32,7 @@ export function consumer(files, { targets = ['src/**/*.ts'] } = {}) {
   mkdirSync(pkg)
   buildLibrary()
   cpSync(join(REPO, 'package.json'), join(pkg, 'package.json'))
-  cpSync(join(REPO, 'src'), join(pkg, 'src'), { recursive: true })
+  cpSync(join(REPO, 'points.schema.json'), join(pkg, 'points.schema.json'))
   cpSync(join(REPO, 'dist'), join(pkg, 'dist'), { recursive: true })
 
   const base = {

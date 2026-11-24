@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { api, TSCONFIG } from './types.mjs'
 import { REPO, contracts, discovery, project } from './lib.mjs'
 
-const { scanProject } = await import(`${REPO}/src/content-mapper.mjs`)
+const { scanProject } = await import(`${REPO}/src/content-mapper.ts`)
 const dep = (type, value) => `export function loadLimit(): ${type} { return ${value} }\n`
 const root = project({
   'tsconfig.json': TSCONFIG,
