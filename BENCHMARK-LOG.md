@@ -406,3 +406,40 @@ All 80 trials of `v2-2026-11-24T09-15-06-057Z`, re-graded into a scratch directo
 - The re-analysis of the 14 stored `cancel-commit` trials under v2.4 above stands: its three `error` outcomes are `ENOENT` rejections that escaped the test, not assertions misread from the stack.
 - `usesExecutionPoints` of the stored rows is unchanged by `D-18`: the v2.5 re-grade finds the library in the same 23 of 40 treatment trials, all through `withReplacement`.
 - A re-grade of stored trials from `38411c2` on is not like for like, whatever the harness version: the stored tests were written for a library in which a replacement that never ran was silent. In the matrix that changed one verdict (above).
+
+---
+
+## v2.6 — The Grading Decisions, the Agent's Permission to Run the Guide's Command, a Third Arm (2026-11-24)
+
+The maintainer decided the open questions of the v2.5 section on 2026-11-24, retired the three stored runs, and asked for a pilot of the current library. Preparing it turned up one more defect: the agent of the Treatment arm was not allowed to run the command its guide names. The pre-registered decisions are `D-20` to `D-23` in `bench/PROTOCOL.md`; its section 7 is now "Retired Runs". The library is the one of `eca441d` (a selector no longer has `line` or `text`; an expression that several ways lead to is one selection).
+
+### What changed
+
+1. **An error of the library that a failed expectation caused is a reproduction (`D-20`).** A check that fails inside `order.run(...)` of `interleavings`, which is where the library's README puts it, reaches Vitest as an `InterleavingFailure` with the `AssertionError` as its cause. v2.5 graded that as a loud break, so the same check counted after `order.run(...)` and not inside it, and only a Treatment test could be hit. The cause that decides is the first one behind the error that is not the library's own. An error of the library with another cause stays a loud break.
+2. **`expect.assertions(n)`, `expect.hasAssertions()` and a snapshot that does not match are failed expectations (`D-21`).** Vitest throws them as a plain `Error`; v2.5 graded them `error`. They have no type of their own, so they are recognized by the message Vitest 5.1.1 gives them, on an error named `Error`. The self-test runs all three through Vitest.
+3. **The three stored runs are retired.** They measured a library and a guide that no longer exist, under grading rules that have been replaced. Nothing is answered from them any more, they are not pooled and not re-graded, and the question whether the assertion-only rule applies to them is closed with that. Everything above this section about them stays as the history of what was reported. The power table of the protocol no longer quotes them; the figures to plan with come from the pilot.
+4. **The agent of the Treatment arm may run the library's command (`D-22`).** The Treatment guide tells the agent to run `npx execution-points list <file>`. v2.5 made that command resolve in a Treatment workspace and tested it in a shell. The agent does not run in a shell of its own choosing: the harness hands the agent CLI a list of allowed commands, and both arms carried a deny rule for every `npx` command. Seen live with the rules of v2.5: the agent's call is refused with "Permission denied because no interactive user response was available". Now the Treatment arm has an allow rule for `npx execution-points` and no deny rule for `npx`; everything else is the same in both arms (`npm test`, `npm run <script>`, nothing else). A second live preflight, in a Treatment workspace, checks before any trial that the agent can run the guide's command and is refused `npx vitest --version`. Each row records `libraryCommandCalls` and `libraryCommandCallsDenied`, and the analyzer prints how many trials ran a command. A shell command that is the library's own is no longer listed under `suspiciousPaths`.
+5. **A third arm, `required` (`D-23`).** The maintainer asked how to get agents to use the library more. In the Treatment arm the agent is only offered it and chooses; trials that do not use it dilute the arm, and comparing the tests of those that do with the rest compares self-selected groups. The `required` arm has the Treatment workspace and guide, and one more sentence of instructions: write the regression tests with the library. It is assigned at random like the other two, in the same blocks. `solved` is defined as elsewhere; whether the agent did as told is reported, not gated. `bench/analyze.mjs --compare=control:required` (or `treatment:required`) compares two arms and names the rows of the third. With three arms a run needs `--concurrency 3` to start the arms of a block together.
+
+`UNDECIDED_GRADINGS` is gone from `bench/classify.mjs`; the two rules are `isFailedExpectation` and `causeOfLibraryError` there. The credit projection counts two preflights when both arms run.
+
+
+### Self-test verification (library at `d279bda`)
+
+`node bench/run.mjs --self-test` on the tree of this commit ran 540 s and passed: **159 check lines passed, 0 failed.** Three more than v2.5: one more case through a real Vitest run (26), the agent's permission for the guide's command, and the third arm.
+
+- Step 3: the shell rules let the Treatment agent run `npx execution-points list <file>`, the Control agent not, and neither another package through `npx`; the rules of v2.5 fail this case. A `required` workspace has the files of a Treatment workspace, and Control and Treatment get the same instructions.
+- Step 4: 40 single-error cases and 9 run cases. Of the 11 cases of `D-20` and `D-21` the v2.5 rule gets 7 wrong. Through Vitest: `expect.assertions(n)`, `expect.hasAssertions()` and a snapshot mismatch are `true_red`; an assertion inside `order.run(...)` is `true_red`, recorded as `InterleavingFailure` caused by `AssertionError`; a `TypeError` inside `order.run(...)` stays a `loud_break`.
+- Unchanged and passing: 18 library-use cases, 8 of 8 cheats rejected, 5 of 5 legal witnesses, 20 of 20 baselines, 65 of 65 variants typechecked in both arms, 57 of 57 calibration variants, 16 of 16 mutants rejected by the hidden oracle, guide parity, version strings.
+
+What the self-test cannot check is whether the agent CLI honours the shell rules. That was checked live with `claude-haiku-5.5` before this commit (0.8 credits): with the rules of v2.6 the agent ran the guide's command and was refused `npx vitest --version`; with the rules of v2.5 it was refused both. Every paid run repeats that check in its second preflight.
+
+### The run registered for v2.6 (`D-24`)
+
+The maintainer asked for the full run with all models in place of a pilot. Registered before it started, in `D-24` of the protocol:
+
+- Ten tasks × seven model settings × three arms, five replicate runs of 70 blocks and 210 trials each (seeds 301 to 305, `--trials 1 --concurrency 3`), analyzed together: 350 blocks, 1,050 trials, 245 blocks in Strata B + C.
+- Two primary tests on `solved` in Strata B + C: Control against Treatment and Control against `required`, exact McNemar, Holm for two tests.
+- Projected credits per replicate: 4,059.9 for the trials, 4,907.5 with the 20% margin and two preflights; cap per replicate 5,500.
+- The number of replicates is fixed. An outside stop (usage limit, sleep, crash) ends the series, and what was started is analyzed as written.
+- Known beforehand: the Treatment guide was written against these tasks, and the blocks repeat ten tasks.

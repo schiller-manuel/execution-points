@@ -1,5 +1,5 @@
 /**
- * Vitest reporter of the benchmark harness (harness v2.5): writes the errors of
+ * Vitest reporter of the benchmark harness (harness v2.6): writes the errors of
  * every failed test as Vitest holds them.
  *
  * `bench/classify.mjs` grades a failure by the type of the error. That type is

@@ -50,7 +50,7 @@ export const PROJECTION_MARGIN = 1.2
  * `model:reasoning`. A combination with no observation and no override is
  * listed in `unknown` and makes `projected` null: the caller must not guess.
  */
-export function projectCredits(jobs, { creditsPerTrial = null, includePreflight = true } = {}) {
+export function projectCredits(jobs, { creditsPerTrial = null, includePreflight = true, preflights = includePreflight ? 1 : 0 } = {}) {
   const perCell = {}
   const unknown = new Set()
   let sum = 0
@@ -66,7 +66,7 @@ export function projectCredits(jobs, { creditsPerTrial = null, includePreflight 
     cell.credits += estimate
     sum += estimate
   }
-  const preflight = includePreflight ? OBSERVED_PREFLIGHT_CREDITS : 0
+  const preflight = Number((OBSERVED_PREFLIGHT_CREDITS * preflights).toFixed(1))
   const complete = unknown.size === 0
   return {
     perCell,
