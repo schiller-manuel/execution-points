@@ -1,5 +1,6 @@
 /**
- * Runtime integrity guard injected via Vitest `setupFiles` during grading (v2.2).
+ * Runtime integrity guard injected via Vitest `setupFiles` during grading (harness v2.4;
+ * the guard itself is unchanged since v2.2).
  *
  * Closes E-01, E-05, A-01, N-22, N-23, N-24:
  * - Walks and locks the ENTIRE prototype chain (up to excluding Object.prototype)

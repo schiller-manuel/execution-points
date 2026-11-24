@@ -19,22 +19,24 @@ async function settle(turns = 20) {
 }
 ```
 
+`settle()` only waits for work that finishes within event-loop turns (promise chains, `MessageChannel`, `setImmediate`). It does **not** wait for real I/O such as disk access. To order real I/O, hold the second operation at a barrier of its own, or await an operation that must finish.
+
 ## Controlling Interleavings with `vi.mock`
-When async I/O lives in an imported module (e.g. `./storage` or `./auth-client`), wrap the real module with `vi.mock(..., async (importOriginal) => ...)`:
+When async I/O lives in an imported module, wrap the real module with `vi.mock(..., async (importOriginal) => ...)`. The names below (`./inventory-api`, `loadItem`, `reserveItem`, `restockItem`) are placeholders; use the modules and functions of the code you are testing.
 
 ```ts
 import { vi } from 'vitest'
 let hook: (() => Promise<void>) | null = null
-vi.mock('./storage', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./storage')>()
-  return { ...actual, readFromDb: async (id: string) => { await hook?.(); return actual.readFromDb(id) } }
+vi.mock('./inventory-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./inventory-api')>()
+  return { ...actual, loadItem: async (sku: string) => { await hook?.(); return actual.loadItem(sku) } }
 })
 
 const b = createBarrier()
 hook = async () => { hook = null; b.entered(); await b.gate }
-const opA = getProfile('u1')
+const opA = reserveItem('sku-1')
 await b.hit
-const opB = updateProfile('u1', 'Bob') // start WITHOUT awaiting while barrier is held
+const opB = restockItem('sku-1', 5) // start WITHOUT awaiting while barrier is held
 await settle()
 b.release()
 await Promise.all([opA, opB])
@@ -45,6 +47,8 @@ await Promise.all([opA, opB])
 ## Rules & Limits
 - **Do not monkey-patch JavaScript or Node.js globals** (`Promise`, `MessageChannel`, `MessagePort`, `Map`, `EventTarget`, `globalThis`, `Object.defineProperty`, `Reflect.defineProperty`, `vi.stubGlobal`). Runtime guards and AST audits fail the run on any global patch.
 - **Do not add test-only hooks or extra exports** to production source files.
+- **A reproduction is a failed assertion.** Automated grading counts a test as reproducing the bug only when it fails on an `expect(...)` assertion. A thrown error, a rejection that escapes the test, or a timeout does not count. Assert on the outcome (for example with `Promise.allSettled`) instead of letting an operation's rejection fail the test.
+- **Results must repeat.** Automated grading runs every check several times and requires the same result each time.
 - **Timeouts:** Automated grading runs regression tests with a 1,500 ms timeout on mutants/refactors and 5,000 ms on your own fix; avoid waiting on barriers that never fire.
 
 ## Validation Commands

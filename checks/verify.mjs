@@ -315,7 +315,7 @@ await verifyLsp()
 // 3. Negative type-safety checks
 const valid = analyze()
 assert.equal(valid.ok, true, `Valid example failed:\n${describeDiagnostics(valid.diagnostics)}`)
-passed('valid select() and fromFile() examples typecheck through the file schema')
+passed('valid select() examples typecheck through the file schema')
 
 await rejectsTestSource(
   'a replacement with the wrong result type is rejected',
