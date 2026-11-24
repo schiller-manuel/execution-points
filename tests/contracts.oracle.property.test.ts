@@ -9,7 +9,7 @@
  * // → `text` that compiles beside the targets with no diagnostics of its own
  * // → each node's `result` and `locals` mutually assignable with TypeScript's type for the original expression
  * // → a type the project can name is that very type; a private one is a copy, branded when it is nominal
- * // → one node for every expression of the plan, `__unportable` with a reason when its type cannot be written
+ * // → one node for every expression of the plan; one whose type cannot be written has `__unportable` and an opaque `result`
  * // → the same `text` from a warm `cache` as from none, after any edits to the project's files
  * ```
  *
@@ -49,9 +49,11 @@
  *
  * For every plan, the registry lists exactly the module files with selectable
  * expressions and one node per expression, with the descriptor fields of the
- * plan; an expression or local whose type cannot be written is kept and
- * carries the reason (Decision by Manuel Schiller (GitHub schiller-manuel),
- * 2026-11-24). For every sequence of edits to targets and to the files they
+ * plan. An expression whose type cannot be written keeps its node, its
+ * locals, and the reason in `__unportable`, and its `result` is an opaque
+ * type of its own that only `original()` can produce; a local whose type
+ * cannot be written is named with the reason (Decision by Manuel Schiller
+ * (GitHub schiller-manuel), 2026-11-24). For every sequence of edits to targets and to the files they
  * import, the registry from a warm cache equals the registry from none
  * (Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24).
  *
@@ -141,14 +143,15 @@ const fitsOf = (fit: Fit | null) => (fit === 'same' || fit === 'equivalent' ? 'f
 function driveProject(
   history: ProjectHistory,
   observe: (checkpoint: string, value: unknown) => void,
-  view: (reading: RegistryReading) => unknown,
+  view: (reading: RegistryReading, relations: Array<boolean>) => unknown,
+  relations: ReadonlyArray<readonly [from: string, to: string]> = [],
 ) {
   for (const state of history.states) observe('reach', state)
   const root = createProject(history.files, history.compilerOptions)
   try {
-    const { plan, reading } = generateAndCompile(api, root, history.targets ?? ['src/app.ts'])
-    observe('plan', plannedNodes(plan))
-    observe('registry', view(reading))
+    const compiled = generateAndCompile(api, root, history.targets ?? ['src/app.ts'], { relations })
+    observe('plan', plannedNodes(compiled.plan))
+    observe('registry', view(compiled.reading, compiled.relations))
   } catch (error) {
     observe('crash', error instanceof Error ? error.message : String(error))
   } finally {
@@ -1349,6 +1352,8 @@ interface ParityHistory extends ProjectHistory {
   unwritableCallees?: ReadonlyArray<string>
   /** Locals of such a type, by the function that declares them. */
   unwritableLocals: Readonly<Record<string, ReadonlyArray<string>>>
+  /** Pairs of expressions of such a type: the result of one must not pass for the other's. */
+  distinctResults?: ReadonlyArray<readonly [from: string, to: string]>
 }
 
 const PARITY_HISTORIES: ReadonlyArray<ParityHistory> = [
@@ -1391,7 +1396,11 @@ export class Box { get value() { return send(3) } method() { return (() => send(
     states: ['unportable-result', 'unportable-local'],
     listed: ['src/app.ts'],
     unwritableResultsIn: ['genericCaller', 'pick'],
-    unwritableLocals: { keys: ['k', 'kk', 'o'] },
+    unwritableLocals: { genericCaller: ['x'], pick: ['k', 'o'], keys: ['k', 'kk', 'o'] },
+    distinctResults: [
+      ['src/app.ts#genericCaller:CallExpression:identity:0', 'src/app.ts#pick:ConditionalExpression:?:0'],
+      ['src/app.ts#pick:ConditionalExpression:?:0', 'src/app.ts#genericCaller:CallExpression:identity:0'],
+    ],
     files: {
       'src/app.ts': `
 function identity<T>(v: T): T { return v }
@@ -1410,7 +1419,7 @@ export function keys<T, K extends keyof T>(o: T, k: K, flag: boolean) {
     states: ['unportable-only-file'],
     listed: ['src/app.ts'],
     unwritableResultsIn: ['genericOnly'],
-    unwritableLocals: {},
+    unwritableLocals: { genericOnly: ['x'] },
     files: {
       'src/app.ts': `
 function identity<T>(v: T): T { return v }
@@ -1425,7 +1434,7 @@ export function genericOnly<U>(x: U) { return identity(x) }
     unwritableResultsIn: ['localResult'],
     // `Symbol()` here has the type of the local unique symbol it initializes.
     unwritableCallees: ['Symbol'],
-    unwritableLocals: { work: ['localAliasObj', 'localObj', 'localSym', 'localEnum'] },
+    unwritableLocals: { work: ['localAliasObj', 'localObj', 'localSym', 'localEnum'], localResult: ['Inner', 'make'] },
     files: {
       'src/app.ts': `
 function target(): number { return 42 }
@@ -1474,11 +1483,11 @@ oracleProperty({
   owns: ['src/contracts.mjs#renderFileModule', 'src/contracts.mjs#generateFileRegistryModule'],
   law: {
     statement:
-      'For every selectable expression indexed in a target module, generateFileRegistryModule emits disjoint optional-undefined callee/operator properties by kind and emits unportable expressions with __unportable and result: never so compile-time node count equals runtime node count.',
+      'For every selectable expression indexed in a target module, generateFileRegistryModule emits disjoint optional-undefined callee/operator properties by kind, and emits an expression whose type cannot be written with __unportable, its locals, and an opaque result type of its own that only original() can produce, so compile-time node count equals runtime node count.',
     authority:
-      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: disjoint callee/operator discriminators and compile/runtime parity for unportable expressions. README.md:173 ("Global scripts are skipped."). Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: a local whose type cannot be written carries the reason.',
+      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: disjoint callee/operator discriminators and compile/runtime parity for unportable expressions. README.md:173 ("Global scripts are skipped."). Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: a local whose type cannot be written carries the reason. Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: an expression whose type cannot be written stays selectable with an opaque result type that only original() can produce; this replaces result: never.',
     limits:
-      'Applies to CallExpression, BinaryExpression, and ConditionalExpression nodes indexed by discovery.mjs. The reason is checked for being present, not for its wording.',
+      'Applies to CallExpression, BinaryExpression, and ConditionalExpression nodes indexed by discovery.mjs. The reason is checked for being present, not for its wording. Opaque means: not any, unknown, or never, and not assignable from the expression’s own type, from {}, or from string; whether select() accepts such a node is the type layer’s law.',
   },
   histories: {
     enumerated: PARITY_HISTORIES,
@@ -1499,13 +1508,14 @@ oracleProperty({
   label: (history) => history.name,
   // The registry repeats each node of the plan: the field a kind has holds
   // the plan's literal, the field it lacks is `?: undefined`. A node whose
-  // type cannot be written stays, without a result and without locals; a
+  // type cannot be written stays, with its locals and an opaque result; a
   // local that cannot be written is left out of `locals` and named with a
   // reason.
   model: (history, trace) => ({
     registryErrors: [],
     projectErrors: [],
     files: [...history.listed].sort(),
+    oneResultPassesForAnother: (history.distinctResults ?? []).map(() => false),
     nodes: Object.fromEntries(
       planOf(trace)
         .filter((node) => history.listed.some((file) => node.id.startsWith(`${file}#`)))
@@ -1513,7 +1523,7 @@ oracleProperty({
           const unwritable =
             history.unwritableResultsIn.includes(node.inFunction ?? '') ||
             Boolean(history.unwritableCallees?.includes(node.callee ?? ''))
-          const hidden = unwritable ? [] : (history.unwritableLocals[node.inFunction ?? ''] ?? [])
+          const hidden = history.unwritableLocals[node.inFunction ?? ''] ?? []
           return [
             node.id,
             {
@@ -1525,8 +1535,9 @@ oracleProperty({
                 operator: node.operator ?? ABSENT,
               },
               unportable: unwritable,
-              result: unwritable ? null : 'fits',
-              locals: unwritable ? [] : node.captures.filter((name) => !hidden.includes(name)).sort(),
+              result: unwritable ? 'opaque' : 'fits',
+              fitsOfLocals: true,
+              locals: node.captures.filter((name) => !hidden.includes(name)).sort(),
               unportableLocals: node.captures.filter((name) => hidden.includes(name)).sort(),
             },
           ]
@@ -1534,17 +1545,23 @@ oracleProperty({
     ),
   }),
   driver: (history, observe) =>
-    driveProject(history, observe, (reading) => ({
+    driveProject(
+      history,
+      observe,
+      (reading, relations) => ({
       registryErrors: reading.registryErrors,
       projectErrors: reading.projectErrors,
       files: reading.files,
+      oneResultPassesForAnother: relations,
       nodes: Object.fromEntries(
         Object.entries(reading.nodes).map(([id, node]) => [
           id,
           {
             descriptor: node.descriptor,
             unportable: node.unportable !== null && node.unportable.length > 0,
-            result: fitsOf(node.result),
+            result: node.opaque === null ? fitsOf(node.result) : node.opaque ? 'opaque' : 'a type a test can write',
+            // As for narrowing: a local is compared where the expression itself refers to it.
+            fitsOfLocals: Object.entries(node.locals).every(([name, fit]) => !node.mentioned.includes(name) || fitsOf(fit) === 'fits'),
             locals: Object.keys(node.locals).sort(),
             unportableLocals: Object.entries(node.unportableLocals)
               .filter(([, reason]) => reason.length > 0)
@@ -1553,7 +1570,9 @@ oracleProperty({
           },
         ]),
       ),
-    })),
+      }),
+      history.distinctResults,
+    ),
   check: judge('disjoint-fields-and-unportable-parity'),
   calibrations: [
     {
@@ -1563,6 +1582,15 @@ oracleProperty({
       corrupt: corruptRegistry((value) => {
         const generic = Object.keys(value.nodes).find((id) => id.includes('#genericCaller:'))!
         delete value.nodes[generic]
+        return value
+      }),
+    },
+    {
+      name: 'an-unwritable-result-typed-never',
+      law: 'disjoint-fields-and-unportable-parity',
+      history: { enumerated: 'file-with-only-unportable-expressions' },
+      corrupt: corruptRegistry((value) => {
+        for (const node of Object.values<any>(value.nodes)) node.result = 'a type a test can write'
         return value
       }),
     },

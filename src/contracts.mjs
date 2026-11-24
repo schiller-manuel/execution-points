@@ -327,6 +327,12 @@ function createTypeEmitter(api, checker, anchor, shared) {
   return { emit }
 }
 
+/** The result type of an expression whose own type cannot be written: a different type for every node id. */
+const OPAQUE =
+  'declare const __ep_opaque: unique symbol;\n' +
+  '/** Stands for a type that cannot be written outside its declaration. Only original() gives a value of it. */\n' +
+  'interface __EPOpaque<Id extends string> {\n  readonly [__ep_opaque]: Id;\n}'
+
 let defaultApi
 const getDefaultApi = () => (defaultApi ??= new API())
 const readFile = (file) => { try { return readFileSync(file, 'utf8') } catch { return undefined } }
@@ -416,13 +422,15 @@ export function generateFileRegistryModule(plan, { fromFile, api = getDefaultApi
 
       const nodes = entry.nodes.map((node, i) => {
         const expression = expressions[i]
-        const emitted = { ...node, result: 'never', unportableReason: null, locals: {}, unportableLocals: {} }
+        const emitted = { ...node, unportableReason: null, locals: {}, unportableLocals: {} }
         try {
           emitted.result = emitter.emit(types[i], expression)
         } catch (error) {
-          // Keep the expression in the registry so that compile-time match counts
-          // stay aligned with runtime descriptors, and say why it has no type.
+          // The expression stays in the registry, so that compile-time match counts equal the runtime's.
+          // Its type cannot be written, so it gets one of its own that only original() produces.
           emitted.unportableReason = error.message
+          emitted.result = `__EPOpaque<${JSON.stringify(node.id)}>`
+          shared.opaque = true
         }
         // An assertion call narrows only as a statement of its own, so its probe must not wrap it.
         emitted.isStatement =
@@ -430,7 +438,7 @@ export function generateFileRegistryModule(plan, { fromFile, api = getDefaultApi
           [SyntaxKind.Block, SyntaxKind.SourceFile, SyntaxKind.CaseClause, SyntaxKind.DefaultClause].includes(expression.parent.parent.kind)
         return emitted
       })
-      files.push({ entry, nodes, probed: nodes.filter((node) => !node.unportableReason && node.captures.length) })
+      files.push({ entry, nodes, probed: nodes.filter((node) => node.captures.length) })
     }
 
     // Phase 2: the narrowed type of each local, read from a copy of the target
@@ -481,7 +489,9 @@ export function generateFileRegistryModule(plan, { fromFile, api = getDefaultApi
       }
     }
 
-    const rendered = renderFileModule(shared.log.map((entry) => entry.text), files.map(({ entry, nodes }) => [entry, nodes]))
+    const declarations = shared.log.map((entry) => entry.text)
+    if (shared.opaque) declarations.unshift(OPAQUE)
+    const rendered = renderFileModule(declarations, files.map(({ entry, nodes }) => [entry, nodes]))
     return { ...rendered, files: files.map(({ entry }) => entry.relativeFile), inputs }
   } finally {
     probeSnapshot?.dispose()

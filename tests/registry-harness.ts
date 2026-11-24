@@ -74,6 +74,13 @@ export interface NodeReading {
   unportable: string | null
   /** Null when the registry marks the expression unportable. */
   result: Fit | null
+  /**
+   * For an unportable expression: whether its declared result is a type that
+   * no value a test can write has. It is not `any`, `unknown`, or `never`,
+   * and neither the expression's own type, nor `{}`, nor `string` is
+   * assignable to it. Null when the expression is typed.
+   */
+  opaque: boolean | null
   /** The string-keyed members of the declared result type; null when unportable. */
   resultMembers: Array<string> | null
   locals: Record<string, Fit>
@@ -254,7 +261,8 @@ export function compileRegistry(
     [join(root, 'node_modules/execution-points-prototype/src/runtime.d.ts'), runtimeTypes],
     [
       witnessFile,
-      "import type { ExecutionPointFileRegistry } from 'execution-points-prototype'\nexport declare const registry: ExecutionPointFileRegistry\n",
+      "import type { ExecutionPointFileRegistry } from 'execution-points-prototype'\n" +
+        'export declare const registry: ExecutionPointFileRegistry\nexport declare const anObject: {}\nexport declare const aString: string\n',
     ],
     ...extra,
   ]
@@ -289,13 +297,14 @@ export function compileRegistry(
       else projectErrors.push(`${name}: TS${diagnostic.code}: ${text}`)
     }
 
-    let witness: Node
-    const findWitness = (node: Node) => {
-      if (node.kind === SyntaxKind.VariableDeclaration) witness = node
-      node.forEachChild(findWitness)
+    const witnesses = new Map<string, Type>()
+    const findWitnesses = (node: Node) => {
+      if (node.kind === SyntaxKind.VariableDeclaration) witnesses.set(node.name.text, checker.getTypeAtLocation(node.name))
+      node.forEachChild(findWitnesses)
     }
-    findWitness(program.getSourceFile(witnessFile))
-    const registryType = checker.getTypeAtLocation(witness.name)
+    findWitnesses(program.getSourceFile(witnessFile))
+    const registryType = witnesses.get('registry')
+    const writable = [witnesses.get('anObject'), witnesses.get('aString')]
     const files: Array<string> = registryType.getProperties().map((property: any) => property.name)
 
     const nodes: Record<string, NodeReading> = {}
@@ -339,11 +348,16 @@ export function compileRegistry(
           unportableLocals[property.name] = String(checker.getTypeOfSymbol(property).value)
         }
         const result = typeOfProperty(checker, member, 'result')!
+        const original = checker.getTypeAtLocation(expression)
         declaredAt.set(node.id, result)
         nodes[node.id] = {
           descriptor,
           unportable: reason ? String(reason.value) : null,
-          result: reason ? null : fitOf(checker, result, checker.getTypeAtLocation(expression), rootKey),
+          result: reason ? null : fitOf(checker, result, original, rootKey),
+          opaque: reason
+            ? !(result.flags & (TypeFlags.Any | TypeFlags.Unknown | TypeFlags.Never)) &&
+              [original, ...writable].every((source) => !checker.isTypeAssignableTo(source, result))
+            : null,
           resultMembers: reason
             ? null
             : result
