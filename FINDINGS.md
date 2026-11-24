@@ -728,7 +728,7 @@ Ordered by how much evidence there is that users need them. Built: 1, 2, 3, 6, 7
 
 Everything below is recomputed from the three stored `results.jsonl` files or rerun at zero credits. An independent audit of the harness produced several of the points; each one below was rechecked before it went in, and the ones I did not recheck are listed separately.
 
-**State on 2026-11-24.** Harness v2.5 is merged, and its self-test passes on the current library: `Self-test PASSED: 156 check lines passed, 0 failed`, run by me on the merged tree. Nothing was rerun for credits; the stored results were only read. `node bench/analyze.mjs` on the stored matrix prints the numbers of this section (31/40 against 35/40; 66/66, 38/47 with 9 loud breaks, 30/30).
+**State on 2026-11-24.** Harness v2.5 is merged, and its self-test passed on the library as it was at `8501d09`: `Self-test PASSED: 156 check lines passed, 0 failed`, run by me on the merged tree. I have not rerun it since `line` and `text` were dropped (`d279bda`); the benchmark thread runs the self-test of v2.6 on that library before its run. Nothing was rerun for credits; the stored results were only read. `node bench/analyze.mjs` on the stored matrix prints the numbers of this section (31/40 against 35/40; 66/66, 38/47 with 9 loud breaks, 30/30).
 
 ### The harness on the new library
 
