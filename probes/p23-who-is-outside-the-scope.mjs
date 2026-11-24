@@ -72,4 +72,26 @@ const call = async (s) => (await fetch(`http://127.0.0.1:${s.address().port}/`))
 }
 
 for (const [shape, where, verdict] of rows) console.log(`${shape.padEnd(52)} | ${where.padEnd(44)} | ${verdict}`)
+
+// The same three shapes that a scope does not cover, with a replacement that applies everywhere.
+console.log('\nwith `using r = point.replace(handler)` instead of a scope:')
+{
+  const server = await serve()
+  {
+    using r = point.replace(replaced)
+    console.log(`  HTTP request handler, server started earlier       -> ${await call(server)}`)
+  }
+  server.close()
+}
+{
+  const pending = []; const done = []
+  const timer = setInterval(() => { while (pending.length) done.push(app.handle(pending.shift())) }, 1)
+  {
+    using r = point.replace(replaced)
+    pending.push('poll')
+    while (!done.length) await new Promise((r2) => setTimeout(r2, 2))
+  }
+  clearInterval(timer)
+  console.log(`  polling loop started earlier                        -> ${done[0]}`)
+}
 process.exit(0)

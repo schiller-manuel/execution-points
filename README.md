@@ -56,7 +56,8 @@ const result = quotePoint.withReplacement(
 - `node` is a discriminated union of every selectable expression in `'examples/checkout.ts'` (`kind`, `inFunction`, `callee`, `operator`, `nth`, `id`). `callee` and `operator` are mutually exclusive (`operator?: undefined` on calls, `callee?: undefined` on binary expressions), so `node.callee === 'send' && node` narrows cleanly without checking `node.kind`.
 - Returning 0 nodes or 2+ nodes (ambiguous match) is rejected at compile time (multi-match errors list the matched node IDs under `__matched`).
 - **Keep selectors minimal:** omit `inFunction` (and `nth`) whenever `callee` or `operator` is already unique in the file. Filtering on `inFunction` only when disambiguating multiple sites prevents a test from breaking (`matched 0`) when a call moves into an extracted private helper.
-- `.capture(...)` autocompletes every in-scope local at that expression and rejects unknown binding names immediately. Calling `.capture()` with no arguments types `locals` as `{}`.
+- `.capture(...)` autocompletes every in-scope local at that expression and rejects unknown binding names at compile time. At runtime, a name the expression cannot see makes the evaluation throw an error that lists the locals there are. Calling `.capture()` with no arguments types `locals` as `{}`.
+- The visitor selects a node by returning that node, or `node.capture(...)`. Returning anything else, such as the boolean from `node.callee === 'send'` alone, selects nothing, and the "matched 0" error says so.
 
 The replacement's result must match the selected expression's inferred type. A `Promise<number>` expression requires a `Promise<number>` replacement; a synchronous `Quote` expression requires a `Quote` replacement; an `async` handler on a synchronous `void` expression is rejected at compile time. The checker does not automatically unwrap promises.
 
@@ -76,6 +77,9 @@ an active replacement runs before `getClient()`, the method lookup, or either ar
 | Replacement returns a value | Use that value as the expression result. |
 | Replacement throws | Throw at the selected expression. |
 | Replacement calls `original()` | Evaluate the original expression, preserving its receiver and evaluation order. |
+| Replacement never runs | The test fails. See "A replacement must run". |
+
+The handler receives `{ locals, original, call }`. `call` is the number of the evaluation it is handling, counted from 1 for each replacement.
 
 ### Captured bindings
 
@@ -94,13 +98,76 @@ quotePoint.withReplacement(({ locals, original }) => {
 
 Primitive captures are snapshots of the binding's value at interception. They do not become live getters. For example, `locals.attempt` stays at its captured value even if `original()` later increments the application's `attempt`.
 
+### A replacement must run
+
+A replacement that never runs has tested nothing, so it fails the test. By default the handler must run at least once:
+
+```ts
+// Throws: the action takes a path that never evaluates the selected expression.
+quotePoint.withReplacement(() => ({ total: 1, currency: 'EUR' }), () => 'no checkout here')
+// Error: [execution-points] The replacement for "examples/checkout.ts#checkout:CallExpression:send:0"
+// ran 0 times; expected at least once. ...
+```
+
+The third argument says otherwise when you mean otherwise:
+
+| Option | Meaning |
+| --- | --- |
+| `{ times: 2 }` | The handler must run exactly twice. |
+| `{ times: 0 }` | The expression must not be reached. This fails even if the application catches what the handler throws. |
+| `{ times: 'any' }` | No requirement. |
+| `{ on: 2 }`, `{ on: [1, 3] }` | The handler takes only these evaluations, counted from 1; the others evaluate the original expression. |
+
+When the action is synchronous, `withReplacement` throws as it returns. When the action returns a promise, `withReplacement` returns that same promise untouched and the test fails when it ends, through a Vitest hook that the setup module `execution-points-prototype/vitest` registers (list it in `test.setupFiles`). With another test runner, call `verifyReplacements()` from `execution-points-prototype` after each test.
+
+`point.calls` is how often a replacement for the expression has run since the current test began.
+
+### Pause an asynchronous call
+
+To hold one operation in the middle while another runs, pause the expression it is about to await. This needs an expression whose value is a promise.
+
+```ts
+const pause = remotePoint.pause()
+const slow = pause.run(() => remoteTotal('abc')) // starts, and waits at fetchTotal(id)
+
+const { locals } = await pause.reached           // the call has arrived
+expect(await remoteTotal('quick')).toBe(50)      // other work runs to completion meanwhile
+
+pause.release()                                  // the waiting call continues with the original expression
+expect(await slow).toBe(30)
+```
+
+`pause.reached` rejects as soon as the action finishes without reaching the expression, so a test that awaits it fails at once with a message that names the expression, instead of running into a timeout. Every evaluation that arrives before `release()` waits; later ones pass straight through. A pause that is still holding when the test ends fails the test.
+
+### Replace everywhere
+
+`withReplacement` covers the action and the asynchronous work it starts. Code that runs in a context the test did not start is outside it: a request handler of a server that was already listening, a polling loop, a batcher that another caller opened. For those, `replace` applies in every async context of the worker until it is restored:
+
+```ts
+test('the handler reports a pricing outage', async () => {
+  using outage = quotePoint.replace(() => { throw new Error('pricing service is down') })
+  expect((await fetch(`${baseUrl}/checkout`)).status).toBe(503)
+}) // restored here; fails if the handler never ran
+```
+
+Without `using`, the replacement is restored and checked when the test ends. Tests that run concurrently in one worker see each other's `replace`, so those keep to `withReplacement`.
+
+Shorthands for the common handlers install such a replacement and take the same options:
+
+```ts
+quotePoint.returns({ total: 5, currency: 'USD' })
+quotePoint.throws(new Error('pricing service is down'))
+remotePoint.resolves(7)                             // for an expression whose value is a promise
+remotePoint.rejects(new Error('timeout'), { on: 2 }) // only the second evaluation fails
+```
+
 ### Replacement scope
 
 `point.withReplacement(handler, action)` activates the handler for `action` and the asynchronous work started within its Node async context. It returns the action's return value directly, including the same promise when the action is asynchronous.
 
 Nested scopes can override the same point and restore the outer handler afterward. Concurrent async scopes have separate replacement maps. Returning or throwing restores the surrounding synchronous context; async descendants retain the context in which they were created. This is async-context scoping, not cancellation of unfinished work.
 
-**Agreed scope API:** replacements are activated through the explicit `withReplacement(handler, action)` callback scope.
+**Scope API:** `withReplacement(handler, action, options?)` is the callback scope; `replace(handler, options?)` and the shorthands apply everywhere until restored; `pause()` is a callback scope that holds the expression.
 
 **Call-through:** `original()` evaluates the expression every time it is called. It is not memoized and not limited to one invocation, so calling it twice runs the original expression twice, side effects included.
 
@@ -166,6 +233,7 @@ const points = loadManifest(import.meta.dirname)
 export default defineConfig({
   plugins: [executionPoints(points)],
   test: {
+    setupFiles: ['execution-points-prototype/vitest'],
     include: ['examples/**/*.test.ts'],
     environment: 'node',
     isolate: true,
@@ -201,7 +269,8 @@ TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfi
 | `src/content-mapper.mjs` | TypeScript 7.1 STDIO JSON-RPC content mapper server. |
 | `src/plugin.mjs` | Instrument configured target modules, keeping each function's original statements beside its wrapped form, and register node metadata through Vite (test files are untouched). |
 | `src/runtime.mjs` | `select()`, `registerFile()` with the per-function flags that instrumented code reads, `invoke()`, and async-local scopes. |
-| `src/runtime.d.ts` | `ExecutionPointFileRegistry`, narrowing visitor `select()`, and `Point` types. |
+| `src/runtime.d.ts` | `ExecutionPointFileRegistry`, narrowing visitor `select()`, and the `Point`, `Replacement`, and `Pause` types. |
+| `src/vitest.mjs` | Vitest setup module: after each test, fail it when a replacement did not run as often as the test said. |
 | `examples/` | Runnable applications and Vitest examples. |
 | `checks/verify.mjs` | End-to-end `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and no-write verification. |
 

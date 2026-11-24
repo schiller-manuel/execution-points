@@ -7,6 +7,13 @@ const registry = (globalThis[Symbol.for('execution-points-prototype.runtime.v2')
   files: new Map(),
   states: new Map(),
   flagCount: 0,
+  // Replacements that apply in every async context: a stack per expression id.
+  everywhere: new Map(),
+  // How often a replacement ran for each expression since the last verification.
+  calls: new Map(),
+  // What is still to be checked when the test ends, and what already went wrong.
+  owed: new Set(),
+  problems: [],
 })
 
 /**
@@ -54,28 +61,215 @@ function getFileNodes(file) {
   return nodes
 }
 
+const count = (n) => (n === 1 ? 'once' : `${n} times`)
+
+function createInstallation(id, handler, captureNames, { times, on } = {}) {
+  if (times !== undefined && times !== 'any' && !(Number.isInteger(times) && times >= 0)) {
+    throw new TypeError("[execution-points] `times` must be a whole number, 0 or more, or 'any'.")
+  }
+  const turns = on === undefined ? undefined : [on].flat()
+  if (turns && !turns.every((turn) => Number.isInteger(turn) && turn >= 1)) {
+    throw new TypeError('[execution-points] `on` must be a whole number, 1 or more, or a list of them.')
+  }
+  return { id, handler, captureNames, times, turns, evaluations: 0, runs: 0 }
+}
+
+/** What a finished replacement got wrong: by default it must have run at least once. */
+function shortfall({ id, times, runs }) {
+  if (times === 'any' || (times === undefined ? runs > 0 : runs === times)) return undefined
+  return new Error(
+    `[execution-points] The replacement for "${id}" ran ${count(runs)}; expected ${times === undefined ? 'at least once' : count(times)}. ` +
+      (runs === 0 ? 'Nothing evaluated this expression where the replacement applies. ' : '') +
+      "Pass { times: 'any' } if that is intended.",
+  )
+}
+
+/**
+ * Checks everything the current test still owes and forgets it: replacements whose action is
+ * asynchronous, replacements that apply everywhere and were not restored, and pauses. Throws
+ * what went wrong. The Vitest setup module calls this after each test.
+ */
+export function verifyReplacements() {
+  const problems = registry.problems.splice(0)
+  for (const owed of registry.owed) {
+    owed.settle?.()
+    const problem = owed.verdict ? owed.verdict() : shortfall(owed)
+    if (problem) problems.push(problem)
+  }
+  registry.owed.clear()
+  registry.calls.clear()
+  if (problems.length === 1) throw problems[0]
+  if (problems.length) {
+    throw new AggregateError(problems, problems.map((problem) => problem.message).join('\n'))
+  }
+}
+
 function createPointHandle(file, resolveSelection, captureNames) {
+  const begin = (handler, options) => {
+    const selected = resolveSelection()
+    const installation = createInstallation(selected.id, handler, captureNames ?? selected.captureNames, options)
+    markReplaced(file, selected.id)
+    return installation
+  }
+
+  // Applies inside `action` and the asynchronous work it starts.
+  const scoped = (installation, action) => {
+    const replacements = new Map(registry.storage.getStore() ?? [])
+    replacements.set(installation.id, installation)
+    return registry.storage.run(replacements, action)
+  }
+
+  // Applies in every async context until it is restored: the newest one for an expression wins.
+  const replace = (handler, options) => {
+    if (typeof handler !== 'function') {
+      throw new TypeError('[execution-points] replace requires a replacement function.')
+    }
+    const installation = begin(handler, options)
+    const stack = registry.everywhere.get(installation.id) ?? []
+    registry.everywhere.set(installation.id, stack)
+    stack.push(installation)
+    installation.settle = () => stack.splice(stack.indexOf(installation), 1)
+    registry.owed.add(installation)
+
+    const restore = () => {
+      if (!registry.owed.delete(installation)) return
+      installation.settle()
+      const problem = shortfall(installation)
+      if (problem) throw problem
+    }
+    return Object.freeze({
+      get calls() {
+        return installation.runs
+      },
+      restore,
+      [Symbol.dispose]: restore,
+    })
+  }
+
   return Object.freeze({
     capture(...keys) {
       return createPointHandle(file, resolveSelection, keys)
     },
 
-    withReplacement(handler, action) {
+    /** How often a replacement for this expression ran since the last verification. */
+    get calls() {
+      return registry.calls.get(resolveSelection().id) ?? 0
+    },
+
+    withReplacement(handler, action, options) {
       if (typeof handler !== 'function' || typeof action !== 'function') {
         throw new TypeError(
           '[execution-points] withReplacement requires a replacement function and an action function.',
         )
       }
 
-      const selected = resolveSelection()
-      const replacements = new Map(registry.storage.getStore() ?? [])
-      replacements.set(selected.id, {
-        handler,
-        captureNames: captureNames ?? selected.captureNames,
+      const installation = begin(handler, options)
+      const result = scoped(installation, action)
+      // The work of an asynchronous action is still running: it is checked when the test ends.
+      if (typeof result?.then === 'function') {
+        registry.owed.add(installation)
+        return result
+      }
+      const problem = shortfall(installation)
+      if (problem) throw problem
+      return result
+    },
+
+    replace,
+    returns: (value, options) => replace(() => value, options),
+    throws: (error, options) =>
+      replace(() => {
+        throw error
+      }, options),
+    resolves: (value, options) => replace(() => Promise.resolve(value), options),
+    rejects: (error, options) => replace(() => Promise.reject(error), options),
+
+    /**
+     * Holds every evaluation inside `run(action)` until `release()`, then lets it continue
+     * with the original expression. `reached` settles with the first evaluation that arrives,
+     * or rejects as soon as the action finishes without one.
+     */
+    pause() {
+      let released = false
+      let waiting = 0
+      let letGo
+      const freed = new Promise((resolve) => {
+        letGo = resolve
+      })
+      let arrive
+      let miss
+      const outcome = new Promise((resolve, reject) => {
+        arrive = resolve
+        miss = reject
+      })
+      outcome.catch(() => {})
+
+      const installation = begin((context) => {
+        arrive({ locals: context.locals })
+        if (released) return context.original()
+        waiting += 1
+        return freed.then(() => context.original())
       })
 
-      markReplaced(file, selected.id)
-      return registry.storage.run(replacements, action)
+      // A test that awaits `reached` learns of a miss there; otherwise it learns when it ends.
+      let missed
+      let observed = false
+      let heldAtEnd
+      const reached = Object.freeze({
+        then(onFulfilled, onRejected) {
+          observed = true
+          return outcome.then(onFulfilled, onRejected)
+        },
+      })
+      const release = () => {
+        released = true
+        letGo()
+      }
+      registry.owed.add({
+        settle() {
+          heldAtEnd = waiting > 0 && !released
+          release()
+        },
+        verdict: () =>
+          heldAtEnd
+            ? new Error(
+                `[execution-points] "${installation.id}" was still paused when the test ended. Call release() on the pause.`,
+              )
+            : observed
+              ? undefined
+              : missed,
+      })
+
+      return Object.freeze({
+        run(action) {
+          if (typeof action !== 'function') {
+            throw new TypeError('[execution-points] run requires an action function.')
+          }
+          const finished = (cause) => {
+            if (installation.runs > 0) return
+            missed = new Error(
+              `[execution-points] The action finished without reaching "${installation.id}", so nothing was paused.`,
+              { cause },
+            )
+            miss(missed)
+          }
+          let result
+          try {
+            result = scoped(installation, action)
+          } catch (error) {
+            finished(error)
+            throw error
+          }
+          if (typeof result?.then === 'function') result.then(() => finished(), finished)
+          else finished()
+          return result
+        },
+        reached,
+        release,
+        get calls() {
+          return installation.runs
+        },
+      })
     },
   })
 }
@@ -102,18 +296,26 @@ export function select(file, visitor) {
     if (cached) return cached
     const nodes = getFileNodes(file)
     const matches = []
+    // A node is selected by returning that node, or what its own capture() returned.
+    let strays = 0
     for (const descriptor of nodes) {
-      const result = visitor(makeVisitorNode(descriptor))
+      const node = makeVisitorNode(descriptor)
+      const result = visitor(node)
       if (!result) continue
-      if (result.__epSelected) {
-        matches.push({ id: result.id, captureNames: result.captureNames })
-      } else if (typeof result.id === 'string') {
-        matches.push({ id: result.id, captureNames: [] })
+      if (result === node) {
+        matches.push({ id: descriptor.id, captureNames: [] })
+      } else if (result.__epSelected && result.id === descriptor.id) {
+        matches.push({ id: descriptor.id, captureNames: result.captureNames })
+      } else {
+        strays += 1
       }
     }
     if (matches.length !== 1) {
       throw new Error(
-        `[execution-points] Visitor for "${file}" must match exactly 1 expression; matched ${matches.length}.`,
+        `[execution-points] Visitor for "${file}" must match exactly 1 expression; matched ${matches.length}.` +
+          (strays > 0
+            ? ` For ${strays} of the file's nodes it returned something that is not the node: return the node it was given, node.capture(...), or nothing.`
+            : ''),
       )
     }
     cached = matches[0]
@@ -130,16 +332,28 @@ export function select(file, visitor) {
  * replacement has been installed for an expression of its home.
  */
 export function invoke(id, originalThunk, captureThunk) {
-  const active = registry.storage.getStore()?.get(id)
+  const active = registry.storage.getStore()?.get(id) ?? registry.everywhere.get(id)?.at(-1)
   if (!active) return originalThunk()
+
+  const call = (active.evaluations += 1)
+  if (active.turns && !active.turns.includes(call)) return originalThunk()
+  active.runs += 1
+  registry.calls.set(id, (registry.calls.get(id) ?? 0) + 1)
 
   const getters = captureThunk()
   const locals = Object.create(null)
   for (const key of active.captureNames) {
+    if (!Object.hasOwn(getters, key)) {
+      const problem = new Error(
+        `[execution-points] "${key}" is not a local that "${id}" can capture. ` +
+          `It can capture: ${Object.keys(getters).join(', ') || 'nothing'}.`,
+      )
+      registry.problems.push(problem)
+      throw problem
+    }
     const getter = getters[key]
     locals[key] = typeof getter === 'function' ? getter() : getter
   }
   Object.freeze(locals)
-  const context = Object.freeze({ locals, original: originalThunk })
-  return active.handler(context)
+  return active.handler(Object.freeze({ locals, original: originalThunk, call }))
 }

@@ -18,6 +18,14 @@ for (const name of names) {
   }
 }
 
+// What the runner's check after the test reports for the last of them.
+try {
+  runtime.verifyReplacements()
+  console.log('verifyReplacements() -> nothing to report')
+} catch (error) {
+  console.log(`verifyReplacements() -> ${error.constructor.name}: ${(error.errors ?? [error]).length} problem(s), first: ${(error.errors ?? [error])[0].message}`)
+}
+
 // Visitor mistakes a JS-only (or `any`-typed) caller can make:
 for (const [label, visitor] of Object.entries({
   'returns true instead of the node': (n) => n.operator === '+',
@@ -26,7 +34,7 @@ for (const [label, visitor] of Object.entries({
   try {
     const point = runtime.select('src/app.ts', visitor)
     let fired = false
-    const result = point.withReplacement(() => { fired = true; return 0 }, () => invoice(10))
+    const result = point.withReplacement(() => { fired = true; return 0 }, () => invoice(10), { times: 'any' })
     console.log(`visitor ${label} -> no error; handler fired=${fired}; invoice(10)=${result}`)
   } catch (error) {
     console.log(`visitor ${label} -> ${error.message}`)

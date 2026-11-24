@@ -41,7 +41,19 @@
  * Copies are distinguished by a query string on the module specifier, which is
  * how one worker comes to hold two instances of a module under Vite.
  */
+import { afterEach } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
+
+// The library's own check after each test is not what this law is about, so it finds nothing.
+// The runtime is loaded here, not imported above: this file must load even when the runtime
+// cannot, so that a runtime which fails to load is an observation.
+afterEach(async () => {
+  try {
+    ;(await loaders[0]!()).verifyReplacements()
+  } catch {
+    // Reported by the law that owns it.
+  }
+})
 
 const COPIES = [0, 1, 2] as const
 

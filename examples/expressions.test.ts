@@ -39,3 +39,35 @@ test('preserves the Promise contract of an expression inside await', async () =>
   expect(result).toBe(42)
   expect(await remoteTotal('abc')).toBe(30)
 })
+
+test('pauses an asynchronous call until the test releases it', async () => {
+  const pause = remotePoint.pause()
+  const slow = pause.run(() => remoteTotal('abc'))
+
+  // Resolves when the call is reached; rejects at once if the action finishes without reaching it.
+  const { locals } = await pause.reached
+  expect(locals.id).toBe('abc')
+
+  // While it waits, other work runs to completion.
+  expect(await remoteTotal('quick')).toBe(50)
+
+  pause.release()
+  expect(await slow).toBe(30)
+})
+
+test('tells a waiting test at once when the paused call never happens', async () => {
+  const pause = remotePoint.pause()
+  await pause.run(async () => invoice(1))
+  await expect(pause.reached).rejects.toThrow('finished without reaching')
+})
+
+test('resolves and rejects an asynchronous expression', async () => {
+  {
+    using resolved = remotePoint.resolves(7)
+    expect(await remoteTotal('abc')).toBe(7)
+    expect(resolved.calls).toBe(1)
+  }
+  remotePoint.rejects(new Error('timeout'), { on: 2 })
+  expect(await remoteTotal('abc')).toBe(30)
+  await expect(remoteTotal('abc')).rejects.toThrow('timeout')
+})

@@ -91,8 +91,19 @@
  * history.
  */
 import fc from 'fast-check'
+import { afterEach } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
-import { invoke, registerFile, select } from '../src/runtime.mjs'
+import { invoke, registerFile, select, verifyReplacements } from '../src/runtime.mjs'
+
+// The drivers leave replacements behind on purpose (asynchronous scopes, unused ones). The
+// library's own check after each test is not what these laws are about, so it finds nothing.
+afterEach(() => {
+  try {
+    verifyReplacements()
+  } catch {
+    // Reported by the laws that own it.
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Law 1: Passthrough when no replacement for the target node is active
@@ -191,15 +202,18 @@ oracleProperty({
         result = callTarget()
       } else if (history.mode === 'sibling-active') {
         observe('reach', 'sibling-point-active')
+        // The sibling's replacement is not meant to run; `times: 'any'` says so.
         result = siblingPoint.withReplacement(
           () => history.replacementValue,
           () => callTarget(),
+          { times: 'any' },
         )
       } else if (history.mode === 'after-exit') {
         observe('reach', 'after-scope-exit')
         targetPoint.withReplacement(
           () => history.replacementValue,
           () => history.replacementValue,
+          { times: 'any' },
         )
         result = callTarget()
       } else {
@@ -1236,6 +1250,7 @@ oracleProperty({
         select(name, (n) => (n.callee === `send${node}` ? n : undefined)).withReplacement(
           () => 0,
           () => undefined,
+          { times: 'any' },
         )
       const otherFlags = register(otherFile)
       const registrations = [register(file)]

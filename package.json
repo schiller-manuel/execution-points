@@ -13,7 +13,8 @@
       "default": "./src/runtime.mjs"
     },
     "./runtime": "./src/runtime.mjs",
-    "./vite": "./src/plugin.mjs"
+    "./vite": "./src/plugin.mjs",
+    "./vitest": "./src/vitest.mjs"
   },
   "typescript": {
     "contentMapper": {

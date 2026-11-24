@@ -98,3 +98,40 @@ test('isolates concurrent asynchronous scopes', async () => {
   )))
   expect(totals).toEqual([1, 2])
 })
+
+test('fails loudly when a replacement never runs', () => {
+  // The action never reaches the selected expression, so the replacement did nothing.
+  expect(() => quotePoint.withReplacement(() => ({ total: 1, currency: 'EUR' }), () => 'no checkout here'))
+    .toThrow('ran 0 times; expected at least once')
+
+  // `times` says how often it must run: 0 asserts that the expression is not reached.
+  quotePoint.withReplacement(() => ({ total: 1, currency: 'EUR' }), () => 'no checkout here', { times: 0 })
+  expect(() => quotePoint.withReplacement(() => ({ total: 1, currency: 'EUR' }), () => checkout(order()), { times: 2 }))
+    .toThrow('ran once; expected 2 times')
+})
+
+test('replaces chosen evaluations and counts them', () => {
+  // `on` picks the evaluations the handler takes; `call` tells the handler which one it is on.
+  const totals = quotePoint.withReplacement(
+    ({ call }) => ({ total: call, currency: 'EUR' }),
+    () => [checkout(order()), checkout(order()), checkout(order())].map((result) => result.quote.total),
+    { on: [1, 3] },
+  )
+  expect(totals).toEqual([1, 100, 3])
+  expect(quotePoint.calls).toBe(2)
+})
+
+test('replaces everywhere until the end of the block with `using`', () => {
+  {
+    using replacement = quotePoint.returns({ total: 5, currency: 'USD' })
+    expect(checkout(order()).quote).toEqual({ total: 5, currency: 'USD' })
+    expect(replacement.calls).toBe(1)
+  }
+  expect(checkout(order()).quote.total).toBe(100)
+})
+
+test('injects a failure for the rest of the test', () => {
+  // No `using` and no scope: the replacement is restored, and checked, when the test ends.
+  quotePoint.throws(new Error('pricing service is down'))
+  expect(() => checkout(order())).toThrow('pricing service is down')
+})

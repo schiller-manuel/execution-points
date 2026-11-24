@@ -82,9 +82,20 @@ import { SourceMap } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { afterEach } from 'vitest'
 import { differs, oracleProperty, pass } from '@tanstack/oracles'
 import { executionPoints } from '../src/plugin.mjs'
-import { invoke, registerFile, select } from '../src/runtime.mjs'
+import { invoke, registerFile, select, verifyReplacements } from '../src/runtime.mjs'
+
+// The drivers leave replacements behind on purpose (asynchronous scopes, unused ones). The
+// library's own check after each test is not what these laws are about, so it finds nothing.
+afterEach(() => {
+  try {
+    verifyReplacements()
+  } catch {
+    // Reported by the laws that own it.
+  }
+})
 
 // ---------------------------------------------------------------------------
 // Law P1: Module ID filtering, URL/prefix resolution, and source-sync guard
@@ -838,7 +849,8 @@ oracleProperty({
         release()
         return earlyAsync ?? null
       }
-      const startedEarlier = await point.withReplacement(() => REPLACED, useEarlier)
+      // Only some hosts have earlier work to use here, so this replacement need not run.
+      const startedEarlier = await point.withReplacement(() => REPLACED, useEarlier, { times: 'any' })
 
       observe('unused', {
         atLoad,

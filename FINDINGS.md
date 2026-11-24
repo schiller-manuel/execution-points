@@ -24,14 +24,14 @@ Made on 2026-11-24 by Manuel Schiller:
 - F6: performance must be optimal, indistinguishable from uninstrumented code. Done; see F6.
 - `original()` evaluates the expression on every call. `AGENTS.md` and the README no longer call it provisional.
 - All eight potential laws are accepted, every finding is to be fixed, and every feature idea is to be built with oracle coverage. Status is tracked in "Work in progress" below.
-- F7: a replacement that never runs must be loud, or at least noticeable. API options are in F7; none is chosen yet.
+- F7: a replacement that never runs must be loud. All four API options are built; for an asynchronous action the returned promise stays the action's own and the test fails at its end through a Vitest hook. Done; see F7.
 
 Still open:
 
-1. F7, async actions: the working choice is that the returned promise stays the action's own and the test fails at its end through a Vitest hook. Say so if you would rather have the promise reject.
-2. New selector fields for F4 (`receiver`, `inClass`, `assignedTo`, `text`, `line`): the API is yours to approve before it is built.
-3. New benchmark tasks: which, and in which stratum.
-4. The benchmark sequence at the end of this file: approve, or change.
+1. New selector fields for F4 (`receiver`, `inClass`, `assignedTo`, `text`, `line`): the API is yours to approve before it is built.
+2. New benchmark tasks: which, and in which stratum.
+3. The benchmark sequence at the end of this file: approve, or change.
+4. Your global pnpm broke during this work (see "Incidents" below); say whether I should repair it.
 
 ## Work in progress
 
@@ -39,7 +39,9 @@ Still open:
 | --- | --- |
 | F6 fast path | done |
 | `original()` settled, `AGENTS.md` corrected for `select` | done |
-| F7 loud replacements: strict by default with `times`, built-in pause, `point.replace()`, `point.calls`; F8 capture-name checks; fault-injection shorthands | next, in the runtime |
+| F7 loud replacements: strict by default with `times` and `on`, built-in pause, `point.replace()` with `using`, `point.calls`, `call` in the context; F8 capture-name checks; shorthands `returns`, `throws`, `resolves`, `rejects`; F5 covered by `replace` | done |
+| Type-level laws for the new API (`pause` only on promises, option and value types) | queued behind the type-generation merge, which rewrites the type oracle's compile step |
+| Treatment guide and benchmark witnesses using the new API | queued behind the harness merge |
 | F1, F2, F3, F10, F15, F16, registry half of F9; potential laws 1 to 4; registry source mappings | in a separate checkout, to be merged |
 | Benchmark harness fixes from the audit | in a separate checkout, to be merged |
 | F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command | queued behind the fast path, which edits the same files |
@@ -195,6 +197,8 @@ With the drain loop, A's replacement either leaks onto B's work or never runs fo
 
 **Two readings:** (a) this is the documented meaning of async-context scoping (`README.md:99-101`) and needs a warning plus a way to notice (F7). (b) Tests need a second scope that is not tied to the async context, for code with shared workers, batchers, and pools.
 
+**Resolved 2026-11-24, both ways.** `withReplacement` keeps its meaning, and a replacement that never ran now fails the test (F7), so a scope that missed its work is noticed. `point.replace(handler)` is the second scope: it applies in every async context of the worker until it is restored. The probe shows the server and the polling loop covered by it.
+
 **Who is affected:** any test whose work runs in an async context that began before the scope. Unit-style tests that call a function directly are not.
 
 | Application shape | A replacement around the test's call |
@@ -254,18 +258,34 @@ action that never reaches the point -> result=10, handler fired 0 times, no erro
 
 This is how a test stops testing anything after a refactor moves the call out of the path, and it is the only way to notice F5. Probe: `p04-silent-never-fired.mjs`.
 
-**Decision (2026-11-24): it must be loud, or at least noticeable.** API options, not yet chosen:
+**Fixed 2026-11-24 under the decision that it must be loud.** All four options were built:
 
-1. **Strict by default.** `withReplacement(handler, action)` fails when the handler never ran. A third argument covers the other cases: `{ times: 0 }` means the point must not be reached, and fails even when the application swallows what the handler throws; `{ times: 2 }` means exactly twice; `{ times: 'any' }` is today's behavior. A synchronous action fails when it returns. For an async action there is a choice: the returned promise rejects, which means it can no longer be the same promise the action returned (`README.md:99` promises that today); or the promise is left alone and the test fails at its end through a hook the Vite plugin registers.
-2. **A built-in pause whose `reached` rejects** as soon as the action settles without reaching the point. Today that case is a test timeout with no explanation. `const gate = point.pause(); const a = gate.run(() => op()); await gate.reached; ...; gate.release()`.
-3. **`using r = point.replace(handler)`.** Active for the whole worker until the block ends, restored and verified on dispose. It is also the scope F5 lacks. It is wrong for concurrent tests in one worker, which keep `withReplacement`.
-4. **`point.calls`** for explicit assertions. Noticeable, not loud.
+1. **Strict by default.** `withReplacement(handler, action, options?)` fails when the handler never ran. `{ times: 0 }` asserts the expression is not reached and fails even when the application swallows what the handler throws; `{ times: 2 }` means exactly twice; `{ times: 'any' }` is the old behavior; `{ on: 2 }` or `{ on: [1, 3] }` picks the evaluations the handler takes, and the handler sees which one it is on as `call`. A synchronous action throws as it returns. An asynchronous action gets its own promise back and the test fails when it ends, through the Vitest setup module `execution-points-prototype/vitest`; `verifyReplacements()` is the same check for other runners.
+2. **A built-in pause.** `const pause = point.pause(); const a = pause.run(() => op()); await pause.reached; ...; pause.release()`. `reached` rejects as soon as the action finishes without reaching the expression, with the action's own error as the cause when it failed. A pause still holding at the end of the test fails it.
+3. **`using r = point.replace(handler)`.** Applies in every async context of the worker until restored; restoring checks the count. Without `using` it is restored and checked when the test ends. It is also the scope F5 lacked.
+4. **`point.calls`**, and `r.calls` on a replacement, for explicit assertions.
 
-Recommended: 1 and 2, with 3 for server tests and 4 as a small extra.
+Shorthands on top of 3: `point.returns(value)`, `point.throws(error)`, and for expressions whose value is a promise `point.resolves(value)` and `point.rejects(error)`.
 
-### F8. The runtime accepts capture names that are not locals
+```text
+synchronous action, expression never reached -> threw: [execution-points] The replacement for "src/app.ts#price:CallExpression:discount:0" ran 0 times; expected at least once. ...
+same, asserting it is not reached with { times: 0 } -> returned 10
+{ times: 0 } when it IS reached -> threw: ... ran once; expected 0 times. ...
+asynchronous action, expression never reached -> resolved with 10
+...and the check a test runner makes after the test -> threw: ... ran 0 times; expected at least once. ...
+```
 
-**Kind:** possible bug.
+End to end through real Vitest (`p25-e2e-loud-at-test-end.mjs`): a test whose every assertion passes, around an asynchronous action that never reaches the replaced expression, is reported as failed with that message, and the other test in the file passes.
+
+**The laws that hold it** (`tests/runtime-api.oracle.property.test.ts`, seven laws): the count against `times` and `on` over 160 combinations, synchronous and asynchronous; `replace` as a stack that applies in any async context, restored in any order; the pause as an event log over 48 histories, with waits bounded so that a promise that never settles is observed; the shorthands; refused capture names; refused options; and what a visitor may return. The gap check over `runtime.mjs`, `discovery.mjs`, and `plugin.mjs` reports 809 changes tried, 809 noticed.
+
+**What changes for existing tests.** A scope whose handler never runs used to pass and now fails. The examples needed no change; four call sites in the oracle drivers that install a replacement on purpose without running it now say `{ times: 'any' }`.
+
+Probes: `p04-silent-never-fired.mjs`, `p25-e2e-loud-at-test-end.mjs`.
+
+### F8. The runtime accepted capture names that are not locals (fixed)
+
+**Kind:** was a possible bug. Fixed on 2026-11-24: an evaluation whose replacement asks for a name the expression cannot see throws `"nope" is not a local that "<id>" can capture. It can capture: base, fee.`, and the after-test check reports it again in case the application swallowed it. A name is looked up among the expression's own locals only, so `toString` and the like are refused too. A visitor that returns something other than the node now gets a "matched 0" error that says so. Laws A5 and A7 in `tests/runtime-api.oracle.property.test.ts`. The text below is the finding as first written.
 
 **The class:** `invoke` reads `getters[key]` from a plain object (`src/runtime.mjs:106-111`). A name that is not a local resolves through `Object.prototype`.
 
@@ -641,3 +661,12 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 - 2026-11-24: added the oracle-file review. Each claim taken from it was rerun before it went in. F1 widened to the project's own enums (confirmed through real `tsc`) and tied to Law C3. New F14 (captures in the dead zone, moved out of F13 and extended with the `switch` shape) and F15 (registry type differs from the expression's type). "Oracle suites" rewritten: seven wrong versions that pass every oracle file, why, law and authority inconsistencies, eight potential laws. Harness audit still running.
 - 2026-11-24: added the harness audit, each point rechecked (grading instability on `cancel-commit` re-graded by me, power recomputed, robustness counts recomputed). New F16 (dangling helper names; `AbortController`). Recorded three decisions: `AGENTS.md` corrected for `select`, performance must be optimal (F6, two designs measured, the per-call one chosen), a replacement that never runs must be loud (F7, four API options). F5 now lists which application shapes a scope covers. Benchmark section rewritten around the audit.
 - 2026-11-24: F6 fixed (per-function fast path; plugin Law P4, runtime Law 5, new runtime-copies oracle, source-map check; 0 gaps in runtime, discovery, plugin). `original()` settled as "evaluates on every call". Decisions recorded: accept all laws, fix all findings, build all feature ideas with oracle coverage.
+- 2026-11-24: F7 and F8 fixed and F5 resolved in the runtime (strict replacements with `times` and `on`, `pause`, `replace` with `using`, `calls`, shorthands, capture-name and visitor-return checks; seven new laws; 0 gaps over runtime, discovery, plugin). README and examples describe the new API. `ORACLES.md` started for issues met with `@tanstack/oracles`. Two incidents recorded.
+
+## Incidents
+
+**The pnpm store on this machine was emptied (cause unknown).** At about 14:55 on 2026-11-24 `~/Library/pnpm/store` became empty and the pnpm shim at `~/Library/pnpm/bin/pnpm` stopped working, because the pnpm it starts was a link into that store. The repository and the delegated checkouts are unaffected (their `node_modules` hold their own files). At that minute a gap check of mine and a delegate's re-grading loop of the benchmark were running; neither the commands I could read nor the harness code touches `~/Library/pnpm`. The disk was 93% full. `/opt/homebrew/bin/pnpm` still works. Until this is repaired, the validation commands run through Node directly: `node node_modules/typescript/bin/tsc --noEmit --runExternalCode`, `node checks/verify.mjs`, and `node node_modules/@tanstack/oracles/oracle-gaps/index.mjs --package . --source … --seed 42`.
+
+**The benchmark harness deleted packages through a symlinked `node_modules` (caused by me, repaired).** I ran `bench/run.mjs --self-test` in a scratch copy of the repository whose `node_modules` was a symlink to the real one. Toolchain preparation copies `node_modules` and strips packages from the copy; the copy of a symlink is a symlink, so it removed `@tanstack/oracles` and `fast-check` from the real `node_modules` and wrote a stray `execution-points-prototype` into it. `pnpm install --frozen-lockfile` restored it and the baseline was verified afterwards. Nothing tracked by git was touched. The harness now refuses a symlinked `node_modules` (in the harness branch).
+
+**Concurrent benchmark processes delete each other's temp directories.** `sweepStaleTempDirs()` in `bench/toolchain.mjs` removes every `ep-*` directory in the OS temp directory at startup, including those of a bench process that is still running. Reported to the harness delegate.

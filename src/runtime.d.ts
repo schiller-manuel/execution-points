@@ -1,3 +1,5 @@
+/// <reference lib="esnext.disposable" />
+
 export interface NodeDescriptor {
   readonly id: string
   readonly kind: 'CallExpression' | 'BinaryExpression' | 'ConditionalExpression'
@@ -21,7 +23,57 @@ export interface Context<Result, Locals extends object> {
   readonly locals: Readonly<Locals>
   /** Evaluate the original expression. Each call evaluates it again. */
   readonly original: () => Result
+  /** Which evaluation of the expression this is for the running replacement: 1 for the first. */
+  readonly call: number
 }
+
+export interface ReplacementOptions {
+  /**
+   * How often the handler must run. Absent: at least once. A number: exactly that often
+   * (`0` means the expression must not be reached). `'any'`: no requirement.
+   */
+  readonly times?: number | 'any'
+  /**
+   * The evaluations the handler takes, counted from 1. The others evaluate the original
+   * expression. Absent: all of them.
+   */
+  readonly on?: number | readonly number[]
+}
+
+/** A replacement that applies in every async context of the worker until it is restored. */
+export interface Replacement {
+  /** How often its handler has run. */
+  readonly calls: number
+  /** Removes the replacement. Throws when it did not run as often as `times` asked. */
+  restore(): void
+  /** `using replacement = point.replace(handler)` restores it at the end of the block. */
+  [Symbol.dispose](): void
+}
+
+/** An evaluation that reached a paused expression. */
+export interface Arrival<Locals extends object> {
+  readonly locals: Readonly<Locals>
+}
+
+export interface Pause<Locals extends object> {
+  /** Runs `action` with the expression paused, and returns what the action returns. */
+  run<T>(action: () => T): T
+  /**
+   * Resolves with the first evaluation that arrives. Rejects as soon as the action finishes
+   * without one, so a test that awaits it never waits for a timeout.
+   */
+  readonly reached: PromiseLike<Arrival<Locals>>
+  /** Lets every waiting evaluation continue with the original expression; later ones pass through. */
+  release(): void
+  /** How many evaluations have arrived. */
+  readonly calls: number
+}
+
+type OnlyForPromises<Method extends string> =
+  `${Method}() needs an expression whose value is a promise.`
+
+/** `Yes` when the expression's value is a promise (or `any`), `No` otherwise. */
+type IfPromise<Result, Yes, No> = 0 extends 1 & Result ? Yes : [Result] extends [PromiseLike<unknown>] ? Yes : No
 
 /**
  * Reject async handlers (returning Promise) on synchronous void expressions while
@@ -37,10 +89,48 @@ type HandlerResult<R> =
       : R
 
 export interface Point<Result, Locals extends object> {
+  /**
+   * Replaces the expression inside `action` and the asynchronous work it starts. The handler
+   * must run at least once, unless `options.times` says otherwise: a synchronous action that
+   * falls short makes this call throw, an asynchronous one makes the test fail when it ends.
+   */
   withReplacement<T>(
     handler: (context: Context<Result, Locals>) => HandlerResult<Result>,
     action: () => T,
+    options?: ReplacementOptions,
   ): T
+
+  /**
+   * Replaces the expression in every async context of the worker until the returned
+   * replacement is restored, or the test ends. Use it when the code runs in a context the
+   * test did not start, such as a server that is already listening.
+   */
+  replace(
+    handler: (context: Context<Result, Locals>) => HandlerResult<Result>,
+    options?: ReplacementOptions,
+  ): Replacement
+
+  /** `replace` with a handler that returns `value`. */
+  returns(value: HandlerResult<Result>, options?: ReplacementOptions): Replacement
+  /** `replace` with a handler that throws `error`. */
+  throws(error: unknown, options?: ReplacementOptions): Replacement
+  /** `replace` with a handler that returns a promise fulfilled with `value`. */
+  resolves: IfPromise<
+    Result,
+    (value: Awaited<Result>, options?: ReplacementOptions) => Replacement,
+    OnlyForPromises<'resolves'>
+  >
+  /** `replace` with a handler that returns a promise rejected with `error`. */
+  rejects: IfPromise<Result, (error: unknown, options?: ReplacementOptions) => Replacement, OnlyForPromises<'rejects'>>
+
+  /**
+   * Holds evaluations of the expression inside `pause.run(action)` until `pause.release()`.
+   * Only an expression whose value is a promise can wait.
+   */
+  pause: IfPromise<Result, () => Pause<Locals>, OnlyForPromises<'pause'>>
+
+  /** How often a replacement for this expression has run since the current test began. */
+  readonly calls: number
 }
 
 export interface SelectablePoint<N extends NodeDescriptor, Captured extends object = {}>
@@ -127,6 +217,13 @@ type SelectFromNodes<N extends NodeDescriptor, Captured extends object> =
 interface EmptyRegistryPoint extends Point<any, any> {
   capture(...keys: readonly string[]): EmptyRegistryPoint
 }
+
+/**
+ * Checks what the current test's replacements still owe (asynchronous actions, replacements
+ * that were not restored, pauses) and throws what went wrong. The Vite plugin's Vitest setup
+ * calls it after each test; call it yourself under another runner.
+ */
+export declare function verifyReplacements(): void
 
 type SelectedPoint<R> =
   RegistryIsEmpty extends true
