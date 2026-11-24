@@ -102,7 +102,22 @@ Nested scopes can override the same point and restore the outer handler afterwar
 
 **Agreed scope API:** replacements are activated through the explicit `withReplacement(handler, action)` callback scope.
 
-**Provisional call-through behavior:** `original()` is not memoized or limited to one invocation. Calling it twice evaluates the original expression twice, including its side effects. Whether to offer a once-only continuation or a separate repeat API remains a design decision.
+**Call-through:** `original()` evaluates the expression every time it is called. It is not memoized and not limited to one invocation, so calling it twice runs the original expression twice, side effects included.
+
+## What instrumentation costs
+
+Code in a target file runs its original statements until a test installs a replacement for one of its own expressions. Until then an ordinary function pays for one flag read per call, which V8 treats as a constant, and nothing per expression:
+
+| | tight loop, 2 million turns | recursion, 832,000 calls |
+| --- | --- | --- |
+| listed as a target, untouched | 1.0x | 1.0x to 1.2x |
+| a replacement is active in another function of the same file | 1.0x | 0.9x to 1.2x |
+
+(`node probes/p10-runtime-overhead.mjs`, relative to the same code when it is not a target.)
+
+Each function body is emitted twice: once as written, and once with every selectable expression wrapped so that a replacement can intercept it. A function decides which one to run when it is called. That is enough, because a call's async context is fixed when the call begins: if no replacement exists for the function's expressions at that moment, none can apply to that call later, not even after an `await`. Code that is evaluated outside an ordinary function body (a generator or constructor body, an expression-bodied arrow, a parameter default, a field initializer, the module's top level) decides at each outermost selectable expression instead, because it can be resumed or evaluated in another context.
+
+Once a replacement is installed for an expression, the function that contains it runs its wrapped form for the rest of the worker. The emitted code is about twice the size of the wrapped form alone.
 
 ## Configuration
 
@@ -181,11 +196,11 @@ TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfi
 | File | Responsibility |
 | --- | --- |
 | `points.ep` | Target manifest and TypeScript 7.1 content-mapper anchor. |
-| `src/discovery.mjs` | Index selectable expressions and safe local bindings over TypeScript 7.1 ASTs. |
+| `src/discovery.mjs` | Index selectable expressions, the function bodies they belong to, and safe local bindings over TypeScript 7.1 ASTs. |
 | `src/contracts.mjs` | Extract result types and narrowed locals via warm incremental snapshots and emit virtual `ExecutionPointFileRegistry`. |
 | `src/content-mapper.mjs` | TypeScript 7.1 STDIO JSON-RPC content mapper server. |
-| `src/plugin.mjs` | Instrument configured target modules and register node metadata through Vite (test files are untouched). |
-| `src/runtime.mjs` | `select()`, `registerFile()`, `invoke()`, and async-local scopes. |
+| `src/plugin.mjs` | Instrument configured target modules, keeping each function's original statements beside its wrapped form, and register node metadata through Vite (test files are untouched). |
+| `src/runtime.mjs` | `select()`, `registerFile()` with the per-function flags that instrumented code reads, `invoke()`, and async-local scopes. |
 | `src/runtime.d.ts` | `ExecutionPointFileRegistry`, narrowing visitor `select()`, and `Point` types. |
 | `examples/` | Runnable applications and Vitest examples. |
 | `checks/verify.mjs` | End-to-end `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and no-write verification. |

@@ -157,7 +157,8 @@ export declare function select<
 export declare function registerFile(
   file: string,
   nodes: readonly Omit<NodeDescriptor, 'result' | 'locals'>[],
-): void
+  homes?: readonly number[],
+): ReadonlyArray<{ readonly on: boolean }>
 
 export declare function invoke<Result, Locals extends object>(
   id: string,

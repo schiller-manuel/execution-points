@@ -20,9 +20,13 @@ and runnable, and continue discussing unresolved API choices with the user.
   expression's evaluation. `original()` evaluates it on demand.
 - Activate replacements through an explicit callback scope using
   `point.withReplacement(handler, action)`.
-
-Repeated `original()` behavior remains provisional. The current implementation
-evaluates the expression on every call; whether to limit it is undecided.
+- `original()` evaluates the expression on every call. It is not memoized and
+  not limited to one invocation.
+- Instrumented code must be indistinguishable in speed from uninstrumented
+  code until a test installs a replacement for one of a function's own
+  expressions. A function decides once per call whether to run its original
+  statements.
+- A replacement that never runs must be loud.
 
 ## Validation
 

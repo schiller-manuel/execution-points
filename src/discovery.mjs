@@ -102,6 +102,40 @@ function enclosingFunctionName(node) {
   }
 }
 
+const functionKinds = new Set([
+  SyntaxKind.FunctionDeclaration,
+  SyntaxKind.FunctionExpression,
+  SyntaxKind.ArrowFunction,
+  SyntaxKind.MethodDeclaration,
+  SyntaxKind.GetAccessor,
+  SyntaxKind.SetAccessor,
+  SyntaxKind.Constructor,
+])
+
+/**
+ * Code that runs later than, or more often than, the code around it gets a home of its own:
+ * `'body'` for the block of an ordinary function, whose every statement runs within one call,
+ * and `'deferred'` for everything else that a call, a construction, or a resumption evaluates
+ * (parameter defaults, expression bodies, generator and constructor bodies, field initializers).
+ */
+function homeKind(node) {
+  if (functionKinds.has(node.kind) || node.kind === SyntaxKind.PropertyDeclaration) return 'deferred'
+  const fn = node.parent
+  if (node.kind !== SyntaxKind.Block || fn.body !== node || !functionKinds.has(fn.kind)) return undefined
+  // A directive must stay the first statement of its function, so such a body is left whole.
+  const first = node.statements[0]
+  const hasDirective =
+    first?.kind === SyntaxKind.ExpressionStatement && first.expression.kind === SyntaxKind.StringLiteral
+  return fn.kind === SyntaxKind.Constructor || fn.asteriskToken || hasDirective ? undefined : 'body'
+}
+
+/** Whether the expression begins an expression statement: only there can it follow a line that lacks its `;`. */
+function startsStatement(node, start, tree) {
+  let cur = node
+  while (cur.parent.kind !== SyntaxKind.ExpressionStatement && cur.parent.getStart(tree) === start) cur = cur.parent
+  return cur.parent.kind === SyntaxKind.ExpressionStatement
+}
+
 function callCalleeName(node) {
   const expr = node.expression
   if (expr.kind === SyntaxKind.Identifier) return expr.text
@@ -166,6 +200,9 @@ export function indexTargetFile(file, source, root, api) {
     const localScopeStack = []
     const nthCounters = new Map()
     const nodes = []
+    const bodies = []
+    const homes = [0]
+    let homeCount = 0
 
     const activeLocalsAt = (pos) => {
       const names = new Set()
@@ -182,6 +219,11 @@ export function indexTargetFile(file, source, root, api) {
       const fnName = enclosingFunctionName(node)
       if (fnName !== undefined) fnStack.push(fnName)
       localScopeStack.push(scopeBindingsOf(node))
+      const home = homeKind(node)
+      if (home) homes.push(++homeCount)
+      if (home === 'body') {
+        bodies.push({ home: homeCount, start: node.getStart(tree) + bomOffset, end: node.end + bomOffset })
+      }
 
       if (isSelectableExpression(node)) {
         const treeStart = node.getStart(tree)
@@ -223,17 +265,20 @@ export function indexTargetFile(file, source, root, api) {
           start,
           end,
           captures: activeLocalsAt(treeStart),
+          home: homes.at(-1),
+          startsStatement: startsStatement(node, treeStart, tree),
         })
       }
 
       node.forEachChild(visit)
 
+      if (home) homes.pop()
       localScopeStack.pop()
       if (fnName !== undefined) fnStack.pop()
     }
 
     visit(tree)
-    return { file, relativeFile, source, nodes }
+    return { file, relativeFile, source, nodes, bodies }
   } finally {
     lease.dispose()
   }

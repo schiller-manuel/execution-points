@@ -11,7 +11,7 @@ Nothing in `src/`, `tests/`, or `bench/` was changed by this review. The laws be
 - **The library has one defect that should be fixed before anything else.** A single expression or local in any target file whose type comes from a Node built-in module (`fs.Stats`, `http.Server`, ...) or is a member of the project's own enum makes `tsc` fail for the whole project (F1). 22 of 38 everyday Node calls trigger it, and so does an optional enum parameter. The benchmark tasks happen to avoid both.
 - **Two more type-generation defects** leave the editor with stale types (F2) and make expressions unselectable when the project declares global types outside the targets (F3).
 - **The oracles are green but hold less than that suggests.** The gap check misses 248 of 1,472 small code changes (17%), all in `contracts.mjs` and `content-mapper.mjs`. It notices every small change in `runtime.mjs`, `discovery.mjs`, and `plugin.mjs`, yet seven deliberately wrong versions of the runtime, discovery, plugin, and type contract pass every oracle file. No law compiles the generated registry, which is why F1 went unseen.
-- **Listing a module as a target makes it run 30 to 120 times slower** even when no test replaces anything (F6). Resolving the registry once per module instead of once per call recovers about two thirds of that.
+- **Listing a module as a target made it run 30 to 120 times slower** even when no test replaced anything (F6). Fixed: untouched code now runs at 1.0x, and so do the other functions of a file in which a test replaces something.
 - **A second type-generation defect hits the benchmark directly.** A type that cannot be written as a helper leaves its name behind with no definition (F16). `AbortController` is one, so the benchmark's own reference fix for `cancel-commit` fails the treatment-only typecheck.
 - **Do not rerun the whole benchmark now.** The runtime, plugin, and discovery code are byte-identical to the last paid run; only the types and twelve lines of the treatment guide changed. A full rerun would cost about 2,700 credits and, by the protocol's own power calculation, could not reach significance. The section "Should the benchmark be rerun" gives the sequence I recommend instead.
 - **The benchmark measures regression-test quality, not bug fixing.** Across all 138 stored trials the hidden grader passed 68 of 69 in each arm. Every difference in `solved` comes from one component, `adequateReproduction`, and on `cancel-commit`, the only equal-capability task with signal, that component changes between identical re-gradings.
@@ -21,18 +21,29 @@ Nothing in `src/`, `tests/`, or `bench/` was changed by this review. The laws be
 Made on 2026-11-24 by Manuel Schiller:
 
 - `select` replaced the earlier query-string API. `AGENTS.md` is corrected.
-- F6: performance must be optimal. The design chosen from the measurements is in F6; the work is in progress.
+- F6: performance must be optimal, indistinguishable from uninstrumented code. Done; see F6.
+- `original()` evaluates the expression on every call. `AGENTS.md` and the README no longer call it provisional.
+- All eight potential laws are accepted, every finding is to be fixed, and every feature idea is to be built with oracle coverage. Status is tracked in "Work in progress" below.
 - F7: a replacement that never runs must be loud, or at least noticeable. API options are in F7; none is chosen yet.
 
 Still open:
 
-1. F1, F2, F3, F8, F9, F10, F14, F15, F16: is each a bug, or intended? Each one becomes a law and a failing history first, then a fix. F1 also needs Law C3 of the contracts oracle changed, which is yours to approve.
-2. F4: should the promise that selector breaks are loud cover `nth`, or should `nth` be documented as the one selector that can retarget silently?
-3. F5: should there be a scope that is not tied to the async context, for tests against a running server or worker?
-4. F7: which API, and for an async action whether the returned promise may reject or the test fails at its end.
-5. Repeated `original()`: `AGENTS.md` and `README.md:105` call it provisional while runtime Law 2 enforces the exact count. Either settle it as "evaluates on every call" or move the count out of the law.
-6. The potential laws in "Oracle suites": approve, change, or reject each.
-7. The benchmark sequence at the end of this file: approve, or change.
+1. F7, async actions: the working choice is that the returned promise stays the action's own and the test fails at its end through a Vitest hook. Say so if you would rather have the promise reject.
+2. New selector fields for F4 (`receiver`, `inClass`, `assignedTo`, `text`, `line`): the API is yours to approve before it is built.
+3. New benchmark tasks: which, and in which stratum.
+4. The benchmark sequence at the end of this file: approve, or change.
+
+## Work in progress
+
+| Item | State |
+| --- | --- |
+| F6 fast path | done |
+| `original()` settled, `AGENTS.md` corrected for `select` | done |
+| F7 loud replacements: strict by default with `times`, built-in pause, `point.replace()`, `point.calls`; F8 capture-name checks; fault-injection shorthands | next, in the runtime |
+| F1, F2, F3, F10, F15, F16, registry half of F9; potential laws 1 to 4; registry source mappings | in a separate checkout, to be merged |
+| Benchmark harness fixes from the audit | in a separate checkout, to be merged |
+| F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command | queued behind the fast path, which edits the same files |
+| Selector fields (F4), `new` and `await` as selectable kinds, pass-through for unportable types, schedule exploration | queued behind the two merges above |
 
 ---
 
@@ -199,37 +210,37 @@ With the drain loop, A's replacement either leaks onto B's work or never runs fo
 
 The first row is the ordinary integration test. In the benchmark it never showed: every calibrated valid fix that queues work uses a promise chain. Probes: `p13-scope-vs-shared-worker.mjs`, `p23-who-is-outside-the-scope.mjs`.
 
-### F6. An instrumented module runs 30 to 120 times slower with no replacement active
+### F6. An instrumented module ran 30 to 120 times slower with no replacement active (fixed)
 
-**Kind:** untested behavior. No law bounds the work.
+**Kind:** was untested behavior with no law bounding the work. Fixed on 2026-11-24 under the decision that performance must be optimal, indistinguishable from uninstrumented code.
+
+**Before.** Every call, binary operation, and ternary in a target became `invoke(id, () => (expr), () => ({captures}))`: two closures and a registry lookup per evaluation, whether or not any test used the file.
 
 ```text
-sum(2e6)  loop: < + % === ?:   plain 1.5 ms | instrumented, no replacement active 166.9 ms (112x) | inside an unrelated withReplacement 218.7 ms (147x)
-fib(27)   recursion            plain 1.4 ms | instrumented, no replacement active  48.9 ms (35x)  | inside an unrelated withReplacement  56.4 ms (40x)
+sum(2e6)  loop: < + % === ?:   plain 1.5 ms | instrumented, no replacement active 166.9 ms (112x)
+fib(27)   recursion            plain 1.4 ms | instrumented, no replacement active  48.9 ms (35x)
 ```
 
-Every call, binary operation, and ternary in a target becomes `invoke(id, () => (expr), () => ({captures}))`: two closures and, in `invoke`, a `Symbol.for` plus `globalThis` lookup before the `AsyncLocalStorage` read (`src/runtime.mjs:5-10`, `:102-104`). The comment at `src/runtime.mjs:100` calls this a fast path.
+**After.** Each function body is emitted twice, as written and wrapped, and decides once per call which to run by reading a flag of its own. The flag turns on when a test installs a replacement for one of that function's own expressions, so other functions of the same file stay on their original statements.
 
-What-if measurements on throwaway copies of the runtime (production untouched):
+```text
+sum(2e6)  loop: < + % === ?:   plain 1.3 ms | listed as a target, untouched 1.3 ms (1.0x) | a replacement is active in another function of the file 1.3 ms (1.0x)
+fib(27)   recursion            plain 1.2 ms | listed as a target, untouched 1.2 ms (1.0x) | a replacement is active in another function of the file 1.2 ms (0.9x)
+```
 
-| Variant | `sum` | `fib` |
-| --- | --- | --- |
-| current | 123x | 30x |
-| registry resolved once per module instead of per call | 33x | 12x |
-| a flag check emitted around each point, original expression in the else branch | 9.6x | 1.1x |
+Runs of the recursion case vary between 0.9x and 1.2x. A function whose own expression is being replaced pays for the replacement itself, which is the point of installing one.
 
-**Why it matters:** targets are listed by glob, so a whole `src/` tree pays this in every test, including tests that never use the library. Suites with compute-heavy paths slow down by an order of magnitude or more.
+**Why one decision per call is sound.** A call's async context is fixed when the call begins. If no replacement exists for the function's expressions at that moment, none can apply to that call later, across `await` too. Code that can be resumed or evaluated in another context (a generator or constructor body, an expression-bodied arrow, a parameter default, a field initializer, the module's top level) decides at each outermost selectable expression instead.
 
-**Decision (2026-11-24): performance must be optimal.** Two designs that keep today's wrappers only for files in which a test has installed a replacement, hand-written for the same two functions:
+**What made the last factor of 1.5.** Measured on hand-written variants (`probes/p17-overhead-what-if.mjs`): a flag read from a typed array, from a list, or from a module-level `let` costs the recursion case 1.3x to 1.8x. Only a read that V8 can treat as a constant is free. So each function's flag is an object with a shape of its own, held in a constant of its own; setting one flag then leaves the others constant.
 
-| Design | `sum` | `fib` |
-| --- | --- | --- |
-| one flag check at each outermost expression of a statement | 8 to 9.5x | 1.0x |
-| one flag check per function call, the original body untouched behind it | 1.0 to 1.1x | about 1.0x |
+**The laws that hold it.** Plugin Law P4 (`tests/plugin.oracle.property.test.ts`): no runtime call and exactly one flag read per ordinary call until a replacement is installed for one of the function's own expressions, over fourteen code positions, including work that starts before the first replacement and continues after it. Runtime Law 5: a flag is on exactly when a replacement was ever installed for an expression of its home, in every registration of the file. A new oracle, `tests/runtime-copies.oracle.property.test.ts`: every copy of the runtime loaded in one worker is the same runtime. The plugin's source map is now checked too: every copy of an expression maps back to where it is written.
 
-The second is indistinguishable from uninstrumented code and is the one being built. Why one check per call is enough: a function invocation's async context is fixed when it starts, so if no replacement for the file exists at that moment, none can apply to that invocation later, across `await` too. Generators resume in their caller's context, so they keep the per-expression check, as do module top-level code, parameter defaults, field initializers, and constructors. The price is emitted code about twice as large.
+**Evidence.** On the unchanged code the new laws failed in three oracle files (plugin 70 of 96 tests, runtime 12 of 113, runtime copies 28 of 30). With the change all seven oracle files pass, and the gap check over `runtime.mjs`, `discovery.mjs`, and `plugin.mjs` reports 626 changes tried, 626 noticed, 0 gaps. `pnpm check`, `pnpm verify`, and the bench self-test pass. `probes/p24-fast-path-semantics.mjs` runs the same 7 behavior tests through real Vitest on the old and the new code with the same result.
 
-**A caution on the numbers:** ratios were 61x to 191x in an earlier run on a loaded machine. Rerun on your hardware before quoting them. Probes: `p10-runtime-overhead.mjs`, `p17-overhead-what-if.mjs`.
+**What it costs.** The emitted code is about twice the size of the wrapped form alone. The plugin no longer uses `magic-string`; it writes its own source map so that both copies of each expression map back to the original.
+
+Probes: `p10-runtime-overhead.mjs`, `p17-overhead-what-if.mjs`, `p24-fast-path-semantics.mjs`.
 
 ### F7. A replacement that never runs is silent
 
@@ -629,3 +640,4 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 - 2026-11-24: first version at `b26e2c1`. Library findings F1 to F13, gap check, feature ideas, benchmark assessment from the stored results. Harness audit and oracle-file review still running.
 - 2026-11-24: added the oracle-file review. Each claim taken from it was rerun before it went in. F1 widened to the project's own enums (confirmed through real `tsc`) and tied to Law C3. New F14 (captures in the dead zone, moved out of F13 and extended with the `switch` shape) and F15 (registry type differs from the expression's type). "Oracle suites" rewritten: seven wrong versions that pass every oracle file, why, law and authority inconsistencies, eight potential laws. Harness audit still running.
 - 2026-11-24: added the harness audit, each point rechecked (grading instability on `cancel-commit` re-graded by me, power recomputed, robustness counts recomputed). New F16 (dangling helper names; `AbortController`). Recorded three decisions: `AGENTS.md` corrected for `select`, performance must be optimal (F6, two designs measured, the per-call one chosen), a replacement that never runs must be loud (F7, four API options). F5 now lists which application shapes a scope covers. Benchmark section rewritten around the audit.
+- 2026-11-24: F6 fixed (per-function fast path; plugin Law P4, runtime Law 5, new runtime-copies oracle, source-map check; 0 gaps in runtime, discovery, plugin). `original()` settled as "evaluates on every call". Decisions recorded: accept all laws, fix all findings, build all feature ideas with oracle coverage.

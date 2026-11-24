@@ -2,19 +2,49 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 
 // Vite can load this module through more than one module graph. All copies in
 // the same Node worker must share the same async-local store and file index.
-function getRegistry() {
-  return (globalThis[Symbol.for('execution-points-prototype.runtime.v2')] ??= {
-    storage: new AsyncLocalStorage(),
-    files: new Map(),
-  })
+const registry = (globalThis[Symbol.for('execution-points-prototype.runtime.v2')] ??= {
+  storage: new AsyncLocalStorage(),
+  files: new Map(),
+  states: new Map(),
+  flagCount: 0,
+})
+
+/**
+ * Returns the file's flags, one per home (a function body, or a position that is evaluated
+ * later, as the plugin numbers them in `homes`). Instrumented code reads its home's flag
+ * before it runs: until a test installs a replacement for an expression of that home, the
+ * flag is off and the original statements run. Every registration of the file is told about
+ * every replacement, earlier or later, so no copy of the code can miss one.
+ */
+export function registerFile(file, nodes, homes = []) {
+  registry.files.set(file, nodes)
+  const state = registry.states.get(file) ?? { replaced: new Set(), layouts: new Map() }
+  registry.states.set(file, state)
+
+  const homeOf = new Map(nodes.map((node, index) => [node.id, homes[index] ?? 0]))
+  const key = JSON.stringify([...homeOf])
+  if (!state.layouts.has(key)) {
+    // Each flag is an object with a shape of its own. V8 then treats an unset flag as a constant,
+    // so reading it costs nothing, until that very flag is set.
+    const flags = Array.from({ length: Math.max(...homeOf.values(), 0) + 1 }, () => {
+      const name = `flag ${(registry.flagCount += 1)}`
+      return { [name]: name, on: false }
+    })
+    for (const id of state.replaced) flags[homeOf.get(id)].on = true
+    state.layouts.set(key, { flags, homeOf })
+  }
+  return state.layouts.get(key).flags
 }
 
-export function registerFile(file, nodes) {
-  getRegistry().files.set(file, nodes)
+/** From here on, calls into the home of `id` take the wrapped expressions. */
+function markReplaced(file, id) {
+  const state = registry.states.get(file)
+  state.replaced.add(id)
+  for (const { flags, homeOf } of state.layouts.values()) flags[homeOf.get(id)].on = true
 }
 
 function getFileNodes(file) {
-  const nodes = getRegistry().files.get(file)
+  const nodes = registry.files.get(file)
   if (!nodes) {
     throw new Error(
       `[execution-points] Target file "${file}" was not instrumented or has not been imported yet. ` +
@@ -24,10 +54,10 @@ function getFileNodes(file) {
   return nodes
 }
 
-function createPointHandle(resolveSelection, captureNames) {
+function createPointHandle(file, resolveSelection, captureNames) {
   return Object.freeze({
     capture(...keys) {
-      return createPointHandle(resolveSelection, keys)
+      return createPointHandle(file, resolveSelection, keys)
     },
 
     withReplacement(handler, action) {
@@ -37,15 +67,15 @@ function createPointHandle(resolveSelection, captureNames) {
         )
       }
 
-      const { storage } = getRegistry()
       const selected = resolveSelection()
-      const replacements = new Map(storage.getStore() ?? [])
+      const replacements = new Map(registry.storage.getStore() ?? [])
       replacements.set(selected.id, {
         handler,
         captureNames: captureNames ?? selected.captureNames,
       })
 
-      return storage.run(replacements, action)
+      markReplaced(file, selected.id)
+      return registry.storage.run(replacements, action)
     },
   })
 }
@@ -91,16 +121,16 @@ export function select(file, visitor) {
   }
 
   // Eagerly resolve when the target module is already loaded so invalid visitors fail fast.
-  if (getRegistry().files.has(file)) resolveNow()
-  return createPointHandle(resolveNow)
+  if (registry.files.has(file)) resolveNow()
+  return createPointHandle(file, resolveNow)
 }
 
 /**
- * Called by instrumented target code before evaluating a selectable expression.
- * Fast-paths straight to originalThunk() when no replacement is active.
+ * Called by instrumented target code before evaluating a selectable expression, once a
+ * replacement has been installed for an expression of its home.
  */
 export function invoke(id, originalThunk, captureThunk) {
-  const active = getRegistry().storage.getStore()?.get(id)
+  const active = registry.storage.getStore()?.get(id)
   if (!active) return originalThunk()
 
   const getters = captureThunk()

@@ -10,6 +10,7 @@
  * point.withReplacement(({ original }) => original() + 5, () => invoke('n0', () => 10, () => ({}))) // → 15 inside action and its async descendants
  * point.capture('a').withReplacement(({ locals }) => locals.a, () => invoke('n0', () => 10, () => ({ a: () => 7, b: () => 9 }))) // → 7 on a frozen null-prototype locals object, without reading 'b'
  * select('app.ts', (n) => (n.callee === 'send' ? n : undefined)) // → Point for the single matching node; throws when 0 or 2+ nodes match
+ * registerFile('app.ts', nodes, homes)[home].on // → false until a replacement is installed for an expression of that home, true from then on
  * ```
  *
  * Why does a background task started inside `point.withReplacement(handler, action)`
@@ -59,6 +60,20 @@
  * or `visitor` matches 0 or 2 or more nodes (`README.md:49`; Decision by
  * Manuel Schiller (GitHub schiller-manuel), 2026-11-22: `select` is the sole
  * selection API).
+ *
+ * For every file, the flag that `registerFile` returns for a home (a function
+ * body or a deferred position, as the plugin numbers them) is off until a
+ * replacement is installed for one of that home's expressions and on from then
+ * on, in every registration of that file, earlier or later, and whatever
+ * happens to other homes and other files; and every flag is an object with a
+ * key no other flag has. Instrumented code reads its home's flag to decide
+ * whether it may run its original statements, so a flag that turned too late,
+ * or that a second import of the file reset, would let a replacement be
+ * skipped, and a flag that turned for another home would slow code no test
+ * touched. The key of its own gives each flag its own shape, which is what lets
+ * V8 read an unset flag for free until that very flag is set (Decision by
+ * Manuel Schiller (GitHub schiller-manuel), 2026-11-24: performance must be
+ * optimal, indistinguishable from uninstrumented code).
  *
  * The model predicts each observation directly from the history: whether a
  * node id is bound in the active scope or async descendant, which handler and
@@ -1073,6 +1088,219 @@ oracleProperty({
         trace.map((o) =>
           o.checkpoint === 'selection'
             ? { ...o, value: { ...(o.value as object), interceptedNodeIndex: 99 } }
+            : o,
+        ),
+    },
+  ],
+})
+
+// ---------------------------------------------------------------------------
+// Law 5: A file's flags say which homes ever had a replacement installed
+// ---------------------------------------------------------------------------
+
+// The file under test has three expressions: two in home 1 and one in home 2. Home 0 has none.
+// A reshaped registration is the same file after an edit moved its expressions to other homes.
+const FLAG_NODE_HOMES = [1, 1, 2] as const
+const RESHAPED_NODE_HOMES = [2, 1, 1] as const
+type FlagStep =
+  | 'register-again'
+  | 'register-reshaped'
+  | 'install-0'
+  | 'install-1'
+  | 'install-2'
+  | 'install-elsewhere'
+
+interface FileFlagsHistory {
+  /** Whether the registrations pass homes at all; without them every expression is in home 0. */
+  withHomes: boolean
+  steps: ReadonlyArray<FlagStep>
+}
+
+const fileFlagsArbitrary: fc.Arbitrary<FileFlagsHistory> = fc.record({
+  withHomes: fc.boolean(),
+  steps: fc.array(
+    fc.constantFrom(
+      'register-again',
+      'register-reshaped',
+      'install-0',
+      'install-1',
+      'install-2',
+      'install-elsewhere',
+    ),
+    { maxLength: 6 },
+  ),
+})
+
+// Pure model for Law 5: a registration's flag for a home is on exactly when a replacement was
+// ever installed for an expression that this registration places in that home, and no two flags
+// share a key.
+function fileFlagsModel(history: FileFlagsHistory) {
+  const given: ReadonlyArray<number> = history.withHomes ? FLAG_NODE_HOMES : [0, 0, 0]
+  const registrations: Array<ReadonlyArray<number>> = [given]
+  const replaced = new Set<number>()
+  const flagsOf = (homes: ReadonlyArray<number>) =>
+    Array.from({ length: Math.max(...homes) + 1 }, (_, home) =>
+      homes.some((nodeHome, node) => nodeHome === home && replaced.has(node)),
+    )
+  const atFirstRegistration = [flagsOf(given)]
+  const afterEachStep: Array<Array<Array<boolean>>> = []
+  for (const step of history.steps) {
+    if (step === 'register-again') registrations.push(given)
+    if (step === 'register-reshaped') registrations.push(RESHAPED_NODE_HOMES)
+    if (step === 'install-0') replaced.add(0)
+    if (step === 'install-1') replaced.add(1)
+    if (step === 'install-2') replaced.add(2)
+    afterEachStep.push(registrations.map(flagsOf))
+  }
+  return { atFirstRegistration, afterEachStep, flagsSharingAKey: 0 }
+}
+
+// A file's flags outlive a history, so every run of the driver uses files of its own.
+let fileFlagsRuns = 0
+
+oracleProperty({
+  id: 'runtime-file-flags',
+  owns: ['src/runtime.mjs#registerFile', 'src/runtime.mjs#withReplacement'],
+  law: {
+    statement:
+      'For every file, the flag that registerFile returns for a home is off until a replacement is installed for one of that home\'s expressions and on from then on, in every registration of that file, earlier or later, and whatever happens to other homes and other files; and every flag is an object with a key no other flag has.',
+    authority:
+      'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: performance must be optimal, indistinguishable from uninstrumented code. Instrumented code reads its home\'s flag before it runs; probes/p17-overhead-what-if.mjs measures what a flag of shared shape costs.',
+    limits:
+      'Up to six steps per history over one file with three expressions in two homes, one alternative placement of the same expressions, and one other file; a replacement is installed with an empty action. Whether V8 keeps an unset flag constant is measured by a probe, not checked here.',
+  },
+  histories: {
+    arbitrary: fileFlagsArbitrary,
+    runs: 80,
+    fixedSeeds: [42],
+    states: [
+      'registered-again-after-install',
+      'reshaped-after-install',
+      'installed-elsewhere-only',
+      'one-home-of-two-installed',
+      'registered-without-homes',
+    ],
+    constructed: [
+      {
+        name: 'second-import-after-install',
+        enters: ['registered-again-after-install', 'one-home-of-two-installed'],
+        build: () => ({ withHomes: true, steps: ['install-2', 'register-again'] }),
+      },
+      {
+        name: 'edited-file-imported-after-install',
+        enters: ['reshaped-after-install'],
+        build: () => ({ withHomes: true, steps: ['install-0', 'register-reshaped', 'install-2'] }),
+      },
+      {
+        name: 'other-file-only',
+        enters: ['installed-elsewhere-only'],
+        build: () => ({ withHomes: true, steps: ['install-elsewhere', 'register-again'] }),
+      },
+      {
+        name: 'no-homes-given',
+        enters: ['registered-without-homes'],
+        build: () => ({ withHomes: false, steps: ['install-1', 'register-again'] }),
+      },
+    ],
+  },
+  model: (history) => fileFlagsModel(history),
+  driver: (history, observe) => {
+    const installs = history.steps.filter((step) => /^install-\d$/.test(step))
+    const firstInstall = history.steps.findIndex((step) => /^install-\d$/.test(step))
+    if (!history.withHomes) observe('reach', 'registered-without-homes')
+    if (firstInstall === -1 && history.steps.includes('install-elsewhere')) observe('reach', 'installed-elsewhere-only')
+    if (firstInstall !== -1 && history.steps.includes('register-again', firstInstall)) {
+      observe('reach', 'registered-again-after-install')
+    }
+    if (firstInstall !== -1 && history.steps.includes('register-reshaped', firstInstall)) {
+      observe('reach', 'reshaped-after-install')
+    }
+    if (history.withHomes && new Set(installs.map((step) => FLAG_NODE_HOMES[Number(step.at(-1))])).size === 1) {
+      observe('reach', 'one-home-of-two-installed')
+    }
+    try {
+      fileFlagsRuns += 1
+      const file = `file-flags-${fileFlagsRuns}.ts`
+      const otherFile = `file-flags-${fileFlagsRuns}-other.ts`
+      const nodesOf = (name: string) =>
+        FLAG_NODE_HOMES.map((_, node) => ({
+          id: `${name}#n${node}`,
+          kind: 'CallExpression' as const,
+          inFunction: 'work',
+          callee: `send${node}`,
+          nth: 0,
+        }))
+      const register = (name: string) =>
+        history.withHomes ? registerFile(name, nodesOf(name), FLAG_NODE_HOMES) : registerFile(name, nodesOf(name))
+      const install = (name: string, node: number) =>
+        select(name, (n) => (n.callee === `send${node}` ? n : undefined)).withReplacement(
+          () => 0,
+          () => undefined,
+        )
+      const otherFlags = register(otherFile)
+      const registrations = [register(file)]
+      const read = () => registrations.map((flags) => flags.map((flag) => flag.on))
+      const atFirstRegistration = read()
+      const afterEachStep = history.steps.map((step) => {
+        if (step === 'register-again') registrations.push(register(file))
+        else if (step === 'register-reshaped') registrations.push(registerFile(file, nodesOf(file), RESHAPED_NODE_HOMES))
+        else if (step === 'install-elsewhere') install(otherFile, 0)
+        else install(file, Number(step.at(-1)))
+        return read()
+      })
+      // Same-placed registrations share their flags; count each flag object once.
+      const flags = [...new Set([otherFlags, ...registrations].flat())]
+      const keys = flags.map((flag) => Object.keys(flag).find((key) => key !== 'on'))
+      observe('file-flags', {
+        atFirstRegistration,
+        afterEachStep,
+        flagsSharingAKey: keys.length - new Set(keys).size,
+      })
+    } catch (err) {
+      observe('file-flags', { threw: err instanceof Error ? err.message : String(err) })
+    }
+  },
+  check: (_history, observations, expected) =>
+    differs(
+      'file-flags',
+      'file-flags',
+      observations.find((o) => o.checkpoint === 'file-flags')?.value,
+      expected,
+    ) ?? pass,
+  calibrations: [
+    {
+      name: 'second-import-forgets-the-replacement',
+      law: 'file-flags',
+      history: { constructed: 'second-import-after-install' },
+      corrupt: (trace) =>
+        trace.map((o) =>
+          o.checkpoint === 'file-flags'
+            ? {
+                ...o,
+                value: {
+                  atFirstRegistration: [[false, false, false]],
+                  afterEachStep: [[[false, false, true]], [[false, false, true], [false, false, false]]],
+                  flagsSharingAKey: 0,
+                },
+              }
+            : o,
+        ),
+    },
+    {
+      name: 'replacement-marks-every-home',
+      law: 'file-flags',
+      history: { constructed: 'second-import-after-install' },
+      corrupt: (trace) =>
+        trace.map((o) =>
+          o.checkpoint === 'file-flags'
+            ? {
+                ...o,
+                value: {
+                  atFirstRegistration: [[false, false, false]],
+                  afterEachStep: [[[false, true, true]], [[false, true, true], [false, true, true]]],
+                  flagsSharingAKey: 0,
+                },
+              }
             : o,
         ),
     },
