@@ -123,3 +123,20 @@ These are another session's notes, taken over as written and not rechecked by me
 - A synchronous endless loop is reported as a `timeout` gap; four such gaps remain in the mapper's frame reader.
 - A run leaves `.oracle-gaps-<pid>/` in the package directory while it runs.
 
+### Reported by the discovery and plugin work (a delegated session, same day)
+
+Another session's notes, taken over as written and not rechecked by me.
+
+- One failing test per oracle file is reported, as "the observed value differs from the owed value", with no diff and no list of the other failures. Seeing the diff needs the printed replay, which is a plain Vitest command.
+- The gap check refuses when `owns` names a file that does not exist yet, so a new module cannot show red.
+- A mutant that only does more work was classed `not-observed` with a directive pointing at an unrelated oracle file; an `extra-work` directive asked for a `work` ratio in an oracle file that session was not allowed to edit. It removed both shortcuts from production instead.
+- A model cannot await. For a law that compares instrumented code with the same code uninstrumented, the driver records the reference runs and the model reads them from the trace.
+
+### The run's temporary directory gets committed by `git add -A`
+
+**Doing:** committing documentation while a gap check was running.
+
+**What happened:** the gap check keeps `.oracle-gaps-<pid>/` in the package directory for the length of the run. It is not in any ignore file the package ships, so `git add -A` staged its eleven files, and I committed and pushed them to a branch before I saw it.
+
+**Would have helped:** the run directory under the OS temp directory, or the setup skill adding `.oracle-gaps-*/` to `.gitignore`.
+

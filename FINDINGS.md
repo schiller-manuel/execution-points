@@ -33,6 +33,7 @@ Made on 2026-11-24 by Manuel Schiller:
 
 Still open:
 
+0. Laws the discovery and plugin work reworded or added under the direction you gave, with wording that is the delegate's. Confirm or strike: discovery D1 (a call is also selectable as the callee of `new` and as a template tag; a file with no import or export indexes nothing) and D3 (captures are exactly the locals initialized on every reach; `var` is treated like `let`); plugin P1 to P3 (global scripts return `null`; the header goes behind leading directives; a target is read only by the transform that instruments it), P5 (instrumented code does what the module does as written), P6 (without `targets` the plugin follows `points.ep`; a manifest the schema does not describe stops the build), P7 (the `config()` hook adds the setup module); and the two laws of the `list` command (it prints exactly what the plugin registers; exit codes 1 and 2).
 1. Names inside the new selector form that your decision did not fix: `object` for the receiver of a member call (ESTree's word for it, flattened), `VariableDeclarator` as a third kind of node to traverse into (for "the call that initializes `total`"), and `text` as the expression's source with whitespace collapsed. I build them as proposals and list them in the law's limits.
 2. New benchmark tasks: which, and in which stratum.
 3. The benchmark sequence at the end of this file: approve, or change.
@@ -49,7 +50,8 @@ Still open:
 | Treatment guide and benchmark witnesses using the new API | queued behind the harness merge |
 | F1, F2, F3, F10, F15, F16, registry half of F9; potential laws 1, 2 and 4; registry source mappings; an opaque result for unwritable expressions | merged; gaps in `contracts` and `content-mapper` went from 248 to 4, all four an endless loop in the mapper's frame reader |
 | Benchmark harness fixes from the audit (harness v2.4) | merged; `--self-test` passes 138 checks and fails 4, all the treatment typecheck of fixes that use `AbortController` or `fs.Stats` (F16, F1) |
-| F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command | queued behind the fast path, which edits the same files |
+| F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command, the plugin adding the Vitest setup module | merged; the full gap check on the merged tree is running |
+| Selection by a visitor object with nested traversal (F4), plus `line`, `text` and the receiver of a member call | decided; not built yet |
 | Schedule exploration: `interleavings(points)` as a generator of orders, with `schedule`, `choose`, and the `InterleavingFailure` error | done |
 | Type-check the oracle test files (F17) | done for the four runtime oracle files, which are now in `include`; 52 errors remain in the other five, queued behind the merges, which edit those files |
 | Move to TypeScript built with `tsdown`; drop run-time argument checks the compiler makes | done for the runtime; `discovery`, `plugin`, `contracts` and `content-mapper` are queued behind the merges |
@@ -320,7 +322,7 @@ The `TypeError` is thrown from inside the application call.
 
 ### F9. The type checker and the runtime disagree about which files exist
 
-**Half fixed 2026-11-24.** The registry now includes a file that starts with a byte order mark (`p06`: both sides see 1 node). The other half, a global script that the plugin instruments differently, is in the discovery branch.
+**Fixed 2026-11-24.** The registry now includes a file that starts with a byte order mark (`p06`: both sides see 1 node), and the plugin no longer instruments a file with no import or export, which the registry never listed (`p06`: "not instrumented").
 
 **Kind:** inconsistency.
 
@@ -349,7 +351,9 @@ missing target path                               -> no diagnostic, file silentl
 
 A string in place of the array is iterated character by character, which makes the compiler watch `/` and the project root. The existing diagnostic already states the rule ("must contain a JSON object with a "targets" array", `src/content-mapper.mjs:31`); only the object half is checked. A typo leaves the registry empty, and the user is told to check their TypeScript version. 4 of 4 malformed manifests and the missing path produce no diagnostic. Probe: `p06-compile-runtime-parity.mjs`.
 
-### F11. The documented skip rule hides more code than it needs to
+### F11. The documented skip rule hides more code than it needs to (fixed)
+
+**Fixed 2026-11-24.** An expression is skipped only when wrapping it would change what the code does, not whenever it contains an `await`, `yield` or optional chain somewhere inside. `p01`: 3 of 14 shapes still offer nothing (it was 9). `p02`, share of candidate expressions hidden: 5 of 3,200 in `bench/*.mjs` (it was 185), 1 in `src/` (it was 71), 0 in the benchmark tasks. A new law runs every newly selectable shape instrumented and uninstrumented, replaced and unreplaced, and compares what the code does.
 
 **Kind:** improvement to a documented limit (`README.md:175`).
 
@@ -378,7 +382,9 @@ Three related limits, each a maintainer decision or a documented limit today:
 
 Probes: `p01-selectable-coverage.mjs`, `p02-skip-rule-on-bench-sources.mjs`, `p05-library-types-in-registry.mjs`.
 
-### F12. The Vite plugin re-reads every target for every module it sees
+### F12. The Vite plugin re-reads every target for every module it sees (fixed)
+
+**Fixed 2026-11-24.** The plugin reads a target only in the transform call that instruments it. `p11`: 1,000 transforms of non-target modules with 200 targets take 1 ms (it was 3,955 ms).
 
 **Kind:** untested behavior.
 
@@ -405,7 +411,9 @@ At 200 targets and 5,000 modules that is about 8 seconds per cold run on a quiet
 | The plugin inserts its import before a leading directive such as `'use client'` (`importOffset` skips only a BOM and a shebang, `src/plugin.mjs:132-139`), so the string is no longer a directive. Whether any framework in a test run depends on it is not verified. | file |
 | Fixed with harness v2.4: `checks/verify.mjs:318` said `fromFile()`; `bench/EXECUTION_POINTS_GUIDE.md` was referenced by nothing, showed the old verbose selector, and awaited the overlapping operation while holding the barrier. The message is corrected and the file is removed. | `grep` |
 
-### F14. Discovery offers captures that are not initialized when the point runs
+### F14. Discovery offers captures that are not initialized when the point runs (fixed)
+
+**Fixed 2026-11-24.** A capture is offered only when the local is initialized on every way of reaching the expression. `p16`: no `ReferenceError`; the two shapes that failed now offer only the names they can read.
 
 **Kind:** possible bug.
 
@@ -720,6 +728,7 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 - 2026-11-24: the four runtime oracle files are type-checked (`include` widened, `tests/loose-select.ts`, `src/runtime.d.mts`). `checks/no-any.mjs` removed again at the maintainer's request. Decision recorded: TypeScript sources built with `tsdown`.
 - 2026-11-24: the runtime is TypeScript (`src/runtime.ts` holds the implementation and the types that were in `runtime.d.ts`), built with `tsdown` into `dist/`. Three laws changed on the maintainer's decision: runtime Law 4, the replace-everywhere and pause laws of the new API, and `interleavings` no longer promise a `TypeError` for an argument of the wrong kind. The type oracle now compiles against the built declarations.
 - 2026-11-24: type-generation fixes merged (F1, F2, F3, F10, F15, F16, half of F9). I reran `p06`, `p07`, `p18`, `p19`, `p21` and `p22` on the merged code; each shows the fixed behavior quoted in its finding.
+- 2026-11-24: discovery, plugin and CLI work merged (F9, F11, F12, F14; `execution-points list`; `points.schema.json`; the plugin reads `points.ep` and adds the Vitest setup module). One interaction between the two delegated branches fixed oracle first: the content mapper refused the manifest's new `$schema` key. Selection by a Babel-style visitor object decided (`p30`).
 
 ## Incidents
 
