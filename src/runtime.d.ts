@@ -1,4 +1,5 @@
 /// <reference lib="esnext.disposable" />
+/// <reference lib="esnext.iterator" />
 
 export interface NodeDescriptor {
   readonly id: string
@@ -218,50 +219,58 @@ interface EmptyRegistryPoint extends Point<any, any> {
   capture(...keys: readonly string[]): EmptyRegistryPoint
 }
 
-export interface InterleavingOptions<Result> {
-  /** The expressions at which operations can be made to wait. Each must evaluate to a promise. */
-  readonly points: readonly { pause(): Pause<any> }[]
-  /** Starts the operations. It runs once per order, so it must start from the same state each time. */
-  readonly run: () => Result | PromiseLike<Result>
-  /** Judges one run. Throwing stops the search and reports the order that failed. */
-  readonly check?: (result: Awaited<Result>) => void | PromiseLike<void>
-  /** Runs before every run, to put the state back. */
-  readonly setup?: () => void | PromiseLike<void>
-  /** The most runs to make. Default 1000. */
-  readonly limit?: number
-  /** Replays one order: the `schedule` of an earlier failure. */
+export interface InterleavingOptions {
+  /** Gives exactly one order: the `schedule` of an order that ran before, or of a failure. */
   readonly schedule?: readonly number[]
   /**
-   * Picks the orders instead of walking all of them: called with the step within the run, the
-   * number of evaluations held at that step (in the order they arrived), and the run's number,
-   * it returns the index of the one to release. `limit` runs are made.
+   * Picks every order itself instead of walking all of them: called with the step within the
+   * run, the number of evaluations held at that step (in the order they arrived), and the run's
+   * number, it returns the index of the one to release. The orders then never run out; stop
+   * with `break` or `.take(n)`.
    */
   readonly choose?: (step: number, count: number, run: number) => number
 }
 
-export interface InterleavingReport {
-  /** How many orders ran. */
-  readonly schedules: number
-  /** Whether that was every order. */
-  readonly complete: boolean
+/** One order in which a scenario's operations pass the selected expressions. */
+export interface Interleaving {
+  /**
+   * Runs `action` once in this order and resolves to what it resolves to. Every evaluation of a
+   * selected expression inside `action` is held; whenever all operations have finished or are
+   * held, one is released. Rejects with an `InterleavingFailure` when `action` throws or rejects.
+   */
+  run<Result>(action: () => Result | PromiseLike<Result>): Promise<Awaited<Result>>
+  /** The choices made so far. `interleavings(points, { schedule })` gives this order again. */
+  readonly schedule: readonly number[]
+  /** The ids of the evaluations released so far, in the order they were released. */
+  readonly released: readonly string[]
 }
 
 /**
- * What `interleavings` throws when a run fails; `cause` is what the run or `check` threw.
+ * What an order's `run` rejects with when its action fails; `cause` is what the action threw.
  * Narrow a caught value with `instanceof InterleavingFailure` to read `schedule`.
  */
 export declare class InterleavingFailure extends Error {
   private constructor()
-  /** Pass it back as `schedule` to replay the failing order. */
+  /** `interleavings(points, { schedule })` gives the failing order again. */
   readonly schedule: readonly number[]
 }
 
 /**
- * Runs `run` once for every order in which its operations can pass the selected expressions,
- * and judges each run with `check`. Every evaluation of a selected expression inside `run` is
- * held; whenever all operations have finished or are held, one is released.
+ * The orders in which operations can pass the selected expressions, one at a time:
+ *
+ *     for (const order of interleavings([read, write])) {
+ *       reset()
+ *       await order.run(() => Promise.all([getProfile('u1'), updateProfile('u1', 'Bob')]))
+ *       expect(cachedName('u1')).toBe('Bob')
+ *     }
+ *
+ * Each order follows from what the one before it found, so await `order.run` before taking the
+ * next. Each point must select an expression whose value is a promise.
  */
-export declare function interleavings<Result>(options: InterleavingOptions<Result>): Promise<InterleavingReport>
+export declare function interleavings(
+  points: readonly { pause(): Pause<any> }[],
+  options?: InterleavingOptions,
+): Generator<Interleaving, void, undefined>
 
 /**
  * Checks what the current test's replacements still owe (asynchronous actions, replacements

@@ -293,7 +293,7 @@ async function quiet(snapshot) {
   }
 }
 
-/** What `interleavings` throws when a run fails. `schedule` replays that run; `cause` is what it threw. */
+/** What an order's `run` rejects with when its action fails. `schedule` gives that order again; `cause` is what the action threw. */
 export class InterleavingFailure extends Error {
   constructor(message, cause, schedule) {
     super(message, { cause })
@@ -303,120 +303,137 @@ export class InterleavingFailure extends Error {
 }
 
 /**
- * Runs `run` once for every order in which its operations can pass the selected expressions.
- * Each evaluation of a selected expression inside `run` is held; whenever everything has
- * finished or is held, one held evaluation is released, and the search walks every choice.
- * `check` judges each run. `schedule` replays one order, `choose` picks the orders itself,
- * and `limit` bounds the number of runs.
+ * The orders in which operations can pass the selected expressions, one at a time. Each order
+ * runs an action once: every evaluation of a selected expression inside it is held, and whenever
+ * all operations have finished or are held, one is released. Each order follows from what the
+ * one before it found, so an order has to run to its end before the next is taken. `schedule`
+ * gives one order again; `choose` picks every order itself, for as long as the caller asks.
  */
-export async function interleavings({ points, run, check, setup, limit = 1000, schedule, choose }) {
-  if (!Array.isArray(points) || !points.every((point) => internals.has(point)) || typeof run !== 'function') {
-    throw new TypeError('[execution-points] interleavings requires `points` selected with select() and a `run` function.')
+export function interleavings(points, { schedule, choose } = {}) {
+  if (!Array.isArray(points) || !points.every((point) => internals.has(point))) {
+    throw new TypeError('[execution-points] interleavings requires a list of points selected with select().')
   }
   const reached = new Set()
 
-  // One run. `pick(step, count)` says which of the `count` held evaluations goes next.
-  const once = async (pick) => {
-    await setup?.()
-    const held = []
+  // One order. `pick(step, count)` says which of the `count` held evaluations goes next.
+  const begin = (pick) => {
     const choices = []
-    const options = []
-    const order = []
-    const replacements = new Map(registry.storage.getStore() ?? [])
-    for (const point of points) {
-      const installation = internals.get(point).begin((context) => {
-        reached.add(installation.id)
-        return new Promise((go) => {
-          held.push({ id: installation.id, go })
-        }).then(() => context.original())
-      })
-      replacements.set(installation.id, installation)
-    }
-
-    let outcome
-    Promise.resolve()
-      .then(() => registry.storage.run(replacements, run))
-      .then(
-        (value) => {
-          outcome = { value }
-        },
-        (error) => {
-          outcome = { error }
-        },
-      )
-    for (;;) {
-      await quiet(() => `${held.length} ${order.length}`)
-      if (outcome) break
-      if (held.length === 0) {
-        outcome = {
-          error: new Error(
-            '[execution-points] The run neither finished nor reached a selected expression. It may be waiting on a timer or on I/O, which the search cannot order.',
-          ),
+    const counts = []
+    const released = []
+    let state = 'ready'
+    const order = {
+      get schedule() {
+        return [...choices]
+      },
+      get released() {
+        return [...released]
+      },
+      async run(action) {
+        if (typeof action !== 'function') throw new TypeError('[execution-points] order.run requires a function.')
+        if (state !== 'ready') {
+          throw new Error('[execution-points] An order runs once. Take the next order from interleavings() to run the action again.')
         }
-        break
-      }
-      const choice = pick(choices.length, held.length)
-      options.push(held.length)
-      choices.push(choice)
-      const [next] = held.splice(choice, 1)
-      order.push(next.id)
-      next.go()
+        state = 'running'
+        const held = []
+        const replacements = new Map(registry.storage.getStore() ?? [])
+        for (const point of points) {
+          const installation = internals.get(point).begin((context) => {
+            reached.add(installation.id)
+            return new Promise((go) => {
+              held.push({ id: installation.id, go })
+            }).then(() => context.original())
+          })
+          replacements.set(installation.id, installation)
+        }
+
+        let outcome
+        Promise.resolve()
+          .then(() => registry.storage.run(replacements, action))
+          .then(
+            (value) => {
+              outcome = { value }
+            },
+            (error) => {
+              outcome = { error }
+            },
+          )
+        for (;;) {
+          await quiet(() => `${held.length} ${released.length}`)
+          if (outcome) break
+          if (held.length === 0) {
+            outcome = {
+              error: new Error(
+                '[execution-points] The run neither finished nor reached a selected expression. It may be waiting on a timer or on I/O, which the search cannot order.',
+              ),
+            }
+            break
+          }
+          const choice = pick(choices.length, held.length)
+          if (!(Number.isInteger(choice) && choice >= 0 && choice < held.length)) {
+            throw new TypeError(
+              `[execution-points] There is no valid choice for step ${choices.length + 1}: ${held.length} evaluations were held, and the choice was ${choice}.`,
+            )
+          }
+          counts.push(held.length)
+          choices.push(choice)
+          const [next] = held.splice(choice, 1)
+          released.push(next.id)
+          next.go()
+        }
+        state = 'done'
+        if ('error' in outcome) {
+          throw new InterleavingFailure(
+            (released.length
+              ? `[execution-points] The scenario failed in this order:\n` +
+                released.map((id, position) => `  ${position + 1}. ${id}`).join('\n') +
+                `\nReplay it with interleavings(points, { schedule: ${JSON.stringify(choices)} }).`
+              : '[execution-points] The scenario failed before any selected expression was released.') +
+              `\nIt failed with: ${outcome.error?.message ?? outcome.error}`,
+            outcome.error,
+            [...choices],
+          )
+        }
+        if (schedule && choices.length !== schedule.length) {
+          throw new TypeError(`[execution-points] The schedule has ${schedule.length} choices, but the run made ${choices.length}.`)
+        }
+        return outcome.value
+      },
     }
-    if (!('error' in outcome) && check) {
-      try {
-        await check(outcome.value)
-      } catch (error) {
-        outcome = { error }
-      }
-    }
-    if ('error' in outcome) {
-      throw new InterleavingFailure(
-        (order.length
-          ? `[execution-points] The scenario failed in this order:\n` +
-            order.map((id, position) => `  ${position + 1}. ${id}`).join('\n') +
-            `\nReplay it with { schedule: ${JSON.stringify(choices)} }.`
-          : '[execution-points] The scenario failed before any selected expression was released.') +
-          `\nIt failed with: ${outcome.error?.message ?? outcome.error}`,
-        outcome.error,
-        choices,
+    return { order, choices, counts, ran: () => state === 'done' }
+  }
+
+  // Hands out one order and insists that it ran before the walk goes on.
+  function* one(pick) {
+    const taken = begin(pick)
+    yield taken.order
+    if (!taken.ran()) {
+      throw new Error(
+        '[execution-points] The order before this one has not run to its end. Await order.run(action) before taking the next order.',
       )
     }
-    return { choices, options }
+    return taken
   }
 
-  let schedules = 0
-  let complete = false
-  if (schedule) {
-    const { choices } = await once((step, count) => {
-      if (!(schedule[step] < count)) {
-        throw new TypeError(`[execution-points] The schedule has no valid choice for step ${step + 1}: ${count} evaluations were held.`)
+  return (function* walk() {
+    if (schedule) {
+      yield* one((step) => schedule[step])
+    } else if (choose) {
+      for (let run = 0; ; run += 1) yield* one((step, count) => choose(step, count, run))
+    } else {
+      // Depth first: repeat the choices up to the last one that has an untried alternative.
+      for (let prefix = []; prefix; ) {
+        const { choices, counts } = yield* one((step) => prefix[step] ?? 0)
+        const turn = choices.findLastIndex((choice, step) => choice + 1 < counts[step])
+        prefix = turn === -1 ? undefined : [...choices.slice(0, turn), choices[turn] + 1]
       }
-      return schedule[step]
-    })
-    if (choices.length !== schedule.length) {
-      throw new TypeError(`[execution-points] The schedule has ${schedule.length} choices, but the run made ${choices.length}.`)
     }
-    schedules = 1
-    complete = true
-  } else if (choose) {
-    for (; schedules < limit; schedules += 1) await once((step, count) => choose(step, count, schedules))
-  } else {
-    // Depth first: repeat the choices up to the last one that has an untried alternative.
-    for (let prefix = []; prefix && schedules < limit; schedules += 1) {
-      const { choices, options } = await once((step) => prefix[step] ?? 0)
-      const turn = choices.findLastIndex((choice, step) => choice + 1 < options[step])
-      prefix = turn === -1 ? undefined : [...choices.slice(0, turn), choices[turn] + 1]
-      complete = !prefix
+    const unreached = points.map((point) => internals.get(point).id()).filter((id) => !reached.has(id))
+    if (unreached.length) {
+      throw new Error(
+        `[execution-points] No run reached ${unreached.map((id) => `"${id}"`).join(', ')}. Every selected expression must be evaluated by the scenario.`,
+      )
     }
-  }
-
-  const unreached = points.map((point) => internals.get(point).id()).filter((id) => !reached.has(id))
-  if (unreached.length) {
-    throw new Error(
-      `[execution-points] No run reached ${unreached.map((id) => `"${id}"`).join(', ')}. Every selected expression must be evaluated by the scenario.`,
-    )
-  }
-  return { schedules, complete }
+  })()
 }
 
 function makeVisitorNode(descriptor) {

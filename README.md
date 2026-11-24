@@ -161,9 +161,9 @@ remotePoint.resolves(7)                             // for an expression whose v
 remotePoint.rejects(new Error('timeout'), { on: 2 }) // only the second evaluation fails
 ```
 
-### Search every order
+### Run every order
 
-A test that pauses one operation at one place tries one order. `interleavings` tries all of them. Give it the expressions where operations can be made to wait, and the scenario:
+A test that pauses one operation at one place tries one order. `interleavings` hands you all of them, one at a time. You give it the expressions where operations can be made to wait; the loop is yours:
 
 ```ts
 import { interleavings, select } from 'execution-points-prototype'
@@ -171,45 +171,58 @@ import { interleavings, select } from 'execution-points-prototype'
 const normalizing = select('examples/profile.ts', (n) => n.callee === 'normalize' && n)
 const writing = select('examples/profile.ts', (n) => n.callee === 'writeStore' && n)
 
-await interleavings({
-  points: [normalizing, writing],
-  setup: reset, // puts the state back before every run
-  run: () => Promise.all([getProfile('u1'), updateProfile('u1', 'Bob')]),
-  check: () => expect(cachedName('u1')).toBe('Bob'), // judges every run
-})
+for (const order of interleavings([normalizing, writing])) {
+  reset()
+  await order.run(() => Promise.all([getProfile('u1'), updateProfile('u1', 'Bob')]))
+  expect(cachedName('u1')).toBe('Bob')
+}
 ```
 
-Inside `run`, every evaluation of a selected expression waits. Whenever each operation has either finished or is waiting, one waiting evaluation is let through and continues with the original expression. The scenario runs once for each way to make those choices, and the call resolves to `{ schedules, complete }`: how many orders ran, and whether that was all of them.
+Inside `order.run(action)`, every evaluation of a selected expression waits. Whenever each operation has either finished or is waiting, one waiting evaluation is let through and continues with the original expression. Each order makes those choices differently, and the loop ends when every way has been tried. `order.run` resolves to what the action resolves to.
 
-When `check` throws or `run` rejects, the search stops and throws an error that names the order:
+`interleavings` is an ordinary generator, so the rest is composition: `break` to stop, `.take(20)` to bound the number of orders, a counter to know how many there were, a list to collect every order that ends wrong instead of stopping at the first. Each order follows from what the one before it found, so await `order.run` before taking the next.
+
+| On each order | |
+| --- | --- |
+| `order.run(action)` | Runs the action once in this order. |
+| `order.released` | The ids of the evaluations that were let through, in order. |
+| `order.schedule` | The choices that were made. `interleavings(points, { schedule })` gives exactly this order again, which is how an order that failed becomes a regression test. |
+
+A check that follows `order.run` is your code, and its error reaches the test as it is. If you want the failure to name the order, put the check inside the action. When the action throws or rejects, `order.run` rejects with an `InterleavingFailure`:
+
+```ts
+await order.run(async () => {
+  reset()
+  await Promise.all([getProfile('u1'), updateProfile('u1', 'Bob')])
+  expect(cachedName('u1')).toBe('Bob')
+})
+```
 
 ```
 [execution-points] The scenario failed in this order:
   1. examples/profile.ts#updateProfile:CallExpression:writeStore:0
   2. examples/profile.ts#getProfile:CallExpression:normalize:0
-Replay it with { schedule: [0,0] }.
+Replay it with interleavings(points, { schedule: [0,0] }).
 It failed with: expected 'Alice' to be 'Bob'
 ```
 
-The error is an `InterleavingFailure`. Its `cause` is what the scenario threw, and its `schedule` is the list of choices. Passing that list back runs exactly that order again, which is how the failing order becomes a regression test: `interleavings({ ...scenario, schedule: [0, 0] })`.
-
-To read `schedule` from a caught failure in a test, narrow the value with `instanceof`. A rejection can be any value, so TypeScript types it as `any` unless you say `unknown`:
+Its `cause` is what the action threw and its `schedule` is the list of choices. To read them from a caught value, narrow it with `instanceof`; a rejection can be any value, so TypeScript types it as `any` unless you say `unknown`:
 
 ```ts
-const failure = await interleavings(scenario).catch((error: unknown) => error)
+const failure = await everyOrder().catch((error: unknown) => error)
 assert(failure instanceof InterleavingFailure)
 failure.schedule // readonly number[]
 ```
 
-| Option | Meaning |
-| --- | --- |
-| `limit` | The most runs to make, 1000 by default. If the search stops there, `complete` is `false`. |
-| `schedule` | Run this one order. A schedule that does not fit the run is refused. |
-| `choose(step, count, run)` | Pick the orders yourself, for example with a seeded random generator: return which of the `count` waiting evaluations goes next. `limit` runs are made. |
+To pick the orders yourself, for example with a seeded random generator, pass `choose(step, count, run)`: it returns which of the `count` waiting evaluations goes next. The orders then never run out, so bound them:
 
-Each selected expression must be one whose value is a promise, as for `pause`. An expression that no run evaluates makes the search throw, like any replacement that never runs. The number of orders grows quickly: two operations that each pass two selected expressions have six orders, and three such operations have ninety.
+```ts
+for (const order of interleavings(points, { choose }).take(50)) { … }
+```
 
-The search can only order work that is driven by promises. An operation that waits on a real timer, on disk, or on the network is not waiting at a selected expression, so the search either reports that the run "neither finished nor reached a selected expression" or lets the others go first. Fake the timers, or select the expression that starts the slow work. (`node probes/p26-interleavings.mjs` shows each of these cases.)
+Each selected expression must be one whose value is a promise, as for `pause`. An expression that no order evaluated makes the loop throw when the orders run out, like any replacement that never runs; so does taking the next order before the current one has run. The number of orders grows quickly: two operations that each pass two selected expressions have six orders, and three such operations have ninety.
+
+Only work that is driven by promises can be ordered. An operation that waits on a real timer, on disk, or on the network is not waiting at a selected expression, so `order.run` either reports that the run "neither finished nor reached a selected expression" or lets the others go first. Fake the timers, or select the expression that starts the slow work. (`node probes/p26-interleavings.mjs` shows each of these cases.)
 
 ### Replacement scope
 
@@ -318,10 +331,12 @@ TypeScript 7.1 introduces **content mappers** for non-`.ts` extensions (`tsconfi
 | `src/contracts.mjs` | Extract result types and narrowed locals via warm incremental snapshots and emit virtual `ExecutionPointFileRegistry`. |
 | `src/content-mapper.mjs` | TypeScript 7.1 STDIO JSON-RPC content mapper server. |
 | `src/plugin.mjs` | Instrument configured target modules, keeping each function's original statements beside its wrapped form, and register node metadata through Vite (test files are untouched). |
-| `src/runtime.mjs` | `select()`, `registerFile()` with the per-function flags that instrumented code reads, `invoke()`, and async-local scopes. |
-| `src/runtime.d.ts` | `ExecutionPointFileRegistry`, narrowing visitor `select()`, and the `Point`, `Replacement`, and `Pause` types. |
+| `src/runtime.mjs` | `select()`, `registerFile()` with the per-function flags that instrumented code reads, `invoke()`, async-local scopes, and `interleavings()`. |
+| `src/runtime.d.ts` | `ExecutionPointFileRegistry`, narrowing visitor `select()`, and the `Point`, `Replacement`, `Pause`, and `Interleaving` types. |
 | `src/vitest.mjs` | Vitest setup module: after each test, fail it when a replacement did not run as often as the test said. |
 | `examples/` | Runnable applications and Vitest examples. |
 | `checks/verify.mjs` | End-to-end `tsc --runExternalCode`, live `tsc --lsp --stdio` (hover, completions, diagnostics), negative type checks, and no-write verification. |
+| `checks/no-any.mjs` | Fails when a name in the type-checked files is silently `any`, which `strict` allows when a declaration elsewhere says `any`. |
+| `probes/` | Small scripts that call the unchanged code and print what it does; `FINDINGS.md` names the probe behind each finding. |
 
 The native compiler API is currently a beta dependency. See the [TypeScript 7.1 beta announcement](https://devblogs.microsoft.com/typescript/announcing-typescript-7-1-beta/) for its API model.

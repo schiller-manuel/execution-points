@@ -26,6 +26,7 @@ Made on 2026-11-24 by Manuel Schiller:
 - All eight potential laws are accepted, every finding is to be fixed, and every feature idea is to be built with oracle coverage. Status is tracked in "Work in progress" below.
 - F7: a replacement that never runs must be loud. All four API options are built; for an asynchronous action the returned promise stays the action's own and the test fails at its end through a Vitest hook. Done; see F7.
 - A type that is silently `any` is an error. `pnpm check` now runs `checks/no-any.mjs` after `tsc`; see F17.
+- Schedule exploration is a primitive to compose, not a function that takes the checks: `interleavings(points)` is a generator of orders, and the caller runs the scenario and checks it in the loop body. Rebuilt that way; the first form with `run`, `check`, `setup` and `limit` options is gone.
 
 Still open:
 
@@ -33,7 +34,7 @@ Still open:
 2. New benchmark tasks: which, and in which stratum.
 3. The benchmark sequence at the end of this file: approve, or change.
 4. Your global pnpm broke during this work (see "Incidents" below); say whether I should repair it.
-5. `interleavings` throws on a failing order. If you also want a form that returns the failure as a value (as fast-check has `check` beside `assert`), say so; today a test narrows the caught value with `instanceof InterleavingFailure`.
+5. The details of `interleavings` that your decision did not fix: each order is an object with `run(action)`, `schedule` and `released` (instead of a bare callback); the options `schedule` (one order again) and `choose` (pick every order, endless); taking the next order before the current one ran, and running an order twice, throw. They are built and listed as proposals in the oracle's limits.
 
 ## Work in progress
 
@@ -47,7 +48,7 @@ Still open:
 | F1, F2, F3, F10, F15, F16, registry half of F9; potential laws 1 to 4; registry source mappings | in a separate checkout, to be merged |
 | Benchmark harness fixes from the audit | in a separate checkout, to be merged |
 | F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command | queued behind the fast path, which edits the same files |
-| Schedule exploration: `interleavings` with `limit`, `schedule`, `choose`, and the `InterleavingFailure` error | done |
+| Schedule exploration: `interleavings(points)` as a generator of orders, with `schedule`, `choose`, and the `InterleavingFailure` error | done |
 | `checks/no-any.mjs` in `pnpm check` (F17) | done for the type-checked files |
 | Type-check the oracle test files (F17): declarations for `src/*.mjs`, 62 errors to fix | queued behind the merges, which edit the same test files |
 | Selector fields (F4), `new` and `await` as selectable kinds, pass-through for unportable types | queued behind the merges |
@@ -459,12 +460,12 @@ Probe: `p27`.
 **An `any` that a declaration hands over is not implicit.** `Promise#then` and `Promise#catch` declare the rejection reason as `any`, so in
 
 ```ts
-const failure = await interleavings(scenario).catch((error) => error)
+const failure = await everyOrder().catch((error) => error)
 ```
 
 both `error` and `failure` are `any`, `tsc` reports nothing, and every property read from `failure` is unchecked. The first version of `examples/profile.test.ts` hid this behind an annotation (`const failure: InterleavingFailure = …`), which the compiler accepts without checking because `any` is assignable to everything. No compiler option reports this, and the lint rule that does is not available for TypeScript 7.1.
 
-Fixed for the type-checked files: `checks/no-any.mjs` asks the checker for the type of every variable, parameter and destructured name that has no annotation, of every initializer under an annotation, and of every operand of `as` or `satisfies`, and fails on `any`. `pnpm check` runs it after `tsc`. On the three shapes above it reports the name and position; on the examples as committed it reports nothing. `interleavings` now throws an exported class, `InterleavingFailure`, so a test narrows the caught value with `instanceof` instead of annotating it.
+Fixed for the type-checked files: `checks/no-any.mjs` asks the checker for the type of every variable, parameter and destructured name that has no annotation, of every initializer under an annotation, and of every operand of `as` or `satisfies`, and fails on `any`. `pnpm check` runs it after `tsc`. On the three shapes above it reports the name and position; on the examples as committed it reports nothing. An order's `run` rejects with an exported class, `InterleavingFailure`, so a test narrows the caught value with `instanceof` instead of annotating it.
 
 **The oracle test files are outside `include`.** `include` lists `examples/**/*.ts`, `src/runtime.d.ts` and `points.ep`. Nothing type-checks `tests/`. Checked with the same options, the nine oracle files have 62 errors:
 
@@ -686,7 +687,7 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 | `p23-who-is-outside-the-scope.mjs` | F5: which application shapes a scope covers |
 | `p24-fast-path-semantics.mjs` | F6: a replacement applies exactly to the evaluations in its scope, across function kinds |
 | `p25-e2e-loud-at-test-end.mjs` | F7: a replacement that never ran fails the test through the Vitest hook |
-| `p26-interleavings.mjs` | schedule exploration: orders run, the failing order and its replay, a sample, an unreached expression, a run that waits on a timer |
+| `p26-interleavings.mjs` | schedule exploration: each order and what it left behind, a failure from a check inside `run`, a replay from a schedule, a sample, an unreached expression, a run that waits on a timer, an order that was not run |
 | `p27-what-the-type-check-covers.mjs` | F17 |
 
 `probes/lib.mjs`, `probes/types.mjs`, and `probes/e2e.mjs` are shared helpers. `e2e.mjs` builds a real consumer project with the package copied into its `node_modules`, the way `bench/toolchain.mjs` does, and runs the real `tsc` and Vitest on it.
@@ -699,6 +700,7 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 - 2026-11-24: F6 fixed (per-function fast path; plugin Law P4, runtime Law 5, new runtime-copies oracle, source-map check; 0 gaps in runtime, discovery, plugin). `original()` settled as "evaluates on every call". Decisions recorded: accept all laws, fix all findings, build all feature ideas with oracle coverage.
 - 2026-11-24: F7 and F8 fixed and F5 resolved in the runtime (strict replacements with `times` and `on`, `pause`, `replace` with `using`, `calls`, shorthands, capture-name and visitor-return checks; seven new laws; 0 gaps over runtime, discovery, plugin). README and examples describe the new API. `ORACLES.md` started for issues met with `@tanstack/oracles`. Two incidents recorded.
 - 2026-11-24: schedule exploration built (`interleavings`, feature idea 9): every order, `limit`, `schedule`, `choose`; it throws `InterleavingFailure` with the order, the replay schedule and what failed. New oracle `runtime-interleavings`, example `examples/profile.test.ts`, README section, probe `p26`. New F17: an `any` that `strict` lets through and the untyped oracle test files; `checks/no-any.mjs` added to `pnpm check`.
+- 2026-11-24: `interleavings` rebuilt as a primitive after the maintainer's decision: a generator of orders (`order.run(action)`, `order.schedule`, `order.released`) with the caller's own loop and checks. Oracle, example, README section and probe `p26` rewritten for it. A negative or fractional schedule entry is now refused; the first form took `-1` as "the last waiting evaluation". Benchmark harness v2.4 merged.
 
 ## Incidents
 
