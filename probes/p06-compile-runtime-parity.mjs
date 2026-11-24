@@ -30,21 +30,28 @@ for (const [label, source] of Object.entries(cases)) {
   console.log(`${label.padEnd(34)} | types: file ${inRegistry ? 'present' : 'ABSENT '} with ${typeIds.length} node(s) | runtime: ${rt ? `${rt.length} node(s) instrumented` : 'not instrumented'}`)
 }
 
-// A target path that does not exist, and a manifest with a typo'd key.
+// A target path that does not exist, and malformed manifests: what does the mapper say, and where?
 const { parseManifest, scanProject } = await import(`${REPO}/src/content-mapper.mjs`)
 const reg = registry({ 'src/app.ts': cases['ordinary module'] }, ['src/app.ts', 'src/typo-does-not-exist.ts'])
-console.log(`\nmissing target path -> registry keys: ${[...reg.text.matchAll(/^    (".*"):$/gm)].map((m) => m[1]).join(', ')} (no diagnostic for the missing one)`)
-for (const manifest of ['{"target": ["src/app.ts"]}', '{"targets": "src/app.ts"}', '{"targets": ["src/app.ts"], "tsconfg": "x.json"}', '{"targets": [42]}']) {
+console.log(`\nmissing target path -> registry keys: ${[...reg.text.matchAll(/^    (".*"): \w+;$/gm)].map((m) => m[1]).join(', ')}`)
+for (const manifest of [
+  '{"targets": ["src/app.ts", "src/typo-does-not-exist.ts"]}',
+  '{"target": ["src/app.ts"]}',
+  '{"targets": "src/app.ts"}',
+  '{"targets": ["src/app.ts"], "tsconfg": "x.json"}',
+  '{"targets": [42]}',
+]) {
   let outcome
   try {
-    const { config, diagnostics } = parseManifest(manifest, 'points.ep')
+    const { diagnostics } = parseManifest(manifest, join(reg.root, 'points.ep'), reg.root)
     writeFileSync(join(reg.root, 'points.ep'), manifest)
     const scan = scanProject(reg.root, join(reg.root, 'tsconfig.json'), undefined)
-    outcome = `diagnostics=${diagnostics.length}, watched targets=${scan.watchedFiles.filter((f) => !f.endsWith('tsconfig.json')).map((f) => f.replace(reg.root + '/', '')).join(',') || '(none)'}`
+    const said = diagnostics.map((d) => `at ${JSON.stringify(manifest.slice(d.start, d.start + d.length))}: ${d.messageText}`)
+    outcome = `watched: ${scan.watchedFiles.map((f) => f.replace(reg.root + '/', '')).join(', ')}\n${said.map((line) => `     ${line}`).join('\n') || '     (no diagnostic)'}`
   } catch (error) {
     outcome = `threw ${error.constructor.name}: ${error.message}`
   }
-  console.log(`manifest ${manifest.padEnd(52)} -> ${outcome}`)
+  console.log(`manifest ${manifest}\n  -> ${outcome}`)
 }
 api.close()
 process.exit(0)

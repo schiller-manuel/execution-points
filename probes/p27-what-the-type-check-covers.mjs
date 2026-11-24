@@ -2,7 +2,7 @@
 //   1. The oracle test files are outside tsconfig's `include`. Type-checked with the same options,
 //      how many errors do they have, and of which kind?
 //   2. A value from a rejection handler is `any` under `strict`. Does `tsc` object?
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { API } from 'typescript/sync'
 import { createFileSystemLayer } from 'typescript/fs'
@@ -14,7 +14,7 @@ function diagnose(extraRoots, overrides = new Map()) {
   try {
     const plan = discovery.buildTargetPlan({ ...discovery.loadManifest(REPO), overrides, api })
     const registryFile = join(REPO, '__execution_points_registry.d.ts')
-    const { text } = contracts.generateFileRegistryModule(plan, { fromFile: registryFile, api, overrides })
+    const { text } = contracts.generateFileRegistryModule(plan, { fromFile: registryFile, api })
     const config = api.parseConfigFile(plan.tsconfig)
     const files = new Map([[registryFile, text], ...plan.files.map((entry) => [entry.file, entry.source]), ...overrides])
     snapshot = api.createSnapshot({
@@ -53,8 +53,7 @@ for (const [code, count] of [...byCode].sort((a, b) => b[1] - a[1])) {
   const sample = inTests.find((d) => d.code === code)
   console.log(`  TS${code} x${count}  e.g. ${String(sample.text).slice(0, 110)}`)
 }
-show('declaration files next to src/*.mjs', readdirSync(join(REPO, 'src')).filter((name) => /\.d\.m?ts$/.test(name)))
-show('src/runtime.d.mts exists (what `import "../src/runtime.mjs"` resolves to)', existsSync(join(REPO, 'src/runtime.d.mts')))
+show('modules in src/ that are still JavaScript without declarations', readdirSync(join(REPO, 'src')).filter((name) => name.endsWith('.mjs')))
 
 console.log('\n## 3. an `any` that `strict` lets through')
 const example = join(REPO, 'examples/profile.test.ts')

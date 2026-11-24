@@ -7,59 +7,140 @@ import { generateFileRegistryModule } from './contracts.mjs'
 import { buildTargetPlan, resolveTargetFiles } from './discovery.mjs'
 
 const projects = new Map()
-const snapshotCaches = new Map()
 let sharedApi
 const getApi = () => (sharedApi ??= new API())
 const safeRead = (file) => { try { return readFileSync(file, 'utf8') } catch { return undefined } }
 
-function getSnapshotCache(projectRoot) {
-  let cache = snapshotCaches.get(projectRoot)
-  if (!cache) {
-    cache = {}
-    snapshotCaches.set(projectRoot, cache)
-  }
-  return cache
-}
+const SHAPE = 'points.ep must contain a JSON object with a "targets" array.'
+// Span map: a segment of kind "atom" maps a block as a whole; the feature mask says which editor
+// requests follow the mapping. Diagnostics always do.
+const SPAN_ATOM = 1
+const FEATURE_DEFINITION = 8
 
-export function parseManifest(content, manifestFile) {
-  const trimmed = (content ?? '').trim()
-  if (!trimmed) return { config: {}, diagnostics: [] }
+/**
+ * Read a manifest. `targets` holds one entry for each listed target that is a
+ * string: the files it resolves to and where it stands in `content`.
+ * `diagnostics` names everything that is wrong, at the text that is wrong.
+ * `fatal` is set when the content is not a JSON object at all.
+ */
+export function parseManifest(content, manifestFile, root) {
+  const text = content ?? ''
+  const body = text.trim()
+  const manifest = { targets: [], diagnostics: [] }
+  const report = (code, messageText, start = 0, length = text.length) => {
+    manifest.diagnostics.push({ messageText, start, length, code })
+  }
+  if (!body) return manifest
+
+  let parsed
   try {
-    const parsed = JSON.parse(trimmed)
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {
-        diagnostics: [{ messageText: 'points.ep must contain a JSON object with a "targets" array.', start: 0, length: content.length, code: 90101 }],
+    parsed = JSON.parse(body)
+  } catch (error) {
+    report(90100, `Invalid JSON in ${path.basename(manifestFile)}: ${error.message}`)
+  }
+  if (parsed === undefined || !parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    if (parsed !== undefined) report(90101, SHAPE)
+    manifest.fatal = true
+    return manifest
+  }
+
+  // TypeScript's JSON syntax tree says where each key and each element stands.
+  const lease = getApi().createSourceFile(`${manifestFile}.json`, body)
+  try {
+    const lead = text.indexOf(body)
+    const at = (node) => {
+      const start = node.getStart(lease.sourceFile)
+      return [lead + start, node.end - start]
+    }
+    const properties = new Map(lease.sourceFile.statements[0].expression.properties.map((property) => [property.name.text, property]))
+    for (const [key, property] of properties) {
+      if (key !== 'targets' && key !== 'tsconfig') {
+        report(90102, `Unknown key ${JSON.stringify(key)}. The keys of a manifest are "targets" and "tsconfig".`, ...at(property.name))
       }
     }
-    return { config: parsed, diagnostics: [] }
-  } catch (error) {
-    return {
-      diagnostics: [{ messageText: `Invalid JSON in ${path.basename(manifestFile)}: ${error.message}`, start: 0, length: content.length, code: 90100 }],
+
+    const tsconfig = properties.get('tsconfig')
+    if (tsconfig && typeof parsed.tsconfig !== 'string') {
+      report(90103, '"tsconfig" must be the path of a tsconfig file.', ...at(tsconfig.initializer))
+    } else if (tsconfig && !existsSync(path.resolve(root, parsed.tsconfig))) {
+      report(90103, `The tsconfig file ${JSON.stringify(parsed.tsconfig)} does not exist.`, ...at(tsconfig.initializer))
+    } else {
+      manifest.tsconfig = parsed.tsconfig
     }
+
+    const targets = properties.get('targets')
+    if (!Array.isArray(parsed.targets)) {
+      report(90101, SHAPE, ...(targets ? at(targets.initializer) : []))
+      return manifest
+    }
+    targets.initializer.elements.forEach((element, index) => {
+      const entry = parsed.targets[index]
+      const [start, length] = at(element)
+      if (typeof entry !== 'string') {
+        report(90104, `A target must be a path or a glob in a string, not ${JSON.stringify(entry)}.`, start, length)
+        return
+      }
+      const files = resolveTargetFiles(root, [entry])
+      if (!files.some((file) => existsSync(file))) report(90105, `Target ${JSON.stringify(entry)} matches no file.`, start, length)
+      manifest.targets.push({ entry, files, start, length })
+    })
+  } finally {
+    lease.dispose()
   }
+  return manifest
 }
 
-export function scanProject(projectRoot, configFileName, options) {
-  const manifestFile = options?.configFile
-    ? path.resolve(projectRoot, options.configFile)
-    : path.resolve(projectRoot, 'points.ep')
-  const manifestText = safeRead(manifestFile) ?? ''
-  const { config = {} } = parseManifest(manifestText, manifestFile)
+/**
+ * The registry for a manifest, with the files in the order of the entries
+ * that list them, and each file's nodes mapped to its entry: an error inside
+ * the registry is then reported at the target that caused it, and
+ * go-to-definition on a node's field lands there. The protocol maps a virtual
+ * file only onto its own `.ep` text, so the entry is as near to the target
+ * expression as a mapping can point.
+ */
+function analyze(root, tsconfigHint, manifestFile, content, cache) {
+  const manifest = parseManifest(content, manifestFile, root)
+  const order = new Map()
+  manifest.targets.forEach(({ files }, index) => {
+    for (const file of files) if (!order.has(file)) order.set(file, index)
+  })
+  const plan = buildTargetPlan({
+    root,
+    tsconfig: manifest.tsconfig ?? (tsconfigHint || 'tsconfig.json'),
+    targets: manifest.targets.map(({ entry }) => entry),
+    api: getApi(),
+  })
+  plan.files.sort((a, b) => order.get(a.file) - order.get(b.file))
+  const registry = generateFileRegistryModule(plan, { fromFile: manifestFile, api: getApi(), cache })
 
-  const watched = new Set()
-  const hash = createHash('sha256')
-  hash.update(`${configFileName}\0${manifestText}`)
-  if (configFileName && existsSync(configFileName)) {
-    watched.add(configFileName)
-    hash.update(`\0tsconfig:${safeRead(configFileName)}`)
+  const mappings = []
+  for (const span of registry.spans) {
+    const target = manifest.targets[order.get(span.file)]
+    const last = mappings.at(-1)
+    if (last?.[2] === target.start) last[1] = span.end - last[0]
+    else mappings.push([span.start, span.end - span.start, target.start, target.length, SPAN_ATOM, FEATURE_DEFINITION])
   }
-  for (const file of resolveTargetFiles(projectRoot, config.targets ?? [])) {
-    watched.add(file)
-    hash.update(`\0target:${file}\0${safeRead(file) ?? ''}`)
-  }
+  return { manifest, plan, registry, mappings }
+}
+
+/**
+ * What a project's transform depends on: the tsconfig, every listed target
+ * (so that a missing one is seen when it appears), and every file of the
+ * project that the analysis read.
+ */
+export function scanProject(projectRoot, configFileName, options, cache) {
+  const manifestFile = path.resolve(projectRoot, options?.configFile ?? 'points.ep')
+  const manifestText = safeRead(manifestFile) ?? ''
+  const { manifest, plan, registry } = analyze(projectRoot, configFileName, manifestFile, manifestText, cache)
+
+  const watched = new Set([...manifest.targets.flatMap(({ files }) => files), ...registry.inputs])
+  for (const file of [configFileName, plan.tsconfig]) if (file && existsSync(file)) watched.add(file)
   watched.delete(manifestFile)
 
-  return { configIdentity: hash.digest('hex'), watchedFiles: [...watched].sort() }
+  const watchedFiles = [...watched].sort()
+  const hash = createHash('sha256').update(`${configFileName}\0${manifestText}`)
+  for (const file of watchedFiles) hash.update(`\0${file}\0${safeRead(file) ?? ''}`)
+  return { configIdentity: hash.digest('hex'), watchedFiles }
 }
 
 export function initialize(params) {
@@ -70,40 +151,28 @@ export function initialize(params) {
   }
 }
 
+/** One warm TypeScript program per open project, kept until the project closes. */
 export function openProject(params) {
   const configFileName = params.configFileName || ''
   const projectRoot = configFileName ? path.dirname(configFileName) : process.cwd()
-  const scanned = scanProject(projectRoot, configFileName, params.options)
-  projects.set(params.projectHandle, { configFileName, projectRoot })
+  const cache = projects.get(params.projectHandle)?.cache ?? {}
+  const scanned = scanProject(projectRoot, configFileName, params.options, cache)
+  projects.set(params.projectHandle, { configFileName, projectRoot, cache })
   return scanned
 }
 
 export function transform(params) {
   const project = projects.get(params.projectHandle)
-  const fileName = params.fileName
-  const content = params.content ?? ''
-  const root = project?.projectRoot ?? path.dirname(fileName)
-  const { config, diagnostics } = parseManifest(content, fileName)
-  if (diagnostics.length > 0) {
-    return { extension: '.ts', text: "import type {} from 'execution-points-prototype';\n", diagnostics, mappings: [] }
+  const root = project?.projectRoot ?? path.dirname(params.fileName)
+  const { manifest, registry, mappings } = analyze(root, project?.configFileName, params.fileName, params.content ?? '', project?.cache)
+  if (manifest.fatal) {
+    return { extension: '.ts', text: "import type {} from 'execution-points-prototype';\n", diagnostics: manifest.diagnostics, mappings: [] }
   }
-
-  const plan = buildTargetPlan({
-    root,
-    tsconfig: config.tsconfig ?? (project?.configFileName ? path.relative(root, project.configFileName) : 'tsconfig.json'),
-    targets: config.targets ?? [],
-    api: getApi(),
-  })
-
-  const { text } = generateFileRegistryModule(plan, {
-    fromFile: fileName,
-    api: getApi(),
-    cache: getSnapshotCache(root),
-  })
-  return { extension: '.ts', text, diagnostics: [], mappings: [] }
+  return { extension: '.ts', text: registry.text, diagnostics: manifest.diagnostics, mappings }
 }
 
 export function closeProject(params) {
+  projects.get(params.projectHandle)?.cache.snapshot?.dispose()
   projects.delete(params.projectHandle)
   return {}
 }
@@ -115,7 +184,7 @@ function formatFrame(payload) {
   return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, 'ascii'), body])
 }
 
-export function handleInputChunk(state, chunk, write = (frame) => process.stdout.write(frame)) {
+export function handleInputChunk(state, chunk, write) {
   state.buffer = Buffer.concat([state.buffer, chunk])
   for (;;) {
     const headerEnd = state.buffer.indexOf('\r\n\r\n')
@@ -144,16 +213,18 @@ export function handleInputChunk(state, chunk, write = (frame) => process.stdout
     try {
       write(formatFrame({ jsonrpc: '2.0', id: message.id, result: handler(message.params) }))
     } catch (err) {
-      write(formatFrame({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: String(err?.message ?? err) } }))
+      write(formatFrame({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: String(err) } }))
     }
   }
 }
 
-const stdioState = { buffer: Buffer.alloc(0) }
-process.stdin.on('data', (chunk) => {
-  handleInputChunk(stdioState, chunk)
-})
-process.stdin.on('end', () => {
-  for (const cache of snapshotCaches.values()) cache.snapshot?.dispose()
-  sharedApi?.close()
-})
+// Serve standard input only when this file is the mapper process, not when it is imported.
+if (import.meta.main) {
+  const stdioState = { buffer: Buffer.alloc(0) }
+  process.stdin.on('data', (chunk) => {
+    handleInputChunk(stdioState, chunk, (frame) => process.stdout.write(frame))
+  })
+  process.stdin.on('end', () => {
+    sharedApi?.close()
+  })
+}
