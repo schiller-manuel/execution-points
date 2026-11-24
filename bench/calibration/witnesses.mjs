@@ -7,7 +7,7 @@ import { CANCEL_COMMIT_REF, STALE_CACHE_SEAM_REF, STALE_CACHE_V9 } from './varia
 
 /**
  * Known-good legal Treatment witness for `stale-cache` (W-01 / R-09):
- * Uses deadlock-free `select()` + `settle()` pattern taught in TREATMENT_GUIDE.
+ * Uses the deadlock-free `select()` + `pause()` + `settle()` pattern taught in TREATMENT_GUIDE.
  * Must achieve `adequateReproduction === true` AND `true_green` on BOTH V9 (queue)
  * and V9_REV (revision guard)!
  *
@@ -26,14 +26,6 @@ const writeYieldPt = select(
   (n) => n.callee === 'yieldIo' && n.inFunction === 'writeToDb' && n,
 )
 
-function createBarrier() {
-  let entered!: () => void
-  const hit = new Promise<void>((r) => { entered = r })
-  let release!: () => void
-  const gate = new Promise<void>((r) => { release = r })
-  return { entered, hit, release, gate }
-}
-
 async function settle(turns = 20) {
   for (let i = 0; i < turns; i++) await new Promise<void>((r) => setImmediate(r))
 }
@@ -42,14 +34,12 @@ beforeEach(() => resetStore())
 
 test('stale cold read does not poison cache after update', async () => {
   seedProfile('u1', 'Alice')
-  const b = createBarrier()
-  const readOp = formatPt.withReplacement(async ({ original }) => {
-    b.entered(); await b.gate; return original()
-  }, () => getProfile('u1'))
-  await b.hit
+  const pause = formatPt.pause()
+  const readOp = pause.run(() => getProfile('u1'))
+  await pause.reached
   const updOp = updateProfile('u1', 'Bob')
   await settle()
-  b.release()
+  pause.release()
   await Promise.all([readOp, updOp])
   expect((await getProfile('u1'))?.name).toBe('Bob')
   clearCache()
@@ -58,14 +48,12 @@ test('stale cold read does not poison cache after update', async () => {
 
 test('out-of-order concurrent updates keep latest update in cache and DB', async () => {
   seedProfile('u1', 'Alice')
-  const b = createBarrier()
-  const op1 = writeYieldPt.withReplacement(async ({ original }) => {
-    b.entered(); await b.gate; return original()
-  }, () => updateProfile('u1', 'Bob'))
-  await b.hit
+  const pause = writeYieldPt.pause()
+  const op1 = pause.run(() => updateProfile('u1', 'Bob'))
+  await pause.reached
   const op2 = updateProfile('u1', 'Carol')
   await settle()
-  b.release()
+  pause.release()
   await Promise.all([op1, op2])
   expect((await getProfile('u1'))?.name).toBe('Carol')
   clearCache()

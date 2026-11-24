@@ -47,7 +47,9 @@ Still open:
 | `original()` settled, `AGENTS.md` corrected for `select` | done |
 | F7 loud replacements: strict by default with `times` and `on`, built-in pause, `point.replace()` with `using`, `point.calls`, `call` in the context; F8 capture-name checks; shorthands `returns`, `throws`, `resolves`, `rejects`; F5 covered by `replace` | done |
 | Type-level laws for the new API (`pause` only on promises, option and value types) | queued behind the type-generation merge, which rewrites the type oracle's compile step |
-| Treatment guide and benchmark witnesses using the new API | queued behind the harness merge |
+| Treatment guide and benchmark witnesses using the new API | done: the guide's library section teaches `pause`, the strict default, `list`, the visitor form and `interleavings`; the witness uses `pause`; the self-test passes (140 checks) |
+| An expression whose type cannot be written can be selected and passed through | done; open: such an expression cannot be paused, because the registry cannot say that its value is a promise |
+| `new X()` and `await` as selectable kinds (feature idea 8) | not built. `new` is like a call. `await` cannot be wrapped the way the others are, so it needs a design first |
 | F1, F2, F3, F10, F15, F16, registry half of F9; potential laws 1, 2 and 4; registry source mappings; an opaque result for unwritable expressions | merged; gaps in `contracts` and `content-mapper` went from 248 to 4, all four an endless loop in the mapper's frame reader |
 | Benchmark harness fixes from the audit (harness v2.4) | merged; `--self-test` passes 138 checks and fails 4, all the treatment typecheck of fixes that use `AbortController` or `fs.Stats` (F16, F1) |
 | F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command, the plugin adding the Vitest setup module | merged; the full gap check on the merged tree is running |
@@ -675,7 +677,7 @@ Not as a whole, and not yet.
 
 1. Library: fix F1 and F16, land F6, decide F7. Then freeze the library at a tagged commit. *F6 and F7 are done; F1 and F16 are in a branch about to be merged; the API has grown since (pause, `replace`, `interleavings`), so the freeze comes after you have accepted it.*
 2. Harness: grade every variant several times and require agreement; typecheck every reference and valid fix in a treatment workspace during `--self-test`; require `AssertionError` for a reproduction; print still-red, loud-break, and timeout counts per arm; pair on the requested model and warn on every unmatched row. *Done in v2.4.*
-3. Guides: give both arms both recipes with placeholder names, and freeze them. *Both arms now share one guide. Still to do: rewrite the treatment guide's library section and the witnesses for the new API, then freeze.*
+3. Guides: give both arms both recipes with placeholder names, and freeze them. *Both arms share one guide, and the treatment guide's library section and the witness are rewritten for the new API. Still to do: freeze, once you have accepted the API.*
 4. Tasks: replace the ceiling tasks with ones that have headroom on the fix itself and look like ordinary code (generics, `?.`, Node types, several hundred lines, more than one module). Keep `stale-cache` as a labeled capability demonstration outside the pooled numbers. Make reproduction quality its own pre-registered endpoint.
 5. Then run one pre-registered matrix with at least three trials per cell, sized from the power table, and print the split by adoption next to the intention-to-treat result.
 

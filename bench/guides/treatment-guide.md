@@ -45,28 +45,30 @@ await Promise.all([opA, opB])
 - **Fake timers (`vi.useFakeTimers`):** When timing depends on timers, advance virtual time explicitly with `vi.advanceTimersByTimeAsync(...)`.
 
 ## Controlling Interleavings with `execution-points-prototype`
-`select(file, visitor)` picks one expression in a configured target file without editing production code. The visitor receives each selectable expression (`kind`, `callee` for calls, `operator` for binary expressions, `inFunction`, `nth`, `id`) and returns the one it wants. `point.withReplacement(handler, action)` runs `handler` in place of that expression while `action` and the async work it starts are running; `original()` evaluates the real expression. The same placeholder names as above:
+`select(file, visitor)` picks one expression in a configured target file without editing production code. `npx execution-points list <file>` prints every expression you can select, with the fields to select it by and what it stands inside. `point.pause()` holds an operation at that expression until you release it. `point.withReplacement(handler, action)` runs `handler` in place of the expression while `action` and the async work it starts are running; `original()` evaluates the real expression. The same placeholder names as above:
 
 ```ts
 import { select } from 'execution-points-prototype'
 
 // Select by what the expression is: here, the one call to `loadItem` in the file.
 const point = select('src/inventory.ts', (node) => node.callee === 'loadItem' && node)
-// Optional: `.capture('sku')` exposes the listed in-scope locals to the handler as readonly `locals`.
+// Optional: `.capture('sku')` exposes the listed in-scope locals to a handler as readonly `locals`.
 
-const b = createBarrier()
-const opA = point.withReplacement(async ({ original }) => {
-  b.entered(); await b.gate; return original()
-}, () => reserveItem('sku-1'))
-await b.hit
-const opB = restockItem('sku-1', 5) // start WITHOUT awaiting while barrier is held
+const pause = point.pause()
+const opA = pause.run(() => reserveItem('sku-1')) // starts, and waits at loadItem(...)
+await pause.reached // rejects at once if opA finishes without getting there
+const opB = restockItem('sku-1', 5) // start WITHOUT awaiting while opA is held
 await settle()
-b.release()
+pause.release() // opA continues with the real loadItem(...)
 await Promise.all([opA, opB])
 ```
 
+- `pause()` needs an expression whose value is a promise: the call the code awaits. For any other expression, use `withReplacement` with a handler.
 - A selector must match exactly 1 expression. Matching 0 or 2 or more is a loud error (`matched 0` / `matched 2`), at type-check time and at run time, never a silent pass.
-- Select an expression of the code **as it was given to you**, and describe it by the expression itself (`callee`, `operator`). Add `inFunction` or `nth` only when the same callee or operator occurs more than once. The test also has to run against the unfixed code and against other correct fixes, so a selector that depends on a function you add or rename while fixing matches nothing there.
+- A replacement or a pause that never runs fails the test (`ran 0 times`). If a test installs one that is not meant to run on every path, say so: `withReplacement(handler, action, { times: 'any' })`.
+- Select an expression of the code **as it was given to you**, and describe it by the expression itself (`callee`, `operator`). The test also has to run against the unfixed code and against other correct fixes, so a selector that depends on a function you add or rename while fixing matches nothing there.
+- When the same call is written in several functions, say which one by where it stands, with a visitor object: `select('src/inventory.ts', { Function: (fn) => fn.name === 'reserveItem' && fn.traverse({ CallExpression: (call) => call.callee === 'loadItem' && call }) })`. `call.object` is what a call is made on (`cache` in `cache.get(key)`).
+- To run two operations in every order instead of one: `for (const order of interleavings([pointA, pointB])) { /* reset state */ await order.run(() => Promise.all([opA(), opB()])); /* expect(...) */ }`, with `interleavings` imported from the same package. Each selected expression must evaluate to a promise.
 
 ## Rules & Limits
 - **Do not monkey-patch JavaScript or Node.js globals** (`Promise`, `MessageChannel`, `MessagePort`, `Map`, `EventTarget`, `globalThis`, `Object.defineProperty`, `Reflect.defineProperty`, `vi.stubGlobal`). Runtime guards and AST audits fail the run on any global patch.
