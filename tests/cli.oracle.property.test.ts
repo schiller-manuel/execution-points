@@ -69,7 +69,7 @@ const TEMPLATES = [
   { text: 'send(a)', found: [{ kind: 'CallExpression', callee: 'send', at: 0, length: 7 }] },
   { text: 'a + b', found: [{ kind: 'BinaryExpression', operator: '+', at: 0, length: 5 }] },
   { text: 'a ? b : c', found: [{ kind: 'ConditionalExpression', at: 0, length: 9 }] },
-  { text: 'client.load(a)', found: [{ kind: 'CallExpression', callee: 'load', object: 'client', at: 0, length: 14 }] },
+  { text: 'client.load(a)', found: [{ kind: 'CallExpression', callee: 'load', object: [0, 6], at: 0, length: 14 }] },
   {
     text: 'total(a * 2)',
     found: [
@@ -77,7 +77,15 @@ const TEMPLATES = [
       { kind: 'BinaryExpression', operator: '*', at: 6, length: 5 },
     ],
   },
-  { text: 'client?.find(a)', found: [{ kind: 'CallExpression', callee: 'find', object: 'client', at: 0, length: 15 }] },
+  { text: 'client?.find(a)', found: [{ kind: 'CallExpression', callee: 'find', object: [0, 6], at: 0, length: 15 }] },
+  // A call made on a call: the object has a space in it, which the one-line listing has to keep apart from its fields.
+  {
+    text: 'pick(a, b).load(c)',
+    found: [
+      { kind: 'CallExpression', callee: 'load', object: [0, 10], at: 0, length: 18 },
+      { kind: 'CallExpression', callee: 'pick', at: 0, length: 10 },
+    ],
+  },
   // Longer than an excerpt may be.
   {
     text: 'combine(firstArgument, secondArgument, thirdArgument, fourthArgument, fifthArgument)',
@@ -200,7 +208,15 @@ function writeFile(history: ListHistory, index: number): { source: string; entri
         kind: node.kind,
         ...('callee' in node ? { callee: node.callee } : {}),
         ...('operator' in node ? { operator: node.operator } : {}),
-        ...('object' in node ? { object: node.object } : {}),
+        // The object as it is written, on one line.
+        ...('object' in node
+          ? {
+              object: (broken
+                ? text.slice(node.object[0], node.object[1]).replace(/([(,]) ?/g, `$1${newline}${' '.repeat(indent + 2)}`)
+                : text.slice(node.object[0], node.object[1])
+              ).replace(/\s+/g, ' '),
+            }
+          : {}),
         inFunction,
         nth,
         // Every statement declares a constant, so every expression is inside that declarator, and inside its function.
