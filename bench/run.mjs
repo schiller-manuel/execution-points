@@ -14,6 +14,17 @@
  *   node bench/run.mjs --self-test
  *   node bench/run.mjs --tasks stale-cache-seam --models gpt-6.2-astra:medium        # dry-run plan
  *   node bench/run.mjs --run --tasks stale-cache-seam --models gpt-6.2-astra:medium --trials 1
+ *   node bench/run.mjs --regrade <runDir> [--only <trialId,...>] [--out <dir>]        # zero credits
+ *
+ * Options added in v2.4:
+ *   --grade-repeats <n>      runs of every graded variant; all must agree (default 3)
+ *   --credits-per-trial <n>  per-trial estimate for the up-front credit projection; needed
+ *                            for a model:reasoning the stored runs never used
+ *   --only <ids>             with --regrade: trial ids (or substrings) to re-grade
+ *   --out <dir>              with --regrade: write there instead of into the stored run
+ *
+ * The dry-run plan and `--run` both print the projected credit need first. `--run` refuses
+ * a matrix whose projection exceeds `--max-total-credits` (0 turns the cap off).
  */
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
