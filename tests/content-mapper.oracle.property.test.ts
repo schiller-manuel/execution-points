@@ -36,8 +36,10 @@
  * Schiller (GitHub schiller-manuel), 2026-11-23). Each further diagnostic
  * stands at the offending key, value, or entry, and each registry file's
  * nodes are mapped to the entry that lists the file, so an error in the
- * registry is reported there (Decision by Manuel Schiller (GitHub
- * schiller-manuel), 2026-11-24).
+ * registry is reported there and go-to-definition on a node's field lands
+ * there (Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24).
+ * The protocol maps a virtual file only onto its own `.ep` text, so the
+ * manifest entry is the nearest place to the target expression it can name.
  *
  * For every open project, `watchedFiles` are the tsconfig, the listed
  * targets, and every file of the project that the analysis read, without
@@ -331,12 +333,12 @@ function owedDiagnostics(history: ManifestHistory) {
 /** The entries that list at least one file no earlier entry lists, with those files. */
 function owedMappings(history: ManifestHistory) {
   const seen = new Set<string>()
-  const owed: Array<{ original: string; files: Array<string> }> = []
+  const owed: Array<{ original: string; asAWhole: boolean; definitionLandsHere: boolean; files: Array<string> }> = []
   for (const token of history.tokens) {
     if (typeof token === 'string' || !('entry' in token)) continue
     const fresh = token.matches.filter((file) => !seen.has(file))
     for (const file of fresh) seen.add(file)
-    if (fresh.length) owed.push({ original: token.entry, files: [...fresh].sort() })
+    if (fresh.length) owed.push({ original: token.entry, asAWhole: true, definitionLandsHere: true, files: [...fresh].sort() })
   }
   return owed
 }
@@ -346,7 +348,7 @@ oracleProperty({
   owns: ['src/content-mapper.mjs#parseManifest', 'src/content-mapper.mjs#transform', 'src/content-mapper.mjs#scanProject'],
   law: {
     statement:
-      'For every manifest, either the registry reflects exactly the listed targets that exist, or a diagnostic names what is wrong: empty content is an empty registry with no diagnostic, invalid JSON is diagnostic 90100, JSON that is not an object with a "targets" array is diagnostic 90101, and an unknown key, a wrong value, an entry that is not a string, and an entry that matches no file each get a diagnostic at that text. Each registry file’s nodes are mapped to the entry that lists the file.',
+      'For every manifest, either the registry reflects exactly the listed targets that exist, or a diagnostic names what is wrong: empty content is an empty registry with no diagnostic, invalid JSON is diagnostic 90100, JSON that is not an object with a "targets" array is diagnostic 90101, and an unknown key, a wrong value, an entry that is not a string, and an entry that matches no file each get a diagnostic at that text. Each registry file’s nodes are mapped to the entry that lists the file, for diagnostics and for go-to-definition.',
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: for every manifest, either the registry reflects exactly the listed targets that exist, or a diagnostic names what is wrong; registry lines are mapped to something useful. Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-23: Law M1 (90100 for invalid JSON, 90101 for JSON that is not an object with a "targets" array).',
     limits:
@@ -432,8 +434,11 @@ oracleProperty({
         registryErrors: registry.registryErrors,
         files: registry.files,
         // A segment is [virtualStart, virtualLength, originalStart, originalLength, kind, features].
-        mappings: result.mappings.map(([virtualStart, virtualLength, originalStart, originalLength]) => ({
+        // Kind 1 maps the block as a whole; feature bit 8 is go-to-definition, and no bit means diagnostics only.
+        mappings: result.mappings.map(([virtualStart, virtualLength, originalStart, originalLength, kind, features]) => ({
           original: content.slice(originalStart, originalStart + originalLength),
+          asAWhole: kind === 1,
+          definitionLandsHere: features === 8,
           files: registry.plan.files
             .filter((entry) =>
               entry.nodes.some((node) =>

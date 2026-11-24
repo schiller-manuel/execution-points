@@ -12,7 +12,10 @@ const getApi = () => (sharedApi ??= new API())
 const safeRead = (file) => { try { return readFileSync(file, 'utf8') } catch { return undefined } }
 
 const SHAPE = 'points.ep must contain a JSON object with a "targets" array.'
+// Span map: a segment of kind "atom" maps a block as a whole; the feature mask says which editor
+// requests follow the mapping. Diagnostics always do.
 const SPAN_ATOM = 1
+const FEATURE_DEFINITION = 8
 
 /**
  * Read a manifest. `targets` holds one entry for each listed target that is a
@@ -90,7 +93,10 @@ export function parseManifest(content, manifestFile, root = path.dirname(manifes
 /**
  * The registry for a manifest, with the files in the order of the entries
  * that list them, and each file's nodes mapped to its entry: an error inside
- * the registry is then reported at the target that caused it.
+ * the registry is then reported at the target that caused it, and
+ * go-to-definition on a node's field lands there. The protocol maps a virtual
+ * file only onto its own `.ep` text, so the entry is as near to the target
+ * expression as a mapping can point.
  */
 function analyze(root, tsconfigHint, manifestFile, content, cache) {
   const manifest = parseManifest(content, manifestFile, root)
@@ -112,7 +118,7 @@ function analyze(root, tsconfigHint, manifestFile, content, cache) {
     const target = manifest.targets[order.get(span.file)]
     const last = mappings.at(-1)
     if (last?.[2] === target.start) last[1] = span.end - last[0]
-    else mappings.push([span.start, span.end - span.start, target.start, target.length, SPAN_ATOM, 0])
+    else mappings.push([span.start, span.end - span.start, target.start, target.length, SPAN_ATOM, FEATURE_DEFINITION])
   }
   return { manifest, plan, registry, mappings }
 }

@@ -159,6 +159,50 @@ function driveProject(
   }
 }
 
+/**
+ * Fixtures share a project where they can. Each fixture is written as a
+ * project of its own, with the target `src/app.ts`; fixtures with the same
+ * compiler options become the modules of one project, each file under its
+ * fixture's name. One TypeScript program then serves them all, and the
+ * registry holds several files, as a real one does.
+ */
+function combine<Fixture extends ProjectHistory>(
+  fixtures: ReadonlyArray<Fixture>,
+): Array<ProjectHistory & { fixtures: Readonly<Record<string, Fixture>> }> {
+  const groups = new Map<string, ProjectHistory & { fixtures: Record<string, Fixture> }>()
+  for (const fixture of fixtures) {
+    const options = fixture.compilerOptions ?? {}
+    const name =
+      Object.entries(options)
+        .map(([option, value]) => `${option}=${[value].flat().join('+')}`)
+        .join(',') || 'default-options'
+    const group =
+      groups.get(name) ??
+      ({ name, states: [], files: {}, targets: [], compilerOptions: options, fixtures: {} } as ProjectHistory & {
+        fixtures: Record<string, Fixture>
+      })
+    groups.set(name, group)
+    const targets = fixture.targets ?? ['src/app.ts']
+    const files = group.files as Record<string, string>
+    for (const [file, text] of Object.entries(fixture.files)) {
+      if (targets.includes(file)) {
+        const renamed = `src/${fixture.name}${file.slice(file.lastIndexOf('.'))}`
+        files[renamed] = text
+        ;(group.targets as Array<string>).push(renamed)
+        group.fixtures[renamed] = fixture
+      } else {
+        files[file.startsWith('src/') ? `src/${fixture.name}.${file.slice(4)}` : file] = text
+      }
+    }
+    group.states = [...new Set([...group.states, ...fixture.states])]
+  }
+  return [...groups.values()]
+}
+
+/** The first node of one fixture's module in a registry view. */
+const nodeOf = (nodes: Record<string, unknown>, fixture: string, containing = '') =>
+  Object.keys(nodes).find((id) => id.startsWith(`src/${fixture}.`) && id.includes(containing))!
+
 const judge =
   (law: string) =>
   (_history: unknown, observations: ReadonlyArray<Observation>, expected: unknown) => {
@@ -265,7 +309,7 @@ const nodeCallsSource = NODE_CALLS.map(([module, call], index) => {
   return `import { ${imported} as ${local} } from '${module}'\nexport function call${index}() { return ${call.replace(imported, local)} }\n`
 }).join('')
 
-const FIT_HISTORIES: ReadonlyArray<ProjectHistory> = [
+const FIT_FIXTURES: ReadonlyArray<ProjectHistory> = [
   {
     // F1: `Stats`, `Server`, `Context`, ... are declared inside `declare module "..."`.
     name: 'node-builtin-module-types',
@@ -480,10 +524,10 @@ oracleProperty({
     authority:
       'Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the generated registry compiled as .ts beside the target has no diagnostics of its own, and each node’s result and locals are mutually assignable with the type TypeScript gives the original expression. README.md:7 and README.md:61 state the same promise.',
     limits:
-      'The histories are twelve projects, each with every node checked: 38 Node built-in calls, enum members, project globals, ambient declarations, symbol keys, private aliases, class and enum objects, a package, a byte-order mark, exact optional members, and template types. A local the expression does not mention is compared with its declared type.',
+      'The histories are twelve fixtures in three projects, one for each set of compiler options, each with every node checked: 38 Node built-in calls, enum members, project globals, ambient declarations, symbol keys, private aliases, class and enum objects, a package, a byte-order mark, exact optional members, and template types. A local the expression does not mention is compared with its declared type.',
   },
   histories: {
-    enumerated: FIT_HISTORIES,
+    enumerated: combine(FIT_FIXTURES),
     states: [
       'type-from-ambient-module',
       'enum-member-type',
@@ -508,24 +552,26 @@ oracleProperty({
     {
       name: 'a-name-that-does-not-resolve',
       law: 'registry compiles and fits',
-      history: { enumerated: 'node-builtin-module-types' },
+      history: { enumerated: 'exactOptionalPropertyTypes=true' },
       corrupt: corruptRegistry((value) => ({ ...value, registryErrors: ["TS2304: Cannot find name 'Stats'."] })),
     },
     {
       name: 'a-result-of-another-type',
       law: 'registry compiles and fits',
-      history: { enumerated: 'exported-enum-members' },
+      history: { enumerated: 'default-options' },
       corrupt: corruptRegistry((value) => {
-        const first = Object.keys(value.nodes)[0]!
-        value.nodes[first].result = 'not assignable'
+        value.nodes[nodeOf(value.nodes, 'exported-enum-members')].result = 'not assignable'
         return value
       }),
     },
     {
       name: 'a-file-missing-from-the-registry',
       law: 'registry compiles and fits',
-      history: { enumerated: 'target-with-byte-order-mark' },
-      corrupt: corruptRegistry((value) => ({ ...value, nodes: {} })),
+      history: { enumerated: 'default-options' },
+      corrupt: corruptRegistry((value) => {
+        for (const id of Object.keys(value.nodes)) if (id.startsWith('src/target-with-byte-order-mark.')) delete value.nodes[id]
+        return value
+      }),
     },
   ],
 })
@@ -535,7 +581,7 @@ oracleProperty({
 // their shape and their modifiers
 // ---------------------------------------------------------------------------
 
-const CONSTRUCT_HISTORIES: ReadonlyArray<ProjectHistory> = [
+const CONSTRUCT_FIXTURES: ReadonlyArray<ProjectHistory> = [
   {
     name: 'primitives-and-literals',
     states: ['scalar-types'],
@@ -649,10 +695,10 @@ oracleProperty({
     authority:
       'README.md:172 ("emit virtual ExecutionPointFileRegistry") and Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-22: emit any, tuple elementFlags, and IndexInfo.valueType. Decision by Manuel Schiller (GitHub schiller-manuel), 2026-11-24: the comparison is mutual assignability with the type TypeScript gives the original expression, in place of the emitted text.',
     limits:
-      'Local generic type parameters without concrete instantiations and inline objects with more than 24 properties are not emitted; histories are bounded-exhaustive over seven projects of type constructs. The readonly and ? modifiers are compared three levels deep.',
+      'Local generic type parameters without concrete instantiations and inline objects with more than 24 properties are not emitted; histories are bounded-exhaustive over seven modules of type constructs in one project. The readonly and ? modifiers are compared three levels deep.',
   },
   histories: {
-    enumerated: CONSTRUCT_HISTORIES,
+    enumerated: combine(CONSTRUCT_FIXTURES),
     states: [
       'scalar-types',
       'any-type',
@@ -671,20 +717,18 @@ oracleProperty({
     {
       name: 'a-tuple-that-lost-readonly',
       law: 'primitive-and-collection-types',
-      history: { enumerated: 'tuples' },
+      history: { enumerated: 'default-options' },
       corrupt: corruptRegistry((value) => {
-        const first = Object.keys(value.nodes)[0]!
-        value.nodes[first].result = 'not assignable'
+        value.nodes[nodeOf(value.nodes, 'tuples', ':ro:')].result = 'not assignable'
         return value
       }),
     },
     {
       name: 'a-member-that-lost-readonly',
       law: 'primitive-and-collection-types',
-      history: { enumerated: 'objects-with-optional-and-readonly-members' },
+      history: { enumerated: 'default-options' },
       corrupt: corruptRegistry((value) => {
-        const first = Object.keys(value.nodes)[0]!
-        value.nodes[first].result = 'modifiers differ'
+        value.nodes[nodeOf(value.nodes, 'objects-with-optional-and-readonly-members')].result = 'modifiers differ'
         return value
       }),
     },
@@ -712,7 +756,7 @@ export function work(user: User | null, kind: 'a' | 'b' | 'c') {${body}
   },
 })
 
-const NARROWING_HISTORIES: ReadonlyArray<ProjectHistory> = [
+const NARROWING_FIXTURES: ReadonlyArray<ProjectHistory> = [
   narrowingProject(
     'truthiness-throw-guard',
     'narrowed-by-throw-guard',
@@ -775,7 +819,7 @@ oracleProperty({
       'Assertion calls must be direct ExpressionStatements in their enclosing block, case clause, or file. The narrowed type is the one TypeScript gives the first reference to the local inside the expression.',
   },
   histories: {
-    enumerated: NARROWING_HISTORIES,
+    enumerated: combine(NARROWING_FIXTURES),
     states: [
       'narrowed-by-throw-guard',
       'narrowed-by-type-predicate',
@@ -813,10 +857,9 @@ oracleProperty({
     {
       name: 'un-narrowed-nullable-user',
       law: 'control-flow-narrowing',
-      history: { enumerated: 'truthiness-throw-guard' },
+      history: { enumerated: 'default-options' },
       corrupt: corruptRegistry((value) => {
-        const send = Object.keys(value.nodes).find((id) => id.includes(':send:'))!
-        value.nodes[send].locals.user = 'not assignable'
+        value.nodes[nodeOf(value.nodes, 'truthiness-throw-guard', ':send:')].locals.user = 'not assignable'
         return value
       }),
     },
@@ -862,7 +905,7 @@ export interface Quote { total: number }
 function target(): Quote { return { total: 1 } }
 export function work() { return target() }`
 
-const IDENTITY_HISTORIES: ReadonlyArray<IdentityHistory> = [
+const IDENTITY_FIXTURES: ReadonlyArray<IdentityHistory> = [
   identity('exported-interface', 'named-by-export', true, false, QUOTE_MODULE),
   identity('exported-interface-in-mts', 'named-by-export', true, false, QUOTE_MODULE, { targets: ['src/app.mts'] }),
   identity('exported-interface-in-cts', 'named-by-export', true, false, QUOTE_MODULE, {
@@ -1144,7 +1187,7 @@ oracleProperty({
       'An export-anchored path is searched four steps deep through non-generic, single-signature functions, promise results, array elements, nullable unions, and objects with up to 24 properties. Sameness is the identity of the type in one TypeScript program; a branded copy is checked for not being assignable in either direction and for keeping exactly the public members.',
   },
   histories: {
-    enumerated: IDENTITY_HISTORIES,
+    enumerated: combine(IDENTITY_FIXTURES),
     states: ['named-by-export', 'named-by-export-anchored-path', 'named-globally', 'copied-structurally', 'copied-with-brand'],
   },
   label: (history) => history.name,
@@ -1158,21 +1201,25 @@ oracleProperty({
     targets: Object.fromEntries(
       planOf(trace)
         .filter((node) => node.callee === 'target')
-        .map((node) => [
-          node.id,
-          {
-            unportable: null,
-            result: history.nameable ? 'same' : history.nominal ? 'not assignable' : 'equivalent',
-            members: history.nameable ? null : history.nominal ? [...history.publicMembers!].sort() : null,
-          },
-        ]),
+        .map((node) => {
+          const fixture = history.fixtures[node.id.slice(0, node.id.indexOf('#'))]!
+          return [
+            node.id,
+            {
+              unportable: null,
+              result: fixture.nameable ? 'same' : fixture.nominal ? 'not assignable' : 'equivalent',
+              members: !fixture.nameable && fixture.nominal ? [...fixture.publicMembers!].sort() : null,
+            },
+          ]
+        }),
     ),
   }),
   driver: (history, observe) =>
     driveProject(history, observe, (reading) => {
       const view = identityView(reading)
-      for (const target of Object.values(view.targets)) {
-        if (!(history.nominal && !history.nameable)) target.members = null
+      for (const [id, target] of Object.entries(view.targets)) {
+        const fixture = history.fixtures[id.slice(0, id.indexOf('#'))]!
+        if (fixture.nameable || !fixture.nominal) target.members = null
       }
       return view
     }),
@@ -1181,27 +1228,27 @@ oracleProperty({
     {
       name: 'a-copy-where-the-type-has-a-name',
       law: 'export-paths-and-helpers',
-      history: { enumerated: 'exported-interface' },
+      history: { enumerated: 'default-options' },
       corrupt: corruptRegistry((value) => {
-        for (const target of Object.values<any>(value.targets)) target.result = 'equivalent'
+        value.targets[nodeOf(value.targets, 'exported-interface')].result = 'equivalent'
         return value
       }),
     },
     {
       name: 'a-nominal-copy-without-its-brand',
       law: 'export-paths-and-helpers',
-      history: { enumerated: 'private-class-with-private-members' },
+      history: { enumerated: 'default-options' },
       corrupt: corruptRegistry((value) => {
-        for (const target of Object.values<any>(value.targets)) target.result = 'equivalent'
+        value.targets[nodeOf(value.targets, 'private-class-with-private-members')].result = 'equivalent'
         return value
       }),
     },
     {
       name: 'a-copy-that-leaks-a-private-member',
       law: 'export-paths-and-helpers',
-      history: { enumerated: 'private-class-with-private-members' },
+      history: { enumerated: 'default-options' },
       corrupt: corruptRegistry((value) => {
-        for (const target of Object.values<any>(value.targets)) target.members = ['id', 'open', 'secret']
+        value.targets[nodeOf(value.targets, 'private-class-with-private-members')].members = ['id', 'open', 'secret']
         return value
       }),
     },
@@ -1820,7 +1867,7 @@ oracleProperty({
   ],
   // After the last edit the project is an ordinary one, so the registry must
   // also fit it: the cold run is checked, not only repeated.
-  model: (edits, trace) => ({ steps: edits.length, final: fitModel(edits, trace) }),
+  model: (edits, trace) => ({ final: fitModel(edits, trace) }),
   driver: (edits, observe) => {
     const root = createProject(
       Object.fromEntries(Object.values(EDITABLE).map(({ file, variants }) => [file, variants[0]])),
@@ -1844,9 +1891,10 @@ oracleProperty({
         }
         writeFileSync(join(root, EDITABLE[edit.file].file), EDITABLE[edit.file].variants[edit.variant]!)
         last = generate(true)
-        observe('warm', last.text)
-        observe('cold', generate(false).text)
       }
+      // Every prefix of a sequence is a sequence of its own, so one comparison at the end covers them all.
+      observe('warm', last.text)
+      observe('cold', generate(false).text)
       observe('plan', plannedNodes(last.plan))
       observe('final', fitView(compileRegistry(api, root, last.text, last.plan).reading))
     } catch (error) {
@@ -1860,15 +1908,12 @@ oracleProperty({
     const law = 'warm registry equals cold'
     const crash = observations.find((entry) => entry.checkpoint === 'crash')
     if (crash) return differs('crash', law, crash.value, 'no crash') ?? pass
-    const warm = observations.filter((entry) => entry.checkpoint === 'warm')
-    const cold = observations.filter((entry) => entry.checkpoint === 'cold')
-    const steps = differs('warm', law, warm.length, expected.steps)
-    if (steps) return steps
-    for (const [index, entry] of warm.entries()) {
-      const stale = differs('warm', law, entry.value, cold[index]?.value, `the warm registry differs from the cold one after edit ${index + 1}`)
-      if (stale) return stale
-    }
-    return differs('final', law, observations.find((entry) => entry.checkpoint === 'final')?.value, expected.final) ?? pass
+    const read = (checkpoint: string) => observations.find((entry) => entry.checkpoint === checkpoint)?.value
+    return (
+      differs('warm', law, read('warm'), read('cold'), 'the warm registry differs from the cold one after the edits') ??
+      differs('final', law, read('final'), expected.final) ??
+      pass
+    )
   },
   calibrations: [
     {
@@ -1876,11 +1921,7 @@ oracleProperty({
       law: 'warm registry equals cold',
       history: { constructed: 'imported-file-then-target' },
       corrupt: (trace) =>
-        trace.map((entry, index) =>
-          entry.checkpoint === 'warm' && index === trace.findIndex((other) => other.checkpoint === 'warm')
-            ? { ...entry, value: `${String(entry.value)}// stale` }
-            : entry,
-        ),
+        trace.map((entry) => (entry.checkpoint === 'warm' ? { ...entry, value: `${String(entry.value)}// stale` } : entry)),
     },
   ],
 })
