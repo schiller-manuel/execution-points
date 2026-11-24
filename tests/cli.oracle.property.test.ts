@@ -69,7 +69,7 @@ const TEMPLATES = [
   { text: 'send(a)', found: [{ kind: 'CallExpression', callee: 'send', at: 0, length: 7 }] },
   { text: 'a + b', found: [{ kind: 'BinaryExpression', operator: '+', at: 0, length: 5 }] },
   { text: 'a ? b : c', found: [{ kind: 'ConditionalExpression', at: 0, length: 9 }] },
-  { text: 'client.load(a)', found: [{ kind: 'CallExpression', callee: 'load', at: 0, length: 14 }] },
+  { text: 'client.load(a)', found: [{ kind: 'CallExpression', callee: 'load', object: 'client', at: 0, length: 14 }] },
   {
     text: 'total(a * 2)',
     found: [
@@ -77,7 +77,7 @@ const TEMPLATES = [
       { kind: 'BinaryExpression', operator: '*', at: 6, length: 5 },
     ],
   },
-  { text: 'client?.find(a)', found: [{ kind: 'CallExpression', callee: 'find', at: 0, length: 15 }] },
+  { text: 'client?.find(a)', found: [{ kind: 'CallExpression', callee: 'find', object: 'client', at: 0, length: 15 }] },
   // Longer than an excerpt may be.
   {
     text: 'combine(firstArgument, secondArgument, thirdArgument, fourthArgument, fifthArgument)',
@@ -149,8 +149,11 @@ interface Entry {
   kind: string
   callee?: string
   operator?: string
+  object?: string
   inFunction: string | null
   nth: number
+  /** What the expression stands inside, outermost first. The one-line listing leaves the lines out. */
+  inside: Array<{ type: string; name: string; line?: number }>
   text: string
 }
 
@@ -169,9 +172,11 @@ function writeFile(history: ListHistory, index: number): { source: string; entri
   const counts = new Map<string, number>()
   let variable = 0
 
-  const statement = (inFunction: string | null, { template, indent, broken }: StatementSpec, exported = false) => {
+  const statement = (around: { name: string; line: number } | null, { template, indent, broken }: StatementSpec, exported = false) => {
+    const inFunction = around?.name ?? null
     const { text, found } = TEMPLATES[template]!
-    const lead = `${' '.repeat(indent)}${exported ? 'export ' : ''}const v${(variable += 1)} = `
+    const constant = `v${(variable += 1)}`
+    const lead = `${' '.repeat(indent)}${exported ? 'export ' : ''}const ${constant} = `
     // Broken over lines, the expression's text has a line break and an indent after each `(` and `,`.
     const written = broken ? text.replace(/([(,]) ?/g, `$1${newline}${' '.repeat(indent + 2)}`) : text
     const startLine = lines.length + 1
@@ -195,8 +200,14 @@ function writeFile(history: ListHistory, index: number): { source: string; entri
         kind: node.kind,
         ...('callee' in node ? { callee: node.callee } : {}),
         ...('operator' in node ? { operator: node.operator } : {}),
+        ...('object' in node ? { object: node.object } : {}),
         inFunction,
         nth,
+        // Every statement declares a constant, so every expression is inside that declarator, and inside its function.
+        inside: [
+          ...(around ? [{ type: 'Function', name: around.name, ...(history.json ? { line: around.line } : {}) }] : []),
+          { type: 'VariableDeclarator', name: constant, ...(history.json ? { line: startLine } : {}) },
+        ],
         text: whole.length > EXCERPT_LENGTH ? `${whole.slice(0, EXCERPT_LENGTH - 1)}…` : whole,
       })
     }
@@ -210,7 +221,8 @@ function writeFile(history: ListHistory, index: number): { source: string; entri
   for (const fn of spec.functions) {
     const name = FUNCTION_NAMES[fn.name]!
     lines.push(`function ${name}(a, b, c) {`)
-    fn.statements.forEach((each) => statement(name, each))
+    const around = { name, line: lines.length }
+    fn.statements.forEach((each) => statement(around, each))
     lines.push('}')
   }
   return {
@@ -246,7 +258,10 @@ function parseLine(line: string): Entry | { unreadable: string } {
   const [place, fields, ...text] = line.split('  ')
   const position = /^(.*):(\d+):(\d+)$/.exec(place ?? '')
   if (!position || fields === undefined) return { unreadable: line }
-  const named = Object.fromEntries(fields.split(' ').map((field) => field.split(/=(.*)/s).slice(0, 2) as [string, string]))
+  // A value with a space in it is written in JSON quotes.
+  const named = Object.fromEntries(
+    [...fields.matchAll(/(\w+)=("(?:[^"\\]|\\.)*"|\S*)/g)].map(([, name, value]) => [name!, value!.startsWith('"') ? (JSON.parse(value!) as string) : value!]),
+  )
   return {
     file: position[1]!,
     line: Number(position[2]),
@@ -255,8 +270,14 @@ function parseLine(line: string): Entry | { unreadable: string } {
     kind: named.kind!,
     ...(named.callee === undefined ? {} : { callee: named.callee }),
     ...(named.operator === undefined ? {} : { operator: named.operator }),
+    ...(named.object === undefined ? {} : { object: named.object }),
     inFunction: named.inFunction === 'null' ? null : named.inFunction!,
     nth: Number(named.nth),
+    // `inside=Function:checkout>VariableDeclarator:v1`, or `inside=` at the top of the file.
+    inside: (named.inside ?? '')
+      .split('>')
+      .filter(Boolean)
+      .map((step) => ({ type: step.slice(0, step.indexOf(':')), name: step.slice(step.indexOf(':') + 1) })),
     text: text.join('  '),
   }
 }

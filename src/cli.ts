@@ -7,8 +7,9 @@ import { type IndexedFile, type IndexedNode, indexTargetFile, loadManifest, reso
 const usage = `Usage: execution-points list [file] [--json]
 
 Lists what a test can select in the target modules that points.ep names: one line for each
-expression, with its place, the fields that select(file, visitor) hands to the visitor, and
-its text.
+expression, with its place, the fields that select(file, visitor) hands to the visitor, the
+functions, classes and declarations it stands inside (what a visitor traverses into), and its
+text.
 
   file     list this target only; without it, every target
   --json   print the entries as one JSON array`
@@ -22,8 +23,11 @@ export interface ListedExpression {
   readonly kind: IndexedNode['kind']
   readonly callee?: string
   readonly operator?: string
+  readonly object?: string
   readonly inFunction: string | null
   readonly nth: number
+  /** The functions, classes and variable declarators the expression stands inside, outermost first. */
+  readonly inside: ReadonlyArray<{ readonly type: string; readonly name: string; readonly line: number }>
   readonly text: string
 }
 
@@ -35,9 +39,11 @@ export interface RunOptions {
 
 /** One expression as the command reports it: where an editor shows it, what a visitor sees of it, and its text on one line. */
 function entryOf(
-  { source, relativeFile }: IndexedFile,
-  { id, kind, callee, operator, inFunction, nth, line, text, start }: IndexedNode,
+  { source, relativeFile, nodes, containers }: IndexedFile,
+  node: IndexedNode,
 ): ListedExpression {
+  const { id, kind, callee, operator, object, inFunction, nth, line, text, start } = node
+  const index = nodes.indexOf(node)
   // A byte-order mark is no character of the first line.
   const linesBefore = source.slice(source.charCodeAt(0) === 0xfeff ? 1 : 0, start).split(/\r\n|\r|\n/)
   return {
@@ -48,15 +54,20 @@ function entryOf(
     kind,
     ...(callee !== undefined ? { callee } : {}),
     ...(operator !== undefined ? { operator } : {}),
+    ...(object !== undefined ? { object } : {}),
     inFunction,
     nth,
+    inside: containers.filter((container) => container.nodes.includes(index)).map(({ type, name, line: at }) => ({ type, name, line: at })),
     text,
   }
 }
 
 /** The line for one entry: its place, its fields under the names a visitor reads, and its text. */
-function lineOf({ file, line, column, id, text, ...fields }: ListedExpression): string {
-  const named = Object.entries(fields).map(([name, value]) => `${name}=${value}`)
+function lineOf({ file, line, column, id, text, inside, ...fields }: ListedExpression): string {
+  // A value with a space in it is written in JSON quotes, so that the fields stay apart.
+  const named = Object.entries({ ...fields, inside: inside.map(({ type, name }) => `${type}:${name}`).join('>') }).map(
+    ([name, value]) => `${name}=${/\s/.test(String(value)) ? JSON.stringify(value) : value}`,
+  )
   // The id is the longest field and the least read one, so it comes last.
   return `${file}:${line}:${column}  ${named.join(' ')} id=${id}  ${text}`
 }
