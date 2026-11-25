@@ -1,13 +1,15 @@
 // Shared helpers for probes. Every probe runs against the UNCHANGED repo code.
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 export const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-// Throwaway projects live outside the repository, under the OS temp directory.
+// Throwaway projects live outside the repository, under the OS temp directory, and go when the
+// probe ends: a sweep of all probes left 237 directories behind before this line was here.
 export const WORK = realpathSync(mkdtempSync(join(tmpdir(), 'ep-probe-')))
+process.on('exit', () => rmSync(WORK, { recursive: true, force: true }))
 
 export const { executionPoints } = await import(`${REPO}/src/plugin.ts`)
 export const runtime = await import(`${REPO}/src/runtime.ts`)

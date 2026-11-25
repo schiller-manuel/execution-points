@@ -8,13 +8,14 @@
 // whether the compiler ended up with exactly the intended expression, and how long the check of
 // 40 selections takes.
 import { join } from 'node:path'
-import { mkdtempSync, realpathSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { API, ModuleKind, ModuleResolutionKind } from 'typescript/sync'
 import { createFileSystemLayer } from 'typescript/fs'
 import { ScriptTarget } from 'typescript/ast'
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'ep-probe-follow-')))
+process.on('exit', () => rmSync(root, { recursive: true, force: true }))
 
 // One member per expression. `flat` is today's shape; `nested` is the shape of a Babel or ESTree
 // node (`node.callee.object.name`) with its enclosing function and class as a parent chain.
