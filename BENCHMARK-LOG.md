@@ -443,3 +443,56 @@ The maintainer asked for the full run with all models in place of a pilot. Regis
 - Projected credits per replicate: 4,059.9 for the trials, 4,907.5 with the 20% margin and two preflights; cap per replicate 5,500.
 - The number of replicates is fixed. An outside stop (usage limit, sleep, crash) ends the series, and what was started is analyzed as written.
 - Known beforehand: the Treatment guide was written against these tasks, and the blocks repeat ten tasks.
+
+### The run (2026-11-24 22:38 to 2026-11-25 19:10, commit `e010b4c`)
+
+Stored in `~/.ep-bench-results/full-v2.6-2026-11-24/`: `rep1` to `rep5` (one complete replicate each), `rep5-attempt1-diskfull` (the interrupted first attempt of the fifth), `rep4-regraded` (a second grading of the fourth), `series.status` (every step with its time), `env.log` (load and free disk space every 30 s from 13:44 on). All rows carry the same commit, a clean tree, and the same harness, calibration, task, lockfile, tool and grader hashes. 1,050 trials in the five complete replicates: none ungradable, no infrastructure failure, no host sleep, no model served other than the one asked for, no disagreement between the three grading runs of any variant.
+
+#### What did not go as registered
+
+1. **The fifth replicate stopped on a full disk, and it was run again. `D-24` says a stopped replicate ends the series and nothing is added.** At 13:37 the grading of replicate 5 failed with `ENOSPC` (the data volume had 3 to 5 GB free of 228 GB, and test runs of other sessions on the machine took the rest): 134 trials graded, 2 marked ungradable by the full disk, 74 not graded. The harness work then put three options to the maintainer (grade the stored agent output, run the replicate again, stop at four) and did not name the registered rule, which is a fourth: analyze the rows as written. The maintainer chose to run it again. Nobody had read a solved rate of any replicate at that point. Both analyses are given below; they agree.
+2. **Replicate 4 was graded twice.** Its grading ran while other sessions loaded the machine (67 minutes against 46 to 50 for replicates 1 to 3). A rule was fixed before any result was read: grade it again from the stored agent output and compare. The second grading (62 minutes, also under load, peaking at 39 on 10 cores) agrees with the first on all 210 trials in every graded field, including the 21 variants that timed out. Load did not change the grading. The second attempt of replicate 5 was graded on a quiet machine (42 minutes).
+3. **`copilot --version` printed three versions over the run** (`1.0.114` at the start of replicate 1, `1.0.115-7` for 2 to 4, `1.0.116-5` for 5), and the harness reads it once per replicate. The `session.start` event of every one of the 1,260 agent sessions reports `copilotVersion` `1.0.114`. The three arms of a block run at the same time, so whatever changed is balanced across arms. The analyzer refuses to pool on this and was run with `--allow-mixed=copilotVersion` (and `regrade` for the second grading of replicate 4).
+
+#### Primary tests: Strata B + C, exact McNemar on `solved`, Holm for two tests
+
+| Analysis | Blocks | Control | Treatment | only T / only C | p | Control | `required` | only R / only C | p |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| As registered: replicates 1 to 4 and the 136 rows of the interrupted fifth | 220 | 199 | 197 | 8 / 10 | 0.81 | 199 | 199 | 9 / 9 | 1.0 |
+| Five complete replicates (the fifth run again) | 245 | 216 | 221 | 13 / 8 | 0.38 | 216 | 220 | 14 / 10 | 0.54 |
+
+Neither test rejects in either analysis; the smaller p would have to be below 0.025. Paired risk differences (Newcombe): Treatment −0.9 pp [−5.0, +3.1] as registered and +2.0 pp [−1.8, +6.0] with five replicates; `required` 0.0 pp [−4.1, +4.1] and +1.6 pp [−2.5, +5.8]. Control solves 88% in these strata, and 9 to 10% of blocks were discordant where the sizing assumed 15 to 20%. At the observed discordance and split, 80% power would need 1,700 to 3,000 blocks. The figures from here on are those of the five complete replicates.
+
+#### Secondary results
+
+| `solved` | Control | Treatment | `required` |
+| --- | --- | --- | --- |
+| Stratum A (105 blocks) | 64 (61.0%) | 87 (82.9%), 27 / 4, p = 0.00003 | 91 (86.7%), 30 / 3, p = 0.000001 |
+| Stratum A, `stale-cache` (35) | 8 | 34 | 35 |
+| Stratum A, `token-session` and `double-submit` (70) | 56 | 53 | 56 |
+| All ten tasks (350) | 280 (80.0%) | 308 (88.0%), 40 / 12, p = 0.0001 | 311 (88.9%), 44 / 13, p = 0.00005 |
+| All ten tasks, the test passes every valid fix (strict gate) | 268 | 263, p = 0.61 | 259, p = 0.34 |
+
+- **The Stratum A result is one task.** `stale-cache` carries all of it. As registered (replicates 1 to 4 and the interrupted fifth) Stratum A reads the same: 64, 87, 91.
+- **Treatment against `required`:** no difference. Strata B + C 221 against 220 (10 / 9, p = 1.0); Stratum A 87 against 91 (p = 0.22); all tasks 308 against 311 (p = 0.69).
+- **Library use.** Treatment: 143 of 350 trials used it in the final test, 104 of 105 in Stratum A and 39 of 245 in Strata B + C (`claude-haiku-5.5` 20 of 70, `gemini-4-neon` 18 of 35, `claude-opus-5.5` 1 of 35, the three `gpt-6.2` settings 0 of 105). Of the 207 that did not, 206 read the guide and wrote no library code at all. `required`: 348 of 350. Operations, Treatment and `required`: `pause` 141 and 330 trials, `withReplacement` 29 and 148, `replace` 1 and 1, `interleavings` 0 and 1.
+- **The library's command.** `npx execution-points …` was run in 103 Treatment trials (106 calls) and 240 `required` trials (254 calls). 13 calls were refused, all from `claude-haiku-5.5`, each chained with something that is not allowed (`cd`, `ls`, `cat`, `npx vitest`, `npx tsc`, `python3`, an assignment); in 9 of those 13 trials the command never ran. All 13 used the library in the final test.
+- **Robustness of the regression tests (E9, adequate reproductions).** On buggy refactors a library test never passed (false greens: Control 4, all on `stale-cache`; Treatment 0; `required` 0), and it stopped testing far more often: all strata Control 4 of 603 (0.7%), Treatment 51 of 685 (7.4%), `required` 65 of 692 (9.4%), nearly all loud breaks. On valid fixes: not green Control 12 of 723 (1.7%), Treatment 46 of 854 (5.4%), `required` 52 of 867 (6.0%). In Stratum A: stopped testing 0.6%, 20.3%, 20.2%; valid fixes rejected 3.1%, 10.4%, 11.2%. `token-session` under the strict gate: Control 34 of 35, Treatment 13, `required` 14. A library test is tied to the expression it selects, and a fix or refactor that moves that expression breaks it loudly.
+- **Credits per trial against Control (paired).** Strata B + C: Treatment +0.83 [+0.14, +1.55], `required` +2.9 [+1.98, +3.95]. Stratum A: −4.52 [−7.05, −2.17] and −4.96 [−7.43, −2.72]. All: −0.77 [−1.62, +0.07] and +0.54 [−0.43, +1.55].
+- **Agents at the time limit:** one of 1,050 (`stale-cache`, Control, `gemini-4-neon`, replicate 4).
+- **Credits spent:** 19,697 for the five complete replicates, 4,020 for the first attempt of the fifth, about 60 for preflights, model checks and the smoke run.
+
+#### Limits
+
+- The result holds for these ten tasks and seven model settings. The Treatment guide was written against these tasks. The Stratum A effect rests on one of three tasks.
+- Five replicates, the model settings and the two primary tests were chosen by the harness work and not reviewed by the maintainer before the run.
+- The rerun of replicate 5 departs from the registered stopping rule (above).
+- The guide and the instructions of the Treatment arm are those of `e010b4c`. The changes meant to raise the use of the library when it is only offered are not in this run.
+
+#### What the run showed about the harness
+
+- **A crash in the grading phase loses evidence.** Result rows are written only in phase 2, and `--regrade` reads its trials from those rows, so a trial that was never graded cannot be re-graded as is. The workspace's files outside `src/` are held in memory only, so the check for changed root files cannot be repeated for such a trial.
+- **Nothing checks the machine.** The harness detects a host sleep and nothing else. Free disk space and load are not looked at before a run or recorded with the rows.
+- **The CLI version is read once per run,** from `copilot --version`, and not from each session's own start event.
+- **`bench/analyze.mjs` hangs on its last section when the discordant blocks split near evenly:** `blocksForPower` scans up to 20,000 blocks, each an exact computation. Everything before that section is printed first, so no result is lost. With a split of 14 / 10 the section took about four minutes; with 8 / 10 (Control against Treatment on the registered rows) it had not finished after ten and was stopped, as was Treatment against `required` (10 / 9). The figures for Treatment against `required` and for the single tasks were computed from the rows with the functions of `bench/stats.mjs`, after checking that the same code reproduces the analyzer's figures for the other comparisons.
+- `bench/export-report.mjs` renders two arms. `toolSha256` still hashes `src/` and `package.json`, not what the Treatment workspace gets.
