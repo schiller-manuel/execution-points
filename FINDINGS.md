@@ -8,16 +8,17 @@ The review started read-only. Since the decisions below, the findings have been 
 
 ## Short version
 
-Where things stand on 2026-11-24:
+Where things stand on 2026-11-25:
 
-- **Every finding from F1 to F18 is fixed or decided.** F18 is fixed on your decision: an expression that several ways lead to is one selection, and its point captures every local that any way captured (`p33`).
+- **Every finding from F1 to F18 is fixed or decided; F19 is new and open (below).** F18 is fixed on your decision: an expression that several ways lead to is one selection, and its point captures every local that any way captured (`p33`).
 - **A node no longer says where it is written.** On your decision `line` and `text` are gone from what a visitor is handed, on expressions and on containers; `object` stays. `execution-points list` prints the line and the text as before, to find an expression by.
 - **The gap check finds nothing.** All 2,117 small changes it tries in the six source files are noticed by a law, and no function is without an owner (commit `eca441d`, 16 oracle files, seed 42). At the start it noticed 1,214 of 1,472.
 - **Zero gaps was not the end.** The gap check cannot change a type declaration and does not invent a wrong design. So I wrote 19 plausible wrong implementations and 38 wrong type declarations by hand. Three of the 19 and four of the 38 passed every oracle: a captured number that follows the application's variable, a captured object that is a copy, a captured local that can be assigned, a single point accepted where a list belongs. Each is held by a law now, and so is the one that was left, F18: 31 of 31 wrong implementations and 44 of 44 wrong declarations are rejected. The same work found that the compile error for `pause()` on an expression that is no promise never printed its reason; it does now.
 - **The API changed shape on your decisions:** TypeScript sources built with `tsdown`, replacements that must run, `pause`, `replace` with `using`, `interleavings` as a generator of orders, selection through a Babel-style visitor object whose nodes carry what the code calls things, `execution-points list`.
 - **Listing a module as a target costs nothing until a test replaces something in it** (F6: 1.0x, from 30 to 120 times slower).
 - **The benchmark harness can measure the new API since v2.5.** v2.4 recognized use of the library only by `withReplacement`, and graded three of Vitest's assertion forms as plain errors. Both are fixed, each with a self-test case that fails on v2.4; see "The harness on the new library".
-- **The three stored benchmark runs are retired, and a full run on the current library is under way in the benchmark thread.** Both are your decisions of 2026-11-24, made there together with the two open grading rules and a third arm in which the agent is told to use the library. Harness v2.6 is built there for them; it is not merged, and I have not verified it. What this file says about the stored runs is kept as the record of the review.
+- **The full benchmark run on the current library is done** (1,050 trials, harness v2.6, 2026-11-24 to 25, at your request in the benchmark thread; the three earlier runs are retired). Where plain Vitest can reach the bug, the library changes nothing that this run can measure: of 245 blocks, 216 are solved without it, 221 with it offered, 220 with it required. Where plain Vitest cannot, it is 64, 87 and 91 of 105, and that whole difference is one task, `stale-cache` (8, 34 and 35 of 35). I recounted every figure quoted in this file from the stored rows (`p34`).
+- **F19, new, from that run: a test written with the library names the helper its expression calls, and breaks when that name moves.** All 1,019 selections that agents wrote compare `callee`. Renaming the helper stopped 112 of the 195 library tests that met such a refactor (`matched 0`), and a valid fix that calls the helper at two places was rejected by 71 of 137 (`matched 2`). Every break is loud; no library test ever passed on buggy code. A selector through the public function and the constant survives the rename and no agent wrote one; nothing survives the second call site today.
 
 ### Where the review started (`b26e2c1`)
 
@@ -45,6 +46,7 @@ Made on 2026-11-24 by Manuel Schiller:
 - "keep object, drop line and text from the selectors." Done (`eca441d`). I took "the selectors" to include the containers, so `Function`, `Class` and `VariableDeclarator` nodes lost their `line` too; say so if you meant expressions only. Discovery still records line and text, because `execution-points list` prints them.
 - F18, "yes fix this". Built as the option I had recommended: the captures of all ways are merged, on the runtime's side and on the compiler's. Done (`eca441d`, `d279bda`); see F18.
 - Benchmark, decided by you in the benchmark thread and reported to me by it. A failed assertion inside `order.run(...)` counts as a reproduction (D-20). `expect.assertions`, `expect.hasAssertions` and a snapshot mismatch count as failed assertions (D-21). The three stored runs are retired as evidence ("drop all store previous runs, they are not relevant anymore"). A third arm, `required`, tells the agent to write the regression tests with the library (D-23). And the run itself: "run the full run with all models etc when you are done setting this up. i want the full results."
+- Benchmark, 2026-11-25: when the fifth replicate stopped on a full disk during grading, you chose to run it again. The registered rule (`D-24`) says a stopped replicate ends the series and the rows are analyzed as written; the benchmark thread did not name that rule when it put the options to you. Both analyses are in `BENCHMARK-LOG.md`, and neither primary test rejects in either.
 
 Still open:
 
@@ -55,6 +57,8 @@ Still open:
 4. Your global pnpm broke during this work (see "Incidents" below); say whether I should repair it.
 5. The wording of the laws written or changed today under your direction that every feature gets oracle coverage. Their rules are the README's and your decisions; the sentences are mine. The five of `tests/types-point.oracle.property.test.ts` (values, waiting, options, results, argument kinds) and `runtime-captured-values`. And the three changed for the two decisions of the evening: `plugin-registers-places-and-containers` (a registration has exactly `id`, `kind`, `inFunction`, `nth`, `callee` or `operator`, and `object`; a container exactly `type`, `name` and what is inside it), `runtime-visitor-object` and `types-visitor-object` (no `line`, no `text`; the captures of all ways; each captured local read once).
 6. One clause in `types-visitor-object` that you did not ask for: the compile error for reading a local that no way captured shows the locals the point does have (`Readonly<{ each: string; }>`). My change for F18 had made the compiler print a type's name there instead, and no oracle noticed, so I made the snippet ask for it. Strike it if a message is not something you want a law about.
+7. F19: what to do about tests that are tied to a helper's name. Three things are possible and none is built: say in the README and the guide to select through the public function and what the value is bound to; a point that stands for several expressions, so that a second call site is no ambiguity; and `interleavings` as the recipe for two operations that race, where the guide teaches `pause`. The second is an API change and yours to decide.
+8. Harness defects the run showed, reported by the benchmark thread and not fixed: a crash during grading leaves trials that cannot be re-graded; nothing checks free disk space or load before a run; the agent CLI's version is read once per run; `bench/analyze.mjs` hangs in its power section when the discordant blocks split near evenly; `bench/export-report.mjs` renders two arms; `toolSha256` hashes `src/` and `package.json`, not what a workspace receives. The guide and instruction changes for the offered arm are also still to come from that thread.
 
 ## Work in progress
 
@@ -74,7 +78,7 @@ Still open:
 | F14 dead-zone captures, F11 skip rule, F12 plugin re-reads, plugin half of F9, `executionPoints()` reading `points.ep`, manifest schema, the `list` command, the plugin adding the Vitest setup module | merged |
 | Selection by a visitor object with nested traversal (F4), plus the receiver of a member call (`object`); `list` shows `object=` and `inside=` | done through discovery, plugin, runtime, registry and CLI, with five new oracles; no gap left in it. `line` and `text` were selector properties too and were removed again on your decision (`eca441d`) |
 | F18: one expression reached on several ways with different captures | done: one selection that captures what any way captured, in the runtime and in the types (`eca441d`, `d279bda`) |
-| Benchmark harness v2.6 (grading decisions D-20 and D-21; the agent CLI refused the guide's `npx execution-points list`, D-22; a third arm that requires the library, D-23) and the full run on the current library | in work in the benchmark thread, on `t3/fix-ab-benchmark-harness`; not merged, and not verified by me |
+| Benchmark harness v2.6 (grading decisions D-20 and D-21; the agent CLI refused the guide's `npx execution-points list`, D-22; a third arm that requires the library, D-23) and the full run on the current library (D-24) | done and merged (`007fd78`); `--self-test` on the merged tree, run by me: `Self-test PASSED: 159 check lines passed, 0 failed`. The run's figures are recounted from the stored rows by `p34` |
 | Every file under `tests/` type-checks under `strict`, without `any` (F17) | done |
 | Schedule exploration: `interleavings(points)` as a generator of orders, with `schedule`, `choose`, and the `InterleavingFailure` error | done |
 | Move to TypeScript built with `tsdown`; drop run-time argument checks the compiler makes | done: every module in `src/` is TypeScript, the package ships `dist/`, and the benchmark self-test passes on it |
@@ -566,6 +570,46 @@ The third row was not in the first report of F18: the compiler was wrong there t
 
 **A defect of my own on the way.** The first version of the type printed its own name in the error for a local that was not captured (`Readonly<ExtractCapturedLocals<CapturedSelection<…> | …>>`), where the error had listed the locals before. Every oracle passed. The snippet for that case now asks for the locals in the message; it failed on that version and passes (`d279bda`).
 
+### F19. A test written with the library is tied to the name of the helper its expression calls
+
+Probe: `p34` (reads the stored rows of the registered run and one task's source; runs no agent and costs nothing).
+
+**Kind:** design limit, measured on the 491 trials of the registered run whose final test uses the library. 422 of them are adequate reproductions, and those are the ones the harness checks against refactors and valid fixes.
+
+**The class.** A selector says which expression it means by what the node carries, and what agents compare is the name of the called function: all 1,019 selections in the 488 library test files compare `callee` (160 also traverse into a function, 53 compare `object`, 45 `nth`, 20 `inFunction`). That name belongs to a private helper. Three changes that leave the behavior under test alone then break the test:
+
+| Change to the code under test | Library tests that broke, of those that met it | What the test run says |
+| --- | --- | --- |
+| The helper is renamed (a refactor, bug still in) | 112 of 195 (57%) | `must match exactly 1 expression; matched 0` |
+| A valid fix calls the helper at two places | 71 of 137 (52%) | `must match exactly 1 expression; matched 2` |
+| A valid fix makes the two operations wait for each other | 21 of 112 (19%) | `Test timed out in 1500ms` |
+
+Over everything the tests were checked against, a library test stopped testing 114 of 981 buggy refactors (11.6%) and rejected 93 of 1,298 valid fixes (7.2%); a plain Vitest test of the control arm 4 of 603 and 12 of 723. These refactors and fixes were written into the benchmark to probe exactly this, so the shares say what happens when such a change comes, not how often it comes.
+
+**What holds.** Every one of the breaks on a refactor is loud. No library test passed on buggy code (control: 4 false greens). That is the decision "a replacement that never runs must be loud" doing its work: the test does not go quietly green, it says that its expression is gone.
+
+**What it costs.** Counting a trial as solved only if its test accepts every valid fix, the arms are level over all ten tasks (268, 263 and 259 of 350 for control, offered and required), and on `token-session` the library arms fall from 33 and 35 of 35 to 13 and 14, with control at 34.
+
+**Why, case by case** (`p34`, on the source of `token-session`):
+
+```text
+## How many expressions each selector matches in token-session (1 is a selection)
+                                             by callee   through the function and the constant
+as the task ships it                         1           1
+the helper renamed (refactor R2)             0           1
+the helper called at two places (fix T4)     2           2
+```
+
+- **The rename** breaks only a selector that names the helper. `Function: getActiveToken` → `VariableDeclarator: raw` → the call names the public function and the constant, and still finds its one expression. That selector exists since the visitor form. No agent wrote it: the README and the guide both advise the shortest selector, which is the callee.
+- **The second call site** breaks both. The test means "the token request", the fix has two of them, and a point is exactly one expression, by law and in the types. Nothing a test can write today survives it.
+- **The timeout** is the pause recipe, not the selector. The test holds one operation at the expression and awaits the other; a fix that makes the other wait for the first never lets that await finish. `interleavings` runs both and tries the orders the code allows, so a fix that allows fewer orders is no deadlock. It was used in 1 of those 491 trials; `pause` in 471.
+
+**Directions, none built** (see "Still open", 7):
+
+1. Guidance: select through the public function and what the value is bound to; treat a private helper's name as the thing most likely to change. This is a README and guide change.
+2. A point over several expressions (every call to this helper inside that function), so that a second call site is still one selection. It changes what `select` promises, so it is your decision; feature idea 12.
+3. Teach `interleavings` for two operations that race, and `pause` for holding one operation while the test does something that does not wait for it.
+
 ### What held
 
 - All baseline checks pass at `b26e2c1`: `pnpm check`, `pnpm test` (353 tests), `pnpm verify` (16 checks), `node bench/run.mjs --self-test` (57 variants, 16 mutants, 8 cheats).
@@ -717,6 +761,7 @@ Ordered by how much evidence there is that users need them. Built: 1, 2, 3, 6, 7
 9. **Schedule exploration.** The grader engine enumerates interleavings over yield points. Offering that on top of `select()` (pick the points, get every ordering, or a seeded sample) would turn a hand-written two-operation race test into a search. This is the largest idea here and the one closest to the tool's purpose.
 10. **Source mappings for the registry**, so registry errors point at the target expression and go-to-definition on a selected node lands there.
 11. **One source of truth for targets:** let `executionPoints()` read `points.ep` by default, and publish a JSON schema for the manifest (F10, F13).
+12. **A point over several expressions** (from F19). `select` insists on exactly one expression. A valid fix that calls the selected helper at a second place made 71 of 137 library tests fail with "matched 2", although every one of them meant both calls. A form that takes all matches (as a Babel visitor visits every node of its type) would replace or pause each of them with one handler; the handler's result type would have to fit them all. Not built: it changes the law that a point is one expression.
 
 ---
 
@@ -724,7 +769,39 @@ Ordered by how much evidence there is that users need them. Built: 1, 2, 3, 6, 7
 
 **Retired on 2026-11-24.** You decided in the benchmark thread that the three stored runs are no longer evidence ("drop all store previous runs, they are not relevant anymore"). This section stays as the record of what the review found in them and of how the harness was repaired. None of its numbers describes the current library. The files in `~/.ep-bench-results/` were not deleted.
 
-**What runs next, as the benchmark thread reported it to me; I have verified none of it.** Harness v2.6 on `t3/fix-ab-benchmark-harness` builds in your two grading decisions (D-20: a library error is graded by its cause when that cause is a failed expectation; D-21: `expect.assertions`, `expect.hasAssertions` and a snapshot mismatch count as failed assertions) and repairs one more defect (D-22: the agent CLI was started with `--deny-tool shell(npx)` in both arms, so the treatment agent was refused the `npx execution-points list` its guide names; v2.5 had tested that command in a plain shell only). Asked how to get agents to use the library more, the thread recommended a third arm in which the agent is told to use it, next to the arm in which it is offered, and changes to the guide after the first results; you agreed, and the arm is built as `required` (D-23). You then asked for the full run with all models. As the thread sized it: 1,050 trials in five passes, three arms, about 20,300 credits and about 18 hours, from that branch with `d279bda` merged in, after its self-test and a live smoke run. It had my all-clear for the machine at about 22:20 on 2026-11-24. Until it ends, no gap check should run on this machine: the grading uses 1,500 ms test timeouts.
+### The full run on the current library (harness v2.6, 2026-11-24 22:38 to 2026-11-25 19:10)
+
+Run by the benchmark thread at your request, from commit `e010b4c` (the library of `d279bda`). Its own record, with every deviation, is the last section of `BENCHMARK-LOG.md`; harness v2.6 and that record are merged (`007fd78`). I ran none of it. What I did: recount the figures below from the 1,050 stored rows with a script of my own (`p34`), which agrees with the thread's report in every figure, and run the self-test on the merged tree (`Self-test PASSED: 159 check lines passed, 0 failed`).
+
+**Design, as registered (`D-24`).** Ten tasks × seven model settings × three arms (control; treatment, where the library is offered; `required`, where the agent is told to use it), five replicates, 350 blocks and 1,050 trials. Two primary tests on `solved` in the seven tasks where plain Vitest has a seam (Strata B + C, 245 blocks): control against treatment and control against `required`, exact McNemar, Holm for two tests.
+
+| Blocks solved | Control | Treatment (offered) | `required` |
+| --- | --- | --- | --- |
+| **Primary: the seven tasks plain Vitest can reach (245)** | 216 | 221 (13 only treatment, 8 only control, p = 0.38) | 220 (14 / 10, p = 0.54) |
+| The three closed-module tasks (105) | 64 | 87 (27 / 4, p = 0.00003) | 91 (30 / 3, p = 0.000001) |
+| of them `stale-cache` (35) | 8 | 34 | 35 |
+| of them `token-session` and `double-submit` (70) | 56 | 53 | 56 |
+| All ten tasks (350) | 280 | 308 | 311 |
+| All ten, and the test accepts every valid fix | 268 | 263 (p = 0.61) | 259 (p = 0.34) |
+
+- **Neither primary test rejects.** Control already solves 88% where it has a seam, and 9 to 10% of the blocks were discordant. The benchmark thread computes that 80% power at this split would need 1,700 to 3,000 blocks.
+- **The closed-module result is one task.** `stale-cache` carries all of it; on the other two the arms are level.
+- **Telling the agent to use the library changes nothing against offering it:** 221 against 220, 87 against 91 (p = 0.22), 308 against 311.
+- **Use when only offered:** 143 of 350 trials, 104 of 105 on the closed-module tasks and 39 of 245 on the others. `required`: 348 of 350. `pause` is the operation in 141 and 330 trials, `withReplacement` in 29 and 148, `interleavings` in 0 and 1. The agent ran `npx execution-points …` in 103 and 240 trials; 13 calls were refused, each chained with a command that is not allowed.
+- **What the library tests are like** is F19: never a false green, and tied to the helper's name.
+- **Cost.** 19,697 credits for the five complete replicates, 4,020 for the interrupted first attempt of the fifth, about 60 for preflights and the smoke run (the thread's figures).
+
+**What did not go as registered** (the thread's account; the log has the detail):
+
+1. Replicate 5 stopped at 13:37 on a full disk during grading (134 trials graded, 2 ungradable, 74 not graded) and was run again on your choice, where `D-24` says a stopped replicate ends the series. As registered (replicates 1 to 4 and the 136 graded rows of the interrupted fifth, 220 blocks) the primary tests read 199 against 197 (p = 0.81) and 199 against 199 (p = 1.0). Both analyses say the same.
+2. Replicate 4 was graded under load from other sessions and graded again from its stored output: identical in all 210 trials.
+3. `copilot --version` printed three versions over the run while every session's own start event reports `1.0.114`; pooling needed `--allow-mixed=copilotVersion,regrade`.
+
+**Limits.** Ten tasks and seven model settings. The treatment guide was written against these tasks. The number of replicates, the model settings and the two primary tests were chosen by the benchmark thread and not reviewed by you before the run. The refactors and fixes that F19 counts were written to probe selector coupling.
+
+**Not verified by me:** anything about how the run was carried out (the live preflights, the credit figures, the re-grade of replicate 4, the analysis as registered). I read rows; I did not rerun `bench/analyze.mjs`, which the thread reports as hanging in its power section for two of the comparisons.
+
+### The three earlier runs (retired)
 
 Everything below is recomputed from the three stored `results.jsonl` files or rerun at zero credits. An independent audit of the harness produced several of the points; each one below was rechecked before it went in, and the ones I did not recheck are listed separately.
 
@@ -827,7 +904,7 @@ Reported by the audit and not rechecked by me, with what v2.4 did about each: a 
 
 ### Should the benchmark be rerun
 
-**Overtaken on 2026-11-24:** you asked for a full run on the current library (see the top of this section). What follows is what I recommended before that. Of the five reasons, the second and the fifth no longer hold: the grading rules are decided, and the API questions that were open are answered. The first, third and fourth are unchanged, and the run's result should be read with them.
+**Overtaken on 2026-11-24:** you asked for a full run on the current library, and it is done (see the top of this section). What follows is what I recommended before that. Of the five reasons, the second and the fifth no longer hold: the grading rules are decided, and the API questions that were open are answered. The first, third and fourth are unchanged, and the run's result should be read with them.
 
 Not as a whole, and not yet.
 
@@ -888,6 +965,7 @@ A small exploratory run before step 4 (`claude-haiku-5.5`, the four tasks where 
 | `p31-mapper-input-ends.mjs` | what the content mapper has to do when its input ends: a closed TypeScript API refuses every later request, closing twice is harmless |
 | `p32-what-the-compiler-says-about-a-point.mjs` | what the compiler says about each thing a test can do with a selected point: 37 calls, 24 of them rejected, and the message each gets |
 | `p33-one-expression-two-captures.mjs` | F18: one expression reached on two ways with the same capture, different ones, overlapping ones, and a capture on one way only; what `tsc` and the test run make of each, and what the compiler says about a local that no way captured |
+| `p34-what-breaks-a-library-test.mjs` | F19, and the recount of the registered benchmark run: blocks solved per arm, library use, why library tests stopped testing or rejected valid fixes, what the selectors compare. Reads `~/.ep-bench-results/full-v2.6-2026-11-24`; without it, only the selector comparison on `token-session` runs |
 
 `probes/lib.mjs`, `probes/types.mjs`, and `probes/e2e.mjs` are shared helpers. `e2e.mjs` builds a real consumer project with the package copied into its `node_modules`, the way `bench/toolchain.mjs` does, and runs the real `tsc` and Vitest on it. A probe that needs what the package ships builds it from the sources into its own temporary directory (`buildLibrary` in `lib.mjs`), so no probe needs `pnpm build` first and none writes the checkout's `dist/`. Each probe removes its temporary directory when it ends; until 2026-11-25 none did, and one sweep of all probes left 237 directories (86 MB) in the OS temp directory.
 
@@ -912,8 +990,11 @@ All 33 probes were rerun on 2026-11-24 after the merge of harness v2.5, and agai
 - 2026-11-24: the full gap check over all six sources is clean (2,114 of 2,114, nothing unowned). Wrong versions written by hand then found what it cannot see: 3 of 19 implementations and 4 of 38 type declarations passed every oracle. New oracle file `types-point` (five laws for what a point's methods take and give back), new law `runtime-captured-values`, five more histories in the type oracle's capture law; `checks/wrong-declarations.mjs` and `checks/wrong-versions/` keep the hand-written wrong versions rerunnable. One defect fixed oracle first: the compile error for `pause()` on an expression that is no promise now says why. New F18 (one expression, two captures). The benchmark harness was re-evaluated on the new library: six defects, v2.5 in work. The short version at the top now says where things stand. The full gap check was run again on that commit (`9210720`): 2,114 of 2,114, nothing unowned.
 - 2026-11-24: benchmark harness v2.5 merged (`9a8e0a9`): library use by any operation on a point (D-18), error types from a reporter of the harness's own (D-19), the guide's `list` command in a treatment workspace, no bench process or probe writing the checkout's `dist/`. Its self-test passes on the merged tree (156 check lines). The stored matrix re-graded with it gives 28/40 against 32/40, the numbers first derived. All 33 probes rerun; the ones that had stopped working are repaired.
 - 2026-11-24: two decisions built, oracle first (`eca441d`, `d279bda`). `line` and `text` are dropped from what a visitor is handed, on expressions and on containers; `object` stays; `execution-points list` prints both as before. F18 is fixed: an expression that several ways lead to is one selection that captures what any way captured, in the runtime and in the types. Three oracle files changed and failed on the unchanged code (25 of 27, 7 of 33 and 8 of 31 tests). Full gap check afterwards: 2,117 of 2,117, nothing unowned. 31 of 31 hand-written wrong implementations and 44 of 44 wrong declarations are rejected. The benchmark section is marked as retired on your decision in the benchmark thread, where harness v2.6 and a full run on the current library are in work.
+- 2026-11-25: the full benchmark run on the current library ended (run by the benchmark thread; 1,050 trials, harness v2.6). Harness v2.6 and the run's record are merged (`007fd78`); self-test on the merged tree: `Self-test PASSED: 159 check lines passed, 0 failed`. Neither primary test rejects (216, 221, 220 of 245); the closed-module difference is `stale-cache` alone. New F19 from the stored rows: library tests are tied to the name of the helper they select by. New probe `p34` recounts the run and shows it. Probes now remove their temporary directories.
 
 ## Incidents
+
+**The disk ran full during the benchmark run (2026-11-25, 13:37).** The grading of the fifth replicate failed with `ENOSPC`; the data volume had 3 to 5 GB free of 228 GB. This repository's share of the disk was about 2.7 GB in all. My own leftovers were 237 temporary probe directories and one backup, about 0.2 GB, which I deleted; the probes clean up after themselves since `cf32084`. The rest of the space belongs to other projects on the machine, which I did not touch.
 
 **The pnpm store on this machine was emptied (cause unknown).** At about 14:55 on 2026-11-24 `~/Library/pnpm/store` became empty and the pnpm shim at `~/Library/pnpm/bin/pnpm` stopped working, because the pnpm it starts was a link into that store. The repository and the delegated checkouts are unaffected (their `node_modules` hold their own files). At that minute a gap check of mine and a delegate's re-grading loop of the benchmark were running; neither the commands I could read nor the harness code touches `~/Library/pnpm`. The harness delegate's own account of that quarter of an hour: no `pnpm` command, one `rm` inside its scratch directory, and benchmark processes that delete only temp directories they created. The type-generation delegate's account: it ran `pnpm verify`, which ended at 14:55:07, the second that `~/Library/pnpm` was last modified; the store directory changed at 14:55:35, while only `node probes/…` was running there; its next `pnpm` call at 14:56:56 already failed. So the closest thing to a cause is pnpm's own launcher during an ordinary `pnpm verify`. `node_modules` here was created by pnpm 12.21.0, and the shim may have been switching versions; that is a guess, not a finding. The disk was 93% full. `/opt/homebrew/bin/pnpm` still works. Until this is repaired, the validation commands run through Node directly: `node node_modules/typescript/bin/tsc --noEmit --runExternalCode`, `node checks/verify.mjs`, and `node node_modules/@tanstack/oracles/oracle-gaps/index.mjs --package . --source … --seed 42`.
 
