@@ -10,7 +10,7 @@ The review started read-only. Since the decisions below, the findings have been 
 
 Where things stand on 2026-11-25:
 
-- **Every finding from F1 to F18 is fixed or decided; F19 is new and open (below).** F18 is fixed on your decision: an expression that several ways lead to is one selection, and its point captures every local that any way captured (`p33`).
+- **Every finding from F1 to F19 is fixed or decided.** F18 is fixed on your decision: an expression that several ways lead to is one selection, and its point captures every local that any way captured (`p33`).
 - **A node no longer says where it is written.** On your decision `line` and `text` are gone from what a visitor is handed, on expressions and on containers; `object` stays. `execution-points list` prints the line and the text as before, to find an expression by.
 - **The gap check finds nothing.** All 2,117 small changes it tries in the six source files are noticed by a law, and no function is without an owner (commit `eca441d`, 16 oracle files, seed 42). At the start it noticed 1,214 of 1,472.
 - **Zero gaps was not the end.** The gap check cannot change a type declaration and does not invent a wrong design. So I wrote 19 plausible wrong implementations and 38 wrong type declarations by hand. Three of the 19 and four of the 38 passed every oracle: a captured number that follows the application's variable, a captured object that is a copy, a captured local that can be assigned, a single point accepted where a list belongs. Each is held by a law now, and so is the one that was left, F18: 31 of 31 wrong implementations and 44 of 44 wrong declarations are rejected. The same work found that the compile error for `pause()` on an expression that is no promise never printed its reason; it does now.
@@ -18,7 +18,7 @@ Where things stand on 2026-11-25:
 - **Listing a module as a target costs nothing until a test replaces something in it** (F6: 1.0x, from 30 to 120 times slower).
 - **The benchmark harness can measure the new API since v2.5.** v2.4 recognized use of the library only by `withReplacement`, and graded three of Vitest's assertion forms as plain errors. Both are fixed, each with a self-test case that fails on v2.4; see "The harness on the new library".
 - **The full benchmark run on the current library is done** (1,050 trials, harness v2.6, 2026-11-24 to 25, at your request in the benchmark thread; the three earlier runs are retired). Where plain Vitest can reach the bug, the library changes nothing that this run can measure: of 245 blocks, 216 are solved without it, 221 with it offered, 220 with it required. Where plain Vitest cannot, it is 64, 87 and 91 of 105, and that whole difference is one task, `stale-cache` (8, 34 and 35 of 35). I recounted every figure quoted in this file from the stored rows (`p34`).
-- **F19, new, from that run: a test written with the library names the helper its expression calls, and breaks when that name moves.** All 1,019 selections that agents wrote compare `callee`. Renaming the helper stopped 112 of the 195 library tests that met such a refactor (`matched 0`), and a valid fix that calls the helper at two places was rejected by 71 of 137 (`matched 2`). Every break is loud; no library test ever passed on buggy code. A selector through the public function and the constant survives the rename and no agent wrote one; nothing survives the second call site today.
+- **F19, from that run, which you do not see as a problem: a test written with the library names the helper its expression calls, and breaks when that name moves.** All 1,019 selections that agents wrote compare `callee`. Renaming the helper stopped 112 of the 195 library tests that met such a refactor (`matched 0`), and a valid fix that calls the helper at two places was rejected by 71 of 137 (`matched 2`). Every break is loud; no library test ever passed on buggy code. A selector through the public function and the constant survives the rename and no agent wrote one; nothing survives the second call site today.
 
 ### Where the review started (`b26e2c1`)
 
@@ -46,6 +46,7 @@ Made on 2026-11-24 by Manuel Schiller:
 - "keep object, drop line and text from the selectors." Done (`eca441d`). I took "the selectors" to include the containers, so `Function`, `Class` and `VariableDeclarator` nodes lost their `line` too; say so if you meant expressions only. Discovery still records line and text, because `execution-points list` prints them.
 - F18, "yes fix this". Built as the option I had recommended: the captures of all ways are merged, on the runtime's side and on the compiler's. Done (`eca441d`, `d279bda`); see F18.
 - Benchmark, decided by you in the benchmark thread and reported to me by it. A failed assertion inside `order.run(...)` counts as a reproduction (D-20). `expect.assertions`, `expect.hasAssertions` and a snapshot mismatch count as failed assertions (D-21). The three stored runs are retired as evidence ("drop all store previous runs, they are not relevant anymore"). A third arm, `required`, tells the agent to write the regression tests with the library (D-23). And the run itself: "run the full run with all models etc when you are done setting this up. i want the full results."
+- F19, 2026-11-25: "i dont see the problem." Nothing is built for it.
 - Benchmark, 2026-11-25: when the fifth replicate stopped on a full disk during grading, you chose to run it again. The registered rule (`D-24`) says a stopped replicate ends the series and the rows are analyzed as written; the benchmark thread did not name that rule when it put the options to you. Both analyses are in `BENCHMARK-LOG.md`, and neither primary test rejects in either.
 
 Still open:
@@ -57,7 +58,7 @@ Still open:
 4. Your global pnpm broke during this work (see "Incidents" below); say whether I should repair it.
 5. The wording of the laws written or changed today under your direction that every feature gets oracle coverage. Their rules are the README's and your decisions; the sentences are mine. The five of `tests/types-point.oracle.property.test.ts` (values, waiting, options, results, argument kinds) and `runtime-captured-values`. And the three changed for the two decisions of the evening: `plugin-registers-places-and-containers` (a registration has exactly `id`, `kind`, `inFunction`, `nth`, `callee` or `operator`, and `object`; a container exactly `type`, `name` and what is inside it), `runtime-visitor-object` and `types-visitor-object` (no `line`, no `text`; the captures of all ways; each captured local read once).
 6. One clause in `types-visitor-object` that you did not ask for: the compile error for reading a local that no way captured shows the locals the point does have (`Readonly<{ each: string; }>`). My change for F18 had made the compiler print a type's name there instead, and no oracle noticed, so I made the snippet ask for it. Strike it if a message is not something you want a law about.
-7. F19: what to do about tests that are tied to a helper's name. Three things are possible and none is built: say in the README and the guide to select through the public function and what the value is bound to; a point that stands for several expressions, so that a second call site is no ambiguity; and `interleavings` as the recipe for two operations that race, where the guide teaches `pause`. The second is an API change and yours to decide.
+7. Closed on 2026-11-25: F19 is not a problem in your view, so nothing is built for it. The three directions stay written down under F19 and as feature idea 12.
 8. Harness defects the run showed, reported by the benchmark thread and not fixed: a crash during grading leaves trials that cannot be re-graded; nothing checks free disk space or load before a run; the agent CLI's version is read once per run; `bench/analyze.mjs` hangs in its power section when the discordant blocks split near evenly; `bench/export-report.mjs` renders two arms; `toolSha256` hashes `src/` and `package.json`, not what a workspace receives. The guide and instruction changes for the offered arm are also still to come from that thread.
 
 ## Work in progress
@@ -570,7 +571,9 @@ The third row was not in the first report of F18: the compiler was wrong there t
 
 **A defect of my own on the way.** The first version of the type printed its own name in the error for a local that was not captured (`Readonly<ExtractCapturedLocals<CapturedSelection<…> | …>>`), where the error had listed the locals before. Every oracle passed. The snippet for that case now asks for the locals in the message; it failed on that version and passes (`d279bda`).
 
-### F19. A test written with the library is tied to the name of the helper its expression calls
+### F19. A test written with the library is tied to the name of the helper its expression calls (decided: not a problem)
+
+**Decided 2026-11-25:** "i dont see the problem." A test that names what it replaces breaks when that name goes, and says so. Nothing is changed for it. The measurements stay here because they describe what the library's tests are like.
 
 Probe: `p34` (reads the stored rows of the registered run and one task's source; runs no agent and costs nothing).
 
@@ -784,6 +787,7 @@ Run by the benchmark thread at your request, from commit `e010b4c` (the library 
 | All ten tasks (350) | 280 | 308 | 311 |
 | All ten, and the test accepts every valid fix | 268 | 263 (p = 0.61) | 259 (p = 0.34) |
 
+- **The bug itself is fixed in almost every trial of every arm:** 346, 348 and 350 of 350. `solved` also asks for a regression test that pins the bug, and all 70 unsolved control trials are unsolved for that reason alone (66 of them have the bug fixed). So the run compares regression tests, not bug fixing.
 - **Neither primary test rejects.** Control already solves 88% where it has a seam, and 9 to 10% of the blocks were discordant. The benchmark thread computes that 80% power at this split would need 1,700 to 3,000 blocks.
 - **The closed-module result is one task.** `stale-cache` carries all of it; on the other two the arms are level.
 - **Telling the agent to use the library changes nothing against offering it:** 221 against 220, 87 against 91 (p = 0.22), 308 against 311.

@@ -94,6 +94,14 @@ const strict = (row) => Boolean(row.solved) && row.validFixRobustness.notGreenCo
 compare('all ten, and the test accepts every valid fix', () => true, strict)
 compare('  token-session, the same', (row) => row.taskId === 'token-session', strict)
 
+console.log('\n## Trials in which the bug is fixed (the hidden grader passes), whatever the regression test is like')
+for (const arm of ARMS) {
+  const mine = rows.filter((row) => row.arm === arm)
+  console.log(`${arm.padEnd(10)} ${mine.filter((row) => row.oraclePass).length} of ${mine.length}`)
+}
+const unsolved = rows.filter((row) => row.arm === 'control' && !row.solved)
+console.log(`control, not solved: ${unsolved.length}, of them with the bug fixed ${unsolved.filter((row) => row.oraclePass).length}, with a regression test that does not pin the bug ${unsolved.filter((row) => row.reproduction === 'inadequate').length}`)
+
 console.log('\n## Trials whose final test uses the library')
 for (const arm of ARMS) {
   const mine = rows.filter((row) => row.arm === arm)
