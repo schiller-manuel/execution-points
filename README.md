@@ -2,6 +2,8 @@
 
 A prototype for replacing expressions inside application code from a test with full native TypeScript inference—without editing application code or writing generated `.d.ts` files to disk.
 
+Besides replacing an expression, a test can hold one where it is, or run concurrent operations in every order they can take. That is how a test pins a race in code that offers no seam to mock: see "Pause an asynchronous call" and "Run every order".
+
 A TypeScript 7.1 content mapper (`points.ep`) indexes the configured target modules into a virtual `ExecutionPointFileRegistry`. Tests select expressions imperatively using a **narrowing visitor (`select`)**, and a Vite plugin instruments only the target modules in memory.
 
 **Status:** the runtime, Vitest integration, the `select` visitor API, and native TypeScript 7.1 content mapper (`tsc --noEmit --runExternalCode` + VS Code TypeScript 7.1 LSP) all work with zero generated files on disk.
@@ -164,6 +166,11 @@ When the action is synchronous, `withReplacement` throws as it returns. When the
 
 ### Pause an asynchronous call
 
+| You want to | Use |
+| --- | --- |
+| hold one call where it is while the test looks at something, or runs work that does not wait for that call | `pause`, here |
+| find out whether two operations can get in each other's way, or show that they no longer can | `interleavings`, under "Run every order" |
+
 To hold one operation in the middle while another runs, pause the expression it is about to await. This needs an expression whose value is a promise. On any other expression `pause`, `resolves` and `rejects` cannot be called, and the compile error gives that reason.
 
 ```ts
@@ -178,6 +185,8 @@ expect(await slow).toBe(30)
 ```
 
 `pause.reached` rejects as soon as the action finishes without reaching the expression, so a test that awaits it fails at once with a message that names the expression, instead of running into a timeout. Every evaluation that arrives before `release()` waits; later ones pass straight through. A pause that is still holding when the test ends fails the test.
+
+A pause fixes one order: the other work finishes while the paused call waits. Do not await work that has to wait for the paused call. Once the code makes the two take turns, which is what many fixes for a race do, that `await` never returns, and the test runs into its timeout on correct code. A test about how two operations race belongs under "Run every order". (`node probes/p35-pause-or-interleavings.mjs` runs both kinds of test against a module with a race and against such a fix.)
 
 ### Replace everywhere
 
@@ -203,7 +212,9 @@ remotePoint.rejects(new Error('timeout'), { on: 2 }) // only the second evaluati
 
 ### Run every order
 
-A test that pauses one operation at one place tries one order. `interleavings` hands you all of them, one at a time. You give it the expressions where operations can be made to wait; the loop is yours:
+A test that pauses one operation at one place tries one order. `interleavings` hands you all of them, one at a time. You give it the expressions where operations can be made to wait; the loop is yours.
+
+The example module, `examples/profile.ts`, is a cache in front of a slow store. `getProfile` reads a name, normalizes it and caches it; `updateProfile` writes a name and caches it. If an update finishes while a read is in flight, the read caches the old name over the new one:
 
 ```ts
 import { interleavings, select } from 'execution-points-prototype'
@@ -218,7 +229,15 @@ for (const order of interleavings([normalizing, writing])) {
 }
 ```
 
+There are two orders here. In one the read caches its name before the update writes, and the loop body passes. In the other the update's write goes first, the read then caches what it had fetched earlier, and the expectation fails with `expected 'Alice' to be 'Bob'`: the race, found without knowing in advance which order to force.
+
 Inside `order.run(action)`, every evaluation of a selected expression waits. Whenever each operation has either finished or is waiting, one waiting evaluation is let through and continues with the original expression. Each order makes those choices differently, and the loop ends when every way has been tried. `order.run` resolves to what the action resolves to.
+
+Three things to get right:
+
+- **Start every order from the same state.** Each order runs the action again, so reset what the operations share inside the loop, as `reset()` does above.
+- **Select the awaited calls on either side of the state the operations share:** here the read's last step before it caches, and the update's write. One expression per operation is usually enough, and one expression that both pass can be all it takes. Every expression you add multiplies the orders.
+- **Leave the order to the loop.** Nothing in the test says which operation goes first, so the test keeps working when the code changes which orders are possible. After a fix that makes the two operations take turns, the same loop runs the one order that is left, and passes.
 
 `interleavings` is an ordinary generator, so the rest is composition: `break` to stop, `.take(20)` to bound the number of orders, a counter to know how many there were, a list to collect every order that ends wrong instead of stopping at the first. Each order follows from what the one before it found, so await `order.run` before taking the next.
 
