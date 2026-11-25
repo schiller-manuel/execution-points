@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Intention-to-treat statistical analyzer for benchmark `results.jsonl` files
- * (harness v2.5; reads rows written by v2.2 and later).
+ * (harness v2.6; reads rows written by v2.2 and later).
  *
  * What it guarantees (ST-02..ST-07, E9-01, N-05..N-09, N-13, N-21, N-26..N-28, V-07):
  * - Every started row stays in the intention-to-treat denominator. A row that
@@ -37,6 +37,7 @@ import {
   matchedRiskDifferenceCI,
   pairedCreditDiffCI,
   stratifiedCMH,
+  selectComparison,
   unmatchedRows,
   wilsonCI,
 } from './stats.mjs'
@@ -56,12 +57,14 @@ const PROVENANCE_FIELDS = [
 const PSEUDO_FIELDS = ['dirty', 'missing', 'duplicates', 'regrade']
 const ALLOWABLE = [...PROVENANCE_FIELDS, ...PSEUDO_FIELDS]
 const USAGE =
-  'Usage: node bench/analyze.mjs [--allow-mixed=<name>[,<name>...]] <results.jsonl> [more.jsonl...]\n' +
-  `       names: ${ALLOWABLE.join(', ')}`
+  'Usage: node bench/analyze.mjs [--compare=<arm>:<arm>] [--allow-mixed=<name>[,<name>...]] <results.jsonl> [more.jsonl...]\n' +
+  `       names: ${ALLOWABLE.join(', ')}\n` +
+  '       --compare: the two arms to compare, the first as control (default control:treatment; arms: control, treatment, required)'
 
 const args = process.argv.slice(2)
 const allowed = new Set()
 const files = []
+let compare = ['control', 'treatment']
 for (const a of args) {
   if (a === '--allow-mixed') {
     console.error(
@@ -77,6 +80,12 @@ for (const a of args) {
         process.exit(1)
       }
       allowed.add(name)
+    }
+  } else if (a.startsWith('--compare=')) {
+    compare = a.slice('--compare='.length).split(':')
+    if (compare.length !== 2 || !compare[0] || !compare[1] || compare[0] === compare[1]) {
+      console.error(`ERROR: --compare needs two different arms, as in --compare=control:required.\n${USAGE}`)
+      process.exit(1)
     }
   } else if (a.startsWith('--')) {
     console.error(`ERROR: unknown option ${a}.\n${USAGE}`)
@@ -116,7 +125,29 @@ for (const entry of rawRows) {
     byKey.set(dedupKey, entry) // only reached output when `duplicates` is allowed: the later row wins
   }
 }
-const rows = [...byKey.values()].map((e) => e.row)
+// D-23: a run can have three arms. Everything below compares two of them, the first under the
+// name `control` and the second under the name `treatment`.
+const comparison = selectComparison(
+  [...byKey.values()].map((e) => e.row),
+  compare[0],
+  compare[1],
+)
+const rows = comparison.rows
+const renamed = compare[0] !== 'control' || compare[1] !== 'treatment'
+console.log(
+  `Comparison: arm "${compare[0]}"${renamed ? ' (printed below as control)' : ''} against arm "${compare[1]}"${renamed ? ' (printed below as treatment)' : ''}.`,
+)
+if (comparison.leftOut.length > 0) {
+  const perArm = {}
+  for (const r of comparison.leftOut) perArm[r.arm ?? 'no arm'] = (perArm[r.arm ?? 'no arm'] ?? 0) + 1
+  console.log(
+    `Left out of this comparison: ${Object.entries(perArm).map(([arm, n]) => `${n} rows of arm "${arm}"`).join(', ')}. Use --compare=<arm>:<arm> to compare other arms.`,
+  )
+}
+if (rows.length === 0) {
+  console.error(`ERROR: the input has no row of arm "${compare[0]}" or "${compare[1]}".`)
+  process.exit(1)
+}
 
 // ── Provenance, field by field ───────────────────────────────────────────────
 const provenanceSets = Object.fromEntries(PROVENANCE_FIELDS.map((k) => [k, new Set()]))
@@ -415,6 +446,16 @@ function summarizeGroup(items) {
     if (!r.usesExecutionPoints) continue
     for (const op of r.libraryOperations ?? ['withReplacement']) libraryOperations[op] = (libraryOperations[op] ?? 0) + 1
   }
+  // D-22: trials whose agent ran a command of the library (`npx execution-points list <file>`).
+  // Rows written before v2.6 do not record it, and their agents were refused every `npx`.
+  const libraryCommands = { recorded: 0, trials: 0, calls: 0, denied: 0 }
+  for (const r of active) {
+    if (typeof r.libraryCommandCalls !== 'number') continue
+    libraryCommands.recorded++
+    if (r.libraryCommandCalls > 0) libraryCommands.trials++
+    libraryCommands.calls += r.libraryCommandCalls
+    libraryCommands.denied += r.libraryCommandCallsDenied ?? 0
+  }
 
   return {
     n,
@@ -446,6 +487,7 @@ function summarizeGroup(items) {
     firstRedBeforeEdit: count((r) => r.firstRedBeforeFirstSourceEdit === true),
     techniques,
     libraryOperations,
+    libraryCommands,
     e9Eligible: eligible,
     refactor,
     valid,
@@ -550,6 +592,11 @@ for (const arm of ['control', 'treatment']) {
       .map(([k, v]) => `${k}=${v}`)
       .join(' ')
     console.log(`      library:     trials per operation (a trial can use several): ${ops}`)
+  }
+  if (s.libraryCommands.calls > 0) {
+    console.log(
+      `      library:     ${s.libraryCommands.trials}/${s.libraryCommands.recorded} trials ran a command of the library (${s.libraryCommands.calls} calls, ${s.libraryCommands.denied} refused)`,
+    )
   }
   console.log(`      process:     firstRedBeforeFirstSourceEdit=${f(s.firstRedBeforeEdit)} | wall-clock ${s.avgSec.toFixed(1)} s/trial`)
   const perSolved =

@@ -1,5 +1,5 @@
 /**
- * Calibration cases for "this test uses the library" (PROTOCOL D-18, harness v2.5).
+ * Calibration cases for "this test uses the library" (PROTOCOL D-18, harness v2.6).
  *
  * A test uses `execution-points-prototype` when it imports `select` from the
  * package, calls it, and puts a selected point to use. `operations` is what

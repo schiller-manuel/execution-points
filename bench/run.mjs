@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Controlled A/B benchmark runner (harness v2.5; see `HARNESS_VERSION` and
+ * Controlled A/B benchmark runner (harness v2.6; see `HARNESS_VERSION` and
  * `bench/PROTOCOL.md`) for evaluating whether `execution-points` helps coding
  * agents (via GitHub Copilot CLI) debug and fix hard asynchronous concurrency bugs.
  *
@@ -61,7 +61,7 @@ import {
   E2E_CLASSIFICATION_CASES,
   ERROR_KIND_CASES,
   RUN_OUTCOME_CASES,
-  UNDECIDED_KIND_CASES,
+  DECIDED_KIND_CASES,
 } from './calibration/classification-cases.mjs'
 import {
   buildBuggyRefactors,
@@ -81,17 +81,18 @@ import {
   classifyError,
   classifyFailedTests,
   formatError,
-  UNDECIDED_GRADINGS,
   countRefactorResults,
   countValidFixResults,
   refactorOutcome,
   validFixOutcome,
 } from './classify.mjs'
 import { extractUsageMetrics, formatUsd, MODEL_PRICING_PER_M, projectCredits } from './pricing.mjs'
-import { formatCI, matchedRiskDifferenceCI, stratifiedCMH, wilsonCI } from './stats.mjs'
+import { formatCI, matchedRiskDifferenceCI, selectComparison, stratifiedCMH, wilsonCI } from './stats.mjs'
 import {
+  ARMS,
   assertNoRepoLeak,
   createOwnedTempRoot,
+  hasLibrary,
   OWNER_FILE,
   prepareToolchains,
   sweepStaleTempDirs,
@@ -106,7 +107,7 @@ const DETERMINISTIC_IO_PATH = path.join(__dirname, 'deterministic-io.setup.mjs')
 const FAILURE_REPORTER_PATH = path.join(__dirname, 'failure-reporter.mjs')
 
 /** One version string for the harness, the protocol, and every file header. */
-export const HARNESS_VERSION = 'v2.5'
+export const HARNESS_VERSION = 'v2.6'
 
 /** How often every graded variant is run; all runs must agree (see `agreeOnOutcome`). */
 export const DEFAULT_GRADE_REPEATS = 3
@@ -511,6 +512,12 @@ function parseArgs(argv) {
     else if (a === '--out') opts.outDir = path.resolve(argv[++i])
     else throw new Error(`Unknown argument: ${a}`)
   }
+  for (const arm of opts.arms) {
+    if (!ARMS.includes(arm)) throw new Error(`Unknown arm: ${arm} (valid: ${ARMS.join(', ')})`)
+  }
+  if (new Set(opts.arms).size !== opts.arms.length || opts.arms.length === 0) {
+    throw new Error(`Invalid --arms: ${opts.arms.join(',')} (expected each arm at most once, at least one)`)
+  }
   if (opts.promptStyle !== 'symptom' && opts.promptStyle !== 'described') {
     throw new Error(`Invalid --prompt-style: ${opts.promptStyle} (expected symptom or described)`)
   }
@@ -589,13 +596,13 @@ function writePristineWorkspaceConfigs(dir, task, arm, { includeRuntimeGuard = f
     type: 'module',
     scripts: {
       test: 'vitest run',
-      check: arm === 'treatment' ? 'tsc --noEmit --runExternalCode' : 'tsc --noEmit',
+      check: hasLibrary(arm) ? 'tsc --noEmit --runExternalCode' : 'tsc --noEmit',
     },
     devDependencies: {
       typescript: '*',
       vitest: '*',
       '@types/node': '*',
-      ...(arm === 'treatment' ? { 'execution-points-prototype': '*' } : {}),
+      ...(hasLibrary(arm) ? { 'execution-points-prototype': '*' } : {}),
     },
   }
   writeFileSync(path.join(dir, 'package.json'), JSON.stringify(pkg, null, 2) + '\n')
@@ -612,7 +619,7 @@ function writePristineWorkspaceConfigs(dir, task, arm, { includeRuntimeGuard = f
   const testBlock = `{ ${setupLine}${includeLine}reporters: ['default'], environment: 'node' }`
   const tsInclude = ['src/**/*.ts', 'src/**/*.tsx', 'src/**/*.mts', 'src/**/*.cts']
 
-  if (arm === 'treatment') {
+  if (hasLibrary(arm)) {
     writeFileSync(
       path.join(dir, 'tsconfig.json'),
       JSON.stringify(
@@ -714,7 +721,7 @@ export function createWorkspace({ taskId, arm, promptStyle, toolchains, parentDi
   cpSync(promptFile, path.join(dir, 'PROMPT.md'))
 
   const guideFile =
-    arm === 'treatment'
+    hasLibrary(arm)
       ? path.join(__dirname, 'guides/treatment-guide.md')
       : path.join(__dirname, 'guides/control-guide.md')
   cpSync(guideFile, path.join(dir, 'TESTING_GUIDE.md'))
@@ -726,13 +733,21 @@ export function createWorkspace({ taskId, arm, promptStyle, toolchains, parentDi
   return { dir, initialSnapshot }
 }
 
-function buildAgentPrompt(task) {
+/**
+ * What the agent of the `required` arm is told in addition (D-23). The other two arms get the
+ * same instructions as each other: the library is offered to `treatment` by its guide alone.
+ */
+export const REQUIRED_ARM_INSTRUCTION =
+  'Write the regression tests with `execution-points-prototype`, which is installed in this workspace: pick the expression where an operation has to be held or replaced with `select(...)`, and control the order of the concurrent operations through that point (`pause()`, `withReplacement(...)`), as `TESTING_GUIDE.md` describes.'
+
+export function buildAgentPrompt(task, arm = 'control') {
   return [
     'You are debugging and fixing an asynchronous concurrency bug in this standalone TypeScript + Vitest workspace.',
     'Start by reading `PROMPT.md` and `TESTING_GUIDE.md`, then inspect all files under `src/`.',
     `Follow every constraint in \`PROMPT.md\` and \`TESTING_GUIDE.md\`, add deterministic regression tests in \`${task.testRel}\`, fix the bug in \`${task.targetRel}\`, and verify \`npm test\` and \`npm run check\` both pass before finishing.`,
     'Edit files under `src/` with file-editing tools (not shell redirects), and run `npm test` and `npm run check` directly to verify.',
     'Do not monkey-patch JavaScript or Node.js globals, do not intercept Node runtime internals (`node:async_hooks`, `node:worker_threads`), do not add real-time sleeps or retry loops, and do not add test-only hooks or extra exports to production files.',
+    ...(arm === 'required' ? [REQUIRED_ARM_INSTRUCTION] : []),
   ].join('\n')
 }
 
@@ -1376,6 +1391,30 @@ function configureHardenedSandbox(sidecarDir, env) {
   }
 }
 
+/**
+ * The shell commands the agent may run, as rules of the agent CLI (D-22).
+ *
+ * Both arms may run `npm test` and `npm run <script>`, and nothing else: in non-interactive
+ * mode the CLI refuses whatever no allow rule approves. A Treatment workspace ships the
+ * library's commands, and the Treatment guide tells the agent to run one
+ * (`npx execution-points list <file>`), so that arm may also run `npx <command>` for each of
+ * them (`libraryCommands`). A deny rule wins over every allow rule, so only an arm without
+ * library commands carries the deny rule for `npx`. The live preflight checks, before a run
+ * spends anything on trials, that the Treatment agent can run the guide's command and cannot
+ * run another package through `npx`.
+ */
+export function agentShellRules(libraryCommands = []) {
+  return {
+    allow: ['shell(npm test)', 'shell(npm run)', ...libraryCommands.map((command) => `shell(npx ${command})`)],
+    deny: ['shell(npm install)', 'shell(node)', ...(libraryCommands.length === 0 ? ['shell(npx)'] : [])],
+  }
+}
+
+/** The library commands the agent of an arm may run: the ones its workspace ships. */
+export function libraryCommandsOf(arm, toolchains) {
+  return hasLibrary(arm) ? [...toolchains.libraryCommands] : []
+}
+
 function runCopilotTrial({
   workspaceDir,
   model,
@@ -1383,6 +1422,7 @@ function runCopilotTrial({
   prompt,
   timeoutSec,
   cliCreditCap,
+  libraryCommands = [],
   parentDir = realpathSync(tmpdir()),
 }) {
   const realWs = realpathSync(workspaceDir)
@@ -1395,6 +1435,8 @@ function runCopilotTrial({
 
   // N-30: Write hardened OS sandbox policy before launching agent
   configureHardenedSandbox(sidecarDir, env)
+
+  const shellRules = agentShellRules(libraryCommands)
 
   return new Promise((resolve) => {
     const start = Date.now()
@@ -1412,16 +1454,8 @@ function runCopilotTrial({
       realWs,
       '--allow-tool',
       `write(${realWs}/src/**)`,
-      '--allow-tool',
-      'shell(npm test)',
-      '--allow-tool',
-      'shell(npm run)',
-      '--deny-tool',
-      'shell(npm install)',
-      '--deny-tool',
-      'shell(node)',
-      '--deny-tool',
-      'shell(npx)',
+      ...shellRules.allow.flatMap((rule) => ['--allow-tool', rule]),
+      ...shellRules.deny.flatMap((rule) => ['--deny-tool', rule]),
       '--excluded-tools',
       'web_fetch',
       'web_search',
@@ -1511,17 +1545,56 @@ function runCopilotTrial({
  * 1) Writing `src/.preflight` succeeds (macOS realpath write rule works!)
  * 2) Writing `root-preflight.txt` outside `src/` is DENIED
  * 3) Running `npm test` works under `--sandbox` while reading outside workspace fails.
+ *
+ * For the Treatment arm (`arm: 'treatment'`, D-22) a second check, in a Treatment workspace:
+ * the agent can run the command the Treatment guide prints, and cannot run another package
+ * through `npx`. Both are read off the CLI's own record of its tool calls.
  */
-async function runLivePreflight({ model, toolchains, parentDir }) {
+export async function runLivePreflight({ model, toolchains, parentDir, arm = 'control' }) {
   const { dir: ws } = createWorkspace({
     taskId: 'stale-cache',
-    arm: 'control',
+    arm,
     promptStyle: 'symptom',
     toolchains,
     parentDir,
   })
   activeTempDirs.add(ws)
   try {
+    if (arm === 'treatment') {
+      const target = TASKS['stale-cache'].epTargets[0]
+      const listCommand = guideListCommand()?.replace('<file>', target)
+      if (!listCommand) throw new Error('Live preflight FAILED: the treatment guide prints no `npx … <file>` command.')
+      const prompt = [
+        'Preflight check. Perform exactly these 2 steps and then stop:',
+        `1. Run the shell command \`${listCommand}\` once, exactly as written.`,
+        `2. Run the shell command \`${PREFLIGHT_OTHER_NPX}\` once, exactly as written. If it is refused, do not retry it and do not run anything else.`,
+      ].join('\n')
+      const cli = await runCopilotTrial({
+        workspaceDir: ws,
+        model,
+        reasoning: 'low',
+        prompt,
+        timeoutSec: 90,
+        cliCreditCap: 0,
+        libraryCommands: libraryCommandsOf(arm, toolchains),
+        parentDir,
+      })
+      const calls = parseShellCalls(cli.stdout)
+      const lists = calls.filter((call) => call.command.includes(listCommand))
+      const others = calls.filter((call) => call.command.includes(PREFLIGHT_OTHER_NPX))
+      const listRan = lists.some((call) => !call.denied && call.success === true && call.content.includes(`${target}:`))
+      const otherRefused = others.length > 0 && others.every((call) => call.denied)
+      if (!listRan || !otherRefused) {
+        const seen = calls
+          .map((call) => `${call.command.slice(0, 80)} -> ${call.denied ? 'denied' : call.success === true ? 'ran' : 'failed'}: ${call.content.trim().split('\n')[0].slice(0, 140)}`)
+          .join(' | ')
+        throw new Error(
+          `Live preflight of the Treatment arm FAILED (listRan=${listRan}, otherRefused=${otherRefused}, exitCode=${cli.exitCode}; shell calls: ${seen || 'none'}). Aborting run before spending credits on trials.`,
+        )
+      }
+      return { ok: true, listRan, otherRefused, listCommand, usage: extractUsageMetrics(cli.usageRaw, model) }
+    }
+
     const prompt = [
       'Preflight check. Perform exactly these 3 steps and then stop:',
       '1. Create the file `src/.preflight` with contents `ok`.',
@@ -1551,6 +1624,63 @@ async function runLivePreflight({ model, toolchains, parentDir }) {
   }
 }
 
+/** What the Treatment preflight asks the agent to run besides the guide's command: it must be refused. */
+const PREFLIGHT_OTHER_NPX = 'npx vitest --version'
+
+/** The command the Treatment guide prints, with its `<file>` placeholder, or null. */
+export function guideListCommand() {
+  const guide = readFileSync(path.join(__dirname, 'guides/treatment-guide.md'), 'utf8')
+  return /`(npx [^`]*<file>[^`]*)`/.exec(guide)?.[1] ?? null
+}
+
+const SHELL_TOOLS = new Set(['bash', 'shell', 'run_shell_command'])
+
+/** Whether a `tool.execution_complete` event says the call was refused. */
+function completionDenied(errCode, errMsg, content) {
+  return errCode === 'denied' || /denied|permission denied|no-ask-user/i.test(errMsg) || /denied|permission denied|no-ask-user/i.test(content)
+}
+
+/**
+ * The shell calls of one agent run, in order: `{ command, success, denied, content }`.
+ * `success` is null for a call the events do not complete.
+ */
+export function parseShellCalls(stdout) {
+  const calls = new Map()
+  let unnamed = 0
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('{')) continue
+    let ev
+    try {
+      ev = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    const callId = ev.data?.toolCallId ?? ev.toolCallId
+    if (ev.type === 'tool.execution_start') {
+      if (!SHELL_TOOLS.has(ev.data?.toolName ?? ev.toolName)) continue
+      const argsObj = ev.data?.arguments ?? ev.arguments ?? {}
+      calls.set(callId ?? `unnamed-${unnamed++}`, { command: String(argsObj?.command ?? JSON.stringify(argsObj)), success: null, denied: false, content: '' })
+    } else if (ev.type === 'tool.execution_complete' && calls.has(callId)) {
+      const call = calls.get(callId)
+      call.content = String(ev.data?.result?.content ?? ev.data?.content ?? '')
+      call.success = ev.data?.success ?? ev.success ?? null
+      call.denied = completionDenied(ev.data?.error?.code ?? '', String(ev.data?.error?.message ?? ''), call.content)
+    }
+  }
+  return [...calls.values()]
+}
+
+/** How often the agent ran one of the library's commands, and how often that was refused. */
+export function countLibraryCommandCalls(stdout, libraryCommands) {
+  const runsOne = (text) => {
+    const words = text.split(/[\s;&|()]+/)
+    return words.some((word, i) => word === 'npx' && libraryCommands.includes(words[i + 1]))
+  }
+  const mine = parseShellCalls(stdout).filter((call) => runsOne(call.command))
+  return { calls: mine.length, denied: mine.filter((call) => call.denied).length }
+}
+
 /**
  * Parses Copilot CLI JSONL events:
  * - Keys denials (`deniedToolCalls`, `writeDenials`) on `tool.execution_complete`
@@ -1558,7 +1688,7 @@ async function runLivePreflight({ model, toolchains, parentDir }) {
  * - Keys `firstSourceEditAt` ONLY on `tool.execution_complete` with `success === true`
  *   (denied/failed edits NEVER count as source edits — closes N-04 & L-05!).
  */
-export function parseCopilotEvents(stdout, targetRel) {
+export function parseCopilotEvents(stdout, targetRel, libraryCommands = []) {
   const toolCalls = {}
   const filesRead = new Set()
   const shellCommands = []
@@ -1616,7 +1746,7 @@ export function parseCopilotEvents(stdout, targetRel) {
           if (callId) pendingSourceEdits.set(callId, { isWriteTool: true, touchesTarget })
         }
 
-        if (name === 'bash' || name === 'shell' || name === 'run_shell_command') {
+        if (SHELL_TOOLS.has(name)) {
           const cmd = String(argsObj?.command ?? rawArgs)
           shellCommands.push(cmd.slice(0, 200))
           for (const m of cmd.matchAll(
@@ -1624,7 +1754,9 @@ export function parseCopilotEvents(stdout, targetRel) {
           )) {
             filesRead.add(path.basename(m[1]))
           }
-          if (/(?:^|\s)\.\.\/|\/tmp\/|ep-grader|ep-bench|execution-points/.test(cmd)) {
+          // A command of the library that the arm may run (D-22) names the library and is not suspicious.
+          const withoutLibraryCommands = libraryCommands.reduce((text, command) => text.replaceAll(`npx ${command}`, 'npx <library command>'), cmd)
+          if (/(?:^|\s)\.\.\/|\/tmp\/|ep-grader|ep-bench|execution-points/.test(withoutLibraryCommands)) {
             suspiciousPaths.push(cmd.slice(0, 120))
           }
           // V-06: Track shell commands that attempt file writes
@@ -1644,10 +1776,7 @@ export function parseCopilotEvents(stdout, targetRel) {
         const content = String(ev.data?.result?.content ?? ev.data?.content ?? '')
         const editMeta = callId ? pendingSourceEdits.get(callId) : undefined
 
-        const isDenied =
-          errCode === 'denied' ||
-          /denied|permission denied|no-ask-user/i.test(errMsg) ||
-          /denied|permission denied|no-ask-user/i.test(content)
+        const isDenied = completionDenied(errCode, errMsg, content)
 
         if (isDenied) {
           deniedToolCalls++
@@ -1726,7 +1855,7 @@ async function runAgentPhase({
   mkdirSync(trialLogDir, { recursive: true })
 
   try {
-    const prompt = buildAgentPrompt(task)
+    const prompt = buildAgentPrompt(task, arm)
     const cli = await runCopilotTrial({
       workspaceDir,
       model,
@@ -1734,6 +1863,7 @@ async function runAgentPhase({
       prompt,
       timeoutSec,
       cliCreditCap,
+      libraryCommands: libraryCommandsOf(arm, toolchains),
       parentDir,
     })
 
@@ -1857,7 +1987,9 @@ export async function gradeTrialPhase({
 
   try {
     const usage = extractUsageMetrics(cli.usageRaw, model)
-    const eventStats = parseCopilotEvents(cli.stdout, task.targetRel)
+    const libraryCommands = libraryCommandsOf(arm, toolchains)
+    const eventStats = parseCopilotEvents(cli.stdout, task.targetRel, libraryCommands)
+    const libraryCommandCalls = countLibraryCommandCalls(cli.stdout, libraryCommands)
     const targetText = allWorkspaceFiles[task.targetRel] ?? ''
     const testText = allWorkspaceFiles[task.testRel] ?? ''
 
@@ -2019,12 +2151,12 @@ export async function gradeTrialPhase({
     rmSync(prodTsconfig, { force: true })
 
     const fullTypecheckRes =
-      arm === 'treatment'
+      hasLibrary(arm)
         ? await runCmd(tscBin, ['--noEmit', '--runExternalCode'], ownFixDir, { timeoutMs: 60_000 })
         : await runCmd(tscBin, ['--noEmit'], ownFixDir, { timeoutMs: 60_000 })
 
-    const typecheckPass = prodTypecheckRes.ok && (arm === 'control' ? fullTypecheckRes.ok : true)
-    const contractTypecheckPass = arm === 'treatment' ? fullTypecheckRes.ok : true
+    const typecheckPass = prodTypecheckRes.ok && (hasLibrary(arm) ? true : fullTypecheckRes.ok)
+    const contractTypecheckPass = hasLibrary(arm) ? fullTypecheckRes.ok : true
 
     // 3. Evaluate agent's test suite: RED + single-bug mutants + D-14 symmetric valid-fix gate + E9
     const testEval = testText
@@ -2219,6 +2351,8 @@ export async function gradeTrialPhase({
       firstSourceEditAt: eventStats.firstSourceEditAt,
       compactions: eventStats.compactions,
       deniedToolCalls: eventStats.deniedToolCalls,
+      libraryCommandCalls: libraryCommandCalls.calls,
+      libraryCommandCallsDenied: libraryCommandCalls.denied,
       filesRead: eventStats.filesRead,
       suspiciousPaths: eventStats.suspiciousPaths,
       totalToolCalls: eventStats.totalToolCalls,
@@ -2556,8 +2690,7 @@ export function checkCheckoutDistUntouched(repoRoot, prepare) {
  * does, with npm kept offline: it must resolve from the workspace's own `node_modules/.bin`.
  */
 export async function checkGuideListCommand({ toolchains, makeWorkspace = createWorkspace, parentDir = realpathSync(tmpdir()) }) {
-  const guide = readFileSync(path.join(__dirname, 'guides/treatment-guide.md'), 'utf8')
-  const printed = /`(npx [^`]*<file>[^`]*)`/.exec(guide)?.[1]
+  const printed = guideListCommand()
   if (!printed) return { ok: false, command: null, detail: 'the treatment guide prints no `npx … <file>` command' }
   const target = TASKS['stale-cache'].epTargets[0]
   const command = printed.replace('<file>', target)
@@ -2586,16 +2719,96 @@ export async function checkGuideListCommand({ toolchains, makeWorkspace = create
 }
 
 /**
- * D-16 and D-19 on single errors: `kindOf(error, stackHead)` is the classifier under test.
- * `stackHead` is what Vitest prints as the first line of that error's stack.
+ * D-22: the agent of the Treatment arm may run the command its guide prints, the agent of the
+ * Control arm may not, and neither may run another package through `npx`. `rulesOf(arm)` gives
+ * the CLI's shell rules for an arm. A rule `shell(a b)` covers a command that starts with the
+ * words `a b`, a deny rule wins over every allow rule, and what no allow rule covers is refused.
+ * This checks the rules the harness hands the CLI; that the CLI honours them is what the live
+ * preflight of a run checks.
+ */
+export function checkGuideCommandPermission({ toolchains, rulesOf = (arm) => agentShellRules(libraryCommandsOf(arm, toolchains)) }) {
+  const printed = guideListCommand()
+  if (!printed) return { ok: false, detail: 'the treatment guide prints no `npx … <file>` command' }
+  const covers = (rule, command) => {
+    const body = /^shell\((.*)\)$/.exec(rule)?.[1]
+    if (body === undefined) return false
+    const ruleWords = body.split(/\s+/).filter(Boolean)
+    const words = command.split(/\s+/)
+    return ruleWords.every((word, i) => words[i] === word)
+  }
+  const mayRun = (arm, command) => {
+    const rules = rulesOf(arm)
+    return rules.allow.some((rule) => covers(rule, command)) && !rules.deny.some((rule) => covers(rule, command))
+  }
+  const problems = []
+  if (!mayRun('treatment', printed)) problems.push(`the Treatment agent may not run \`${printed}\``)
+  if (mayRun('control', printed)) problems.push(`the Control agent may run \`${printed}\``)
+  for (const arm of ['control', 'treatment']) {
+    for (const other of ['npx vitest --version', 'npx tsc --version', 'node -e 1', 'npm install left-pad']) {
+      if (mayRun(arm, other)) problems.push(`the ${arm} agent may run \`${other}\``)
+    }
+    for (const needed of ['npm test', 'npm run check']) {
+      if (!mayRun(arm, needed)) problems.push(`the ${arm} agent may not run \`${needed}\``)
+    }
+  }
+  return { ok: problems.length === 0, command: printed, detail: problems.join('; ') }
+}
+
+/**
+ * D-23: the `required` arm is the `treatment` arm plus one sentence to the agent. Its
+ * workspace has the same files and the library, its agent may run the same commands, the
+ * instructions of the other two arms are the same as each other, an arm the harness does not
+ * know is refused, and the analyzer's comparison can pick any two arms.
+ */
+export function checkRequiredArm({ toolchains, makeWorkspace = createWorkspace, parentDir = realpathSync(tmpdir()) }) {
+  const problems = []
+  const files = {}
+  for (const arm of ['treatment', 'required']) {
+    let ws = null
+    try {
+      const made = makeWorkspace({ taskId: 'stale-cache', arm, promptStyle: 'symptom', toolchains, parentDir })
+      ws = made.dir
+      files[arm] = JSON.stringify(made.initialSnapshot)
+      if (!existsSync(path.join(ws, 'node_modules/execution-points-prototype/package.json'))) problems.push(`a ${arm} workspace has no library`)
+    } catch (err) {
+      problems.push(`no ${arm} workspace: ${String(err.message).slice(0, 120)}`)
+    } finally {
+      if (ws) rmSync(ws, { recursive: true, force: true })
+    }
+  }
+  if (files.treatment !== files.required) problems.push('the files of a required workspace differ from those of a treatment workspace')
+  const task = TASKS['stale-cache']
+  const [control, treatment, required] = ARMS.map((arm) => buildAgentPrompt(task, arm))
+  if (control !== treatment) problems.push('the control and the treatment agent get different instructions')
+  if (required !== `${treatment}\n${REQUIRED_ARM_INSTRUCTION}`) problems.push('the instructions of the required arm are not those of the treatment arm plus one sentence')
+  const rules = (arm) => JSON.stringify(agentShellRules(libraryCommandsOf(arm, toolchains)))
+  if (rules('required') !== rules('treatment')) problems.push('the required agent may run other commands than the treatment agent')
+  for (const bad of ['control,nonsense', 'control,control']) {
+    try {
+      parseArgs(['--arms', bad])
+      problems.push(`--arms ${bad} is accepted`)
+    } catch {
+      // refused, as it must be
+    }
+  }
+  const picked = selectComparison(ARMS.map((arm) => ({ arm })), 'control', 'required')
+  if (picked.rows.map((r) => `${r.armAsRun}>${r.arm}`).join() !== 'control>control,required>treatment' || picked.leftOut.map((r) => r.arm).join() !== 'treatment') {
+    problems.push('selectComparison does not pick the two arms asked for')
+  }
+  return { ok: problems.length === 0, detail: problems.join('; ') }
+}
+
+/**
+ * D-16 and D-19 to D-21 on single errors: `kindOf(error, stackHead)` is the classifier under
+ * test. `stackHead` is what Vitest prints as the first line of that error's stack.
  */
 export function checkErrorKindCases(kindOf = (error) => classifyError(error)) {
   return [
-    ...ERROR_KIND_CASES.map(([error, want, stackHead]) => ({ error, want, stackHead, undecided: undefined })),
-    ...UNDECIDED_KIND_CASES.map((c) => ({ error: c.error, want: c.today, stackHead: `${c.error.name}: ${c.error.message}`, undecided: c.undecided })),
-  ].map(({ error, want, stackHead, undecided }) => {
+    ...ERROR_KIND_CASES.map(([error, want, stackHead]) => ({ error, want, stackHead, decision: undefined })),
+    ...DECIDED_KIND_CASES.map((c) => ({ error: c.error, want: c.kind, stackHead: `${c.error.name}: ${c.error.message}`, decision: c.decision })),
+  ].map(({ error, want, stackHead, decision }) => {
     const got = kindOf(error, stackHead)
-    return { name: formatError(error).slice(0, 110), ok: got === want, undecided, detail: `classified ${got}, expected ${want}` }
+    return { name: formatError(error).slice(0, 110), ok: got === want, decision, detail: `classified ${got}, expected ${want}` }
   })
 }
 
@@ -2629,7 +2842,6 @@ export async function checkClassificationRuns({
       const wanted = c.wantError ? describe(c.wantError) : null
       results.push({
         name: c.name,
-        undecided: c.undecided,
         ok: res.outcome === c.want && (!wanted || recorded.includes(wanted)),
         detail: `got ${res.outcome}${wanted ? `, recorded ${recorded.join(' ') || 'no error'}, expected ${wanted}` : ''}`,
         summary: res.summary,
@@ -2832,6 +3044,22 @@ test('verbose selector typechecks and executes', async () => {
       const list = await checkGuideListCommand({ toolchains, parentDir: selfTestRoot })
       console.log(`   ${list.ok ? 'PASS' : 'FAIL'}: the guide's command \`${list.command}\` in a treatment workspace, npm offline: ${list.detail}.\n`)
       if (!list.ok) failures++
+      // 3c. The agent of the Treatment arm must be allowed to run it (D-22). Up to v2.5 both arms
+      // carried a deny rule for every `npx` command, which is the calibration here.
+      const permission = checkGuideCommandPermission({ toolchains })
+      const v25Rules = () => ({ allow: ['shell(npm test)', 'shell(npm run)'], deny: ['shell(npm install)', 'shell(node)', 'shell(npx)'] })
+      const onV25 = checkGuideCommandPermission({ toolchains, rulesOf: v25Rules })
+      const permissionOk = permission.ok && !onV25.ok
+      console.log(
+        `   ${permissionOk ? 'PASS' : 'FAIL'}: the shell rules let the Treatment agent run \`${permission.command}\`, the Control agent not, and neither another package through npx${permission.ok ? '' : ` (${permission.detail})`}; the rules of v2.5 fail this case${onV25.ok ? ' (they do NOT: the case separates nothing)' : ` (${onV25.detail})`}.\n`,
+      )
+      if (!permissionOk) failures++
+      // 3d. The third arm (D-23).
+      const requiredArm = checkRequiredArm({ toolchains, parentDir: selfTestRoot })
+      console.log(
+        `   ${requiredArm.ok ? 'PASS' : 'FAIL'}: the required arm is the treatment arm plus one sentence to the agent (same files, library, commands; control and treatment get the same instructions; unknown arms refused; any two arms can be compared)${requiredArm.ok ? '' : `: ${requiredArm.detail}`}.\n`,
+      )
+      if (!requiredArm.ok) failures++
     }
 
     // 4. Failure classification: only an assertion failure is a reproduction
@@ -2879,27 +3107,41 @@ test('verbose selector typechecks and executes', async () => {
         console.error('   FAIL: no classification case separates an earlier rule from the current one')
         kindFailures++
       }
-      // The two gradings that are not decided are stated by cases, one rule each.
-      for (const [rule, kind] of Object.entries(UNDECIDED_GRADINGS)) {
-        const stated = UNDECIDED_KIND_CASES.filter((c) => c.undecided === rule)
-        if (stated.length === 0 || stated.some((c) => c.today !== kind)) {
-          console.error(`   FAIL: UNDECIDED_GRADINGS.${rule} is '${kind}', and the cases that state it say ${JSON.stringify(stated.map((c) => c.today))}`)
+      // The same for the two gradings decided on 2026-11-24 (D-20, D-21). v2.5 read the type as
+      // v2.6 does, and graded an error of the library, and an expectation that Vitest throws as
+      // a plain Error, without looking further. Each case says what v2.5 gave (`before`); that
+      // is checked against the v2.5 rule, and each decision needs a case that v2.5 got wrong.
+      const v25 = (error) => {
+        const name = error.name ?? ''
+        const message = String(error.message ?? '').trim()
+        if (/(?:^|\.)\w*AssertionError$/.test(name)) return 'assertion'
+        if (name === 'TestTimeoutError' || name === 'HookTimeoutError' || /^(?:Test|Hook) timed out in \d+ms/.test(message)) return 'timeout'
+        if (message.startsWith('[execution-points]')) return 'selector_break'
+        if (/^Forbidden (?:global monkey-patch|sleep)\b/.test(message)) return 'guard'
+        if (name === 'SyntaxError' || /^(?:Cannot find (?:module|package)\b|Failed to resolve import\b|Failed to load url\b|Transform failed\b|The requested module .* does not provide an export named\b)/.test(message)) return 'load_break'
+        return 'error'
+      }
+      for (const c of DECIDED_KIND_CASES.filter((c) => v25(c.error) !== c.before)) {
+        console.error(`   FAIL: the case ${formatError(c.error).slice(0, 110)} says v2.5 gave ${c.before}; the v2.5 rule gives ${v25(c.error)}`)
+        kindFailures++
+      }
+      const v25Wrong = DECIDED_KIND_CASES.filter((c) => c.before !== c.kind)
+      for (const decision of ['D-20', 'D-21']) {
+        if (!v25Wrong.some((c) => c.decision === decision)) {
+          console.error(`   FAIL: no classification case separates the v2.5 rule from ${decision}`)
           kindFailures++
         }
       }
       failures += kindFailures
       console.log(
-        `   ${kindFailures === 0 ? 'PASS' : 'FAIL'}: ${kindResults.length} error cases + ${RUN_OUTCOME_CASES.length} run cases (the v2.4 rule, which read the first line of the stack, got ${v24Wrong.length} of them wrong; the v2.3 rule ${v23Wrong.length}).`,
-      )
-      console.log(
-        `   Not decided, graded as today: ${Object.entries(UNDECIDED_GRADINGS).map(([rule, kind]) => `${rule} -> ${kind}`).join('; ')}.`,
+        `   ${kindFailures === 0 ? 'PASS' : 'FAIL'}: ${kindResults.length} error cases + ${RUN_OUTCOME_CASES.length} run cases (of the ${DECIDED_KIND_CASES.length} cases of D-20 and D-21 the v2.5 rule got ${v25Wrong.length} wrong; of the other ${ERROR_KIND_CASES.length} the v2.4 rule, which read the first line of the stack, got ${v24Wrong.length} wrong and the v2.3 rule ${v23Wrong.length}).`,
       )
 
       // 4b. The same through real Vitest runs, control and treatment workspaces.
       const workspaces = {}
       try {
         for (const c of await checkClassificationRuns({ toolchains, parentDir: selfTestRoot })) {
-          console.log(`   ${c.ok ? 'PASS' : 'FAIL'} ${c.name} (${c.detail})${c.undecided ? ' [not decided]' : ''}`)
+          console.log(`   ${c.ok ? 'PASS' : 'FAIL'} ${c.name} (${c.detail})`)
           if (!c.ok) {
             failures++
             console.error('     summary:', c.summary)
@@ -3331,7 +3573,7 @@ test('fails on the first run only', () => {
     process.exit(1)
   }
   console.log(
-    `Self-test PASSED: ${passedChecks} check lines passed, 0 failed (isolation, the checkout's dist/ left alone, AST+runtime guards, library use by operation, the guide's list command, failure classification by error type, repeated grading, ${cheatCount} cheats rejected, ${GOOD_WITNESSES.length} legal witnesses passed, deterministic leaf I/O, 10 tasks, every variant typechecked in both arms, ${CALIBRATION_VARIANTS.length} calibration variants, and all single-bug mutants rejected by oracle).`,
+    `Self-test PASSED: ${passedChecks} check lines passed, 0 failed (isolation, the checkout's dist/ left alone, AST+runtime guards, library use by operation, the guide's list command and the agent's permission to run it, the required arm, failure classification by error type, repeated grading, ${cheatCount} cheats rejected, ${GOOD_WITNESSES.length} legal witnesses passed, deterministic leaf I/O, 10 tasks, every variant typechecked in both arms, ${CALIBRATION_VARIANTS.length} calibration variants, and all single-bug mutants rejected by oracle).`,
   )
 }
 
@@ -3636,10 +3878,15 @@ async function runRegrade(regradeDir, { outDir = null, only = null, gradeRepeats
  * Compares the projected credit need of the planned matrix with `--max-total-credits`.
  * `--max-total-credits 0` disables both this check and the per-block cap.
  */
+/** The Treatment arm has a live preflight of its own when its workspace ships a command (D-22). */
+function needsTreatmentPreflight(arms, toolchains) {
+  return arms.some(hasLibrary) && (toolchains ? toolchains.libraryCommands.length > 0 : true)
+}
+
 export function checkBudget(jobs, opts) {
   const projection = projectCredits(jobs, {
     creditsPerTrial: opts.creditsPerTrial,
-    includePreflight: !opts.skipPreflight,
+    preflights: opts.skipPreflight ? 0 : needsTreatmentPreflight(opts.arms ?? [], null) ? 2 : 1,
   })
   const lines = ['=== Projected Credit Need ===']
   for (const [key, cell] of Object.entries(projection.perCell)) {
@@ -3696,7 +3943,15 @@ async function main() {
       for (const spec of models) {
         const [model, reasoning = 'medium'] = spec.split(':')
         const blockArms = [...opts.arms]
-        if (blockArms.length === 2 && rand() < 0.5) blockArms.reverse()
+        if (blockArms.length === 2) {
+          if (rand() < 0.5) blockArms.reverse()
+        } else {
+          // Three arms: a uniform shuffle with the same seeded generator.
+          for (let i = blockArms.length - 1; i > 0; i--) {
+            const j = Math.floor(rand() * (i + 1))
+            ;[blockArms[i], blockArms[j]] = [blockArms[j], blockArms[i]]
+          }
+        }
         blocks.push(blockArms.map((arm) => ({ taskId, arm, model, reasoning, trialIndex: t })))
       }
     }
@@ -3715,6 +3970,9 @@ async function main() {
     console.log(`Models (${models.length}):     ${models.join(', ')}`)
     console.log(`Trials/cell:    ${opts.trials} -> Total trials: ${jobs.length} (${blocks.length} matched blocks)`)
     console.log(`Prompt style:   ${opts.promptStyle} | phaseSplit=${opts.phaseSplit} | concurrency=${opts.concurrency}`)
+    if (opts.concurrency < opts.arms.length) {
+      console.log(`NOTE: concurrency ${opts.concurrency} is below the ${opts.arms.length} arms, so the arms of a block run one after another; --concurrency ${opts.arms.length} starts them together.`)
+    }
     console.log(
       `Budget control: --max-total-credits=${opts.maxTotalCredits} (refused up front when the projection exceeds it; also checked per block) | --cli-credit-cap=${opts.cliCreditCap || 'off (no live cost meter)'}`,
     )
@@ -3857,6 +4115,12 @@ async function main() {
       const pf = await runLivePreflight({ model: preflightModel, toolchains, parentDir: runTmpRoot })
       if (typeof pf.usage?.aiCredits === 'number') cumulativeCredits += pf.usage.aiCredits
       console.log(`Preflight PASSED (srcWritten=${pf.srcWritten}, rootBlocked=${pf.rootBlocked}, credits=${pf.usage?.aiCredits ?? 'n/a'}).`)
+      if (needsTreatmentPreflight(opts.arms, toolchains)) {
+        console.log(`Running the live preflight of the Treatment arm: the guide's command (${preflightModel}:low)...`)
+        const tpf = await runLivePreflight({ model: preflightModel, toolchains, parentDir: runTmpRoot, arm: 'treatment' })
+        if (typeof tpf.usage?.aiCredits === 'number') cumulativeCredits += tpf.usage.aiCredits
+        console.log(`Preflight of the Treatment arm PASSED (\`${tpf.listCommand}\` ran, \`${PREFLIGHT_OTHER_NPX}\` was refused, credits=${tpf.usage?.aiCredits ?? 'n/a'}).`)
+      }
     }
 
     const writeNotStartedBlock = (block, reason) => {

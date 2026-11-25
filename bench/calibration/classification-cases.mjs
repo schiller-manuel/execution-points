@@ -1,12 +1,11 @@
 /**
  * Calibration cases for failure classification (PROTOCOL section 2, D-16 and
- * D-19; harness v2.5): only an assertion failure is a reproduction, and the
- * type of an error is its `name` as Vitest holds it, not the first line of the
- * stack it prints.
+ * D-19 to D-21; harness v2.6): only a failed expectation of the test is a
+ * reproduction, and the type of an error is its `name` as Vitest holds it, not
+ * the first line of the stack it prints.
  *
- * Cases marked `undecided` state TODAY's grading of a question the maintainer
- * has not decided (`UNDECIDED_GRADINGS` in `bench/classify.mjs`). When one is
- * decided, the rule there and the case here change together.
+ * `DECIDED_KIND_CASES` are the cases of the two gradings the maintainer decided
+ * on 2026-11-24 (D-20, D-21). Up to v2.5 each was graded as the `before` kind.
  */
 
 const A = (message, causes = []) => ({ name: 'AssertionError', message, causes })
@@ -53,16 +52,34 @@ export const ERROR_KIND_CASES = [
   [E('Error', 'AssertionError: expected 1 to be 2'), 'error', 'Error: AssertionError: expected 1 to be 2'],
 ]
 
-/** The same, for the two questions that are not decided. */
-export const UNDECIDED_KIND_CASES = [
-  {
-    undecided: 'libraryErrorCausedByAssertion',
-    error: E('InterleavingFailure', '[execution-points] The scenario failed in this order:\n  1. a\nIt failed with: expected 15 to be 14', [A('expected 15 to be 14 // Object.is equality')]),
-    today: 'selector_break',
-  },
-  { undecided: 'expectationThrownAsPlainError', error: E('Error', 'expected number of assertions to be 2, but got 1'), today: 'error' },
-  { undecided: 'expectationThrownAsPlainError', error: E('Error', 'expected any number of assertion, but got none'), today: 'error' },
-  { undecided: 'expectationThrownAsPlainError', error: E('Error', 'Snapshot `inline snapshot mismatch 1` mismatched'), today: 'error' },
+const ORDER_FAILED = '[execution-points] The scenario failed in this order:\n  1. a\nIt failed with: '
+const NOT_REACHED = '[execution-points] The action finished without reaching "src/a.ts#f:CallExpression:g:0", so nothing was paused.'
+
+/**
+ * The two gradings decided on 2026-11-24. `kind` is the grading from v2.6 on,
+ * `before` what v2.5 gave, `decision` the protocol decision.
+ */
+export const DECIDED_KIND_CASES = [
+  // D-20: an error of the library is graded by what caused it, when that is a failed expectation.
+  { decision: 'D-20', error: E('InterleavingFailure', `${ORDER_FAILED}expected 15 to be 14`, [A('expected 15 to be 14 // Object.is equality')]), kind: 'assertion', before: 'selector_break' },
+  { decision: 'D-20', error: E('Error', NOT_REACHED, [A('expected 15 to be 14 // Object.is equality')]), kind: 'assertion', before: 'selector_break' },
+  // The library wrapping an error of its own: the first cause that is not the library's decides.
+  { decision: 'D-20', error: E('InterleavingFailure', `${ORDER_FAILED}${NOT_REACHED}`, [E('Error', NOT_REACHED), A('expected 15 to be 14')]), kind: 'assertion', before: 'selector_break' },
+  // D-21: the three expectations Vitest throws as a plain Error.
+  { decision: 'D-21', error: E('Error', 'expected number of assertions to be 2, but got 1'), kind: 'assertion', before: 'error' },
+  { decision: 'D-21', error: E('Error', 'expected any number of assertion, but got none'), kind: 'assertion', before: 'error' },
+  { decision: 'D-21', error: E('Error', 'Snapshot `inline snapshot mismatch 1` mismatched'), kind: 'assertion', before: 'error' },
+  // Both together: one of the three inside `order.run(...)`.
+  { decision: 'D-20', error: E('InterleavingFailure', `${ORDER_FAILED}expected any number of assertion, but got none`, [E('Error', 'expected any number of assertion, but got none')]), kind: 'assertion', before: 'selector_break' },
+  // What the two decisions leave as it was.
+  // An error of the library whose cause is no expectation of the test.
+  { decision: 'D-20', error: E('InterleavingFailure', `${ORDER_FAILED}helper is not a function`, [E('TypeError', 'helper is not a function')]), kind: 'selector_break', before: 'selector_break' },
+  // The cause is an error of the test's own that wraps an assertion.
+  { decision: 'D-20', error: E('InterleavingFailure', `${ORDER_FAILED}wrapped`, [E('Error', 'wrapped'), A('expected 1 to be 2')]), kind: 'selector_break', before: 'selector_break' },
+  // The words of one of the three, in an error of another type.
+  { decision: 'D-21', error: E('TypeError', 'expected any number of assertion, but got none'), kind: 'error', before: 'error' },
+  // The words of one of the three somewhere inside a message.
+  { decision: 'D-21', error: E('Error', 'save failed: expected number of assertions to be 2, but got 1'), kind: 'error', before: 'error' },
 ]
 
 /** The errors of the failed tests of one run (one list per failed test) -> the run's outcome. */
@@ -227,31 +244,28 @@ test('passes while a rejection is left unhandled', async () => {
 `,
   },
   {
-    name: 'expect.assertions(n) not met -> error',
-    undecided: 'expectationThrownAsPlainError',
+    name: 'expect.assertions(n) not met -> true_red (D-21; a plain Error to Vitest)',
     arm: 'control',
-    want: 'error',
-    wantError: { name: 'Error', kind: 'error', causes: [] },
+    want: 'true_red',
+    wantError: { name: 'Error', kind: 'assertion', causes: [] },
     test: `import { expect, test } from 'vitest'
 test('counts', () => { expect.assertions(2); expect(1).toBe(1) })
 `,
   },
   {
-    name: 'expect.hasAssertions() not met -> error',
-    undecided: 'expectationThrownAsPlainError',
+    name: 'expect.hasAssertions() not met -> true_red (D-21)',
     arm: 'control',
-    want: 'error',
-    wantError: { name: 'Error', kind: 'error', causes: [] },
+    want: 'true_red',
+    wantError: { name: 'Error', kind: 'assertion', causes: [] },
     test: `import { expect, test } from 'vitest'
 test('has', () => { expect.hasAssertions() })
 `,
   },
   {
-    name: 'a snapshot that does not match -> error',
-    undecided: 'expectationThrownAsPlainError',
+    name: 'a snapshot that does not match -> true_red (D-21)',
     arm: 'control',
-    want: 'error',
-    wantError: { name: 'Error', kind: 'error', causes: [] },
+    want: 'true_red',
+    wantError: { name: 'Error', kind: 'assertion', causes: [] },
     test: `import { expect, test } from 'vitest'
 test('snapshot', () => { expect('a').toMatchInlineSnapshot(\`"b"\`) })
 `,
@@ -346,11 +360,10 @@ test('checks while held', async () => {
 `,
   },
   {
-    name: 'library: an assertion fails inside order.run() of interleavings -> loud_break, with the AssertionError recorded as the cause',
-    undecided: 'libraryErrorCausedByAssertion',
+    name: 'library: an assertion fails inside order.run() of interleavings -> true_red, graded by its cause (D-20)',
     arm: 'treatment',
-    want: 'loud_break',
-    wantError: { name: 'InterleavingFailure', kind: 'selector_break', causes: ['AssertionError'] },
+    want: 'true_red',
+    wantError: { name: 'InterleavingFailure', kind: 'assertion', causes: ['AssertionError'] },
     test: `import { expect, test } from 'vitest'
 import { interleavings, select } from 'execution-points-prototype'
 ${STORE}
@@ -382,6 +395,27 @@ test('every order', async () => {
     seedProfile('u1', 'Alice')
     const profile = await order.run(() => getProfile('u1'))
     expect(profile?.name).toBe('Bob')
+  }
+})
+`,
+  },
+  {
+    name: 'library: another error inside order.run() of interleavings -> loud_break, as before (D-20 grades by a failed expectation only)',
+    arm: 'treatment',
+    want: 'loud_break',
+    wantError: { name: 'InterleavingFailure', kind: 'selector_break', causes: ['TypeError'] },
+    test: `import { test } from 'vitest'
+import { interleavings, select } from 'execution-points-prototype'
+${STORE}
+const formatPoint = select('src/profile-store.ts', (n: any) => n.callee === 'formatProfile' && n)
+test('every order', async () => {
+  for (const order of interleavings([formatPoint as any])) {
+    resetStore()
+    seedProfile('u1', 'Alice')
+    await order.run(async () => {
+      const profile: any = await getProfile('u1')
+      profile.name.noSuchMethod()
+    })
   }
 })
 `,

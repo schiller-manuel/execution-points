@@ -1,5 +1,5 @@
 /**
- * Failure classification for agent regression tests (harness v2.5).
+ * Failure classification for agent regression tests (harness v2.6).
  *
  * The rule a reader of `bench/PROTOCOL.md` section 2 relies on: a test run
  * reproduces a bug only when at least one test fails on an assertion. Every
@@ -13,13 +13,19 @@
  * `expect(p).resolves` and `expect.poll`, whose error is an `AssertionError`
  * (D-19). The text inside a message is matched only for errors that have no
  * type of their own to go by: Vitest's timeout, the library's prefix, a module
- * that did not load, and the guard's refusal.
+ * that did not load, the guard's refusal, and the three expectations that
+ * Vitest throws as a plain `Error` (D-21).
  *
  * Kinds of a single error of a failed test:
- * - `assertion`       an `AssertionError` (Vitest/chai `expect`, `node:assert`).
+ * - `assertion`       a failed expectation of the test: an `AssertionError`
+ *                     (Vitest/chai `expect`, `node:assert`); `expect.assertions(n)`,
+ *                     `expect.hasAssertions()` or a snapshot that does not
+ *                     match (D-21); or an error of the library that one of
+ *                     these caused, as when a check fails inside
+ *                     `order.run(...)` of `interleavings` (D-20).
  * - `timeout`         Vitest's test or hook timeout.
- * - `selector_break`  an error raised by `execution-points-prototype`; all of
- *                     its messages start with `[execution-points]`.
+ * - `selector_break`  any other error raised by `execution-points-prototype`;
+ *                     all of its messages start with `[execution-points]`.
  * - `load_break`      the module graph did not load (missing module, syntax or
  *                     transform error, missing export).
  * - `guard`           the harness's runtime guard refused a global patch or a
@@ -36,40 +42,38 @@
 /** Messages of `execution-points-prototype` start with this prefix. */
 export const LIBRARY_MESSAGE_PREFIX = '[execution-points]'
 
-/**
- * Two gradings that are the maintainer's to decide and are not decided
- * (asked on 2026-11-24). Each is ONE rule: the kind named here. To change a
- * decision, change the kind here and the self-test case that states today's
- * grading (`bench/calibration/classification-cases.mjs`, the cases marked
- * `undecided`); nothing else depends on it.
- */
-export const UNDECIDED_GRADINGS = Object.freeze({
-  /**
-   * An error of the library that has an `AssertionError` among its causes. An
-   * assertion that fails inside `order.run(...)` of `interleavings` arrives
-   * this way, as an `InterleavingFailure`. Today it is graded like every other
-   * error of the library: 'selector_break', a loud break. 'assertion' would
-   * grade it as a reproduction.
-   */
-  libraryErrorCausedByAssertion: 'selector_break',
-  /**
-   * A failed expectation that Vitest throws as a plain `Error`:
-   * `expect.assertions(n)`, `expect.hasAssertions()`, and a snapshot that does
-   * not match. Today: 'error', no reproduction. 'assertion' would be one.
-   */
-  expectationThrownAsPlainError: 'error',
-})
-
 const ASSERTION_NAME = /(?:^|\.)\w*AssertionError$/
 const TIMEOUT_NAMES = new Set(['TestTimeoutError', 'HookTimeoutError'])
 const TIMEOUT = /^(?:Test|Hook) timed out in \d+ms/
 const LOAD_BREAK =
   /^(?:Cannot find (?:module|package)\b|Failed to resolve import\b|Failed to load url\b|Transform failed\b|The requested module .* does not provide an export named\b)/
 const GUARD = /^Forbidden (?:global monkey-patch|sleep)\b/
+
+/**
+ * D-21: `expect.assertions(n)`, `expect.hasAssertions()` and a snapshot that
+ * does not match are expectations of the test, and Vitest throws each as a
+ * plain `Error`. They have no type to go by, so they are recognized by the
+ * message Vitest gives them. `--self-test` runs all three through Vitest, so a
+ * Vitest that words them differently fails there.
+ */
 const EXPECTATION_AS_PLAIN_ERROR =
   /^(?:expected number of assertions to be \d+, but got \d+|expected any number of assertion, but got none|Snapshot [\s\S]* mismatched)/
 
-const isAssertion = (error) => typeof error?.name === 'string' && ASSERTION_NAME.test(error.name)
+const messageOf = (error) => String(error?.message ?? '').trim()
+const isLibraryError = (error) => messageOf(error).startsWith(LIBRARY_MESSAGE_PREFIX)
+
+/** A failed expectation of the test: an `AssertionError`, or one of the three of D-21. */
+const isFailedExpectation = (error) =>
+  typeof error?.name === 'string' &&
+  (ASSERTION_NAME.test(error.name) || (error.name === 'Error' && EXPECTATION_AS_PLAIN_ERROR.test(messageOf(error))))
+
+/**
+ * D-20: what an error of the library was caused by. `causes` is the chain
+ * behind the error, nearest first; the library may wrap its own errors, so
+ * this is the first one in the chain that is not the library's. An error of
+ * the test's own that wraps an assertion stays that error.
+ */
+const causeOfLibraryError = (error) => (error?.causes ?? []).find((cause) => !isLibraryError(cause))
 
 /**
  * The kind of one error of a failed test. `error` is what
@@ -77,15 +81,12 @@ const isAssertion = (error) => typeof error?.name === 'string' && ASSERTION_NAME
  */
 export function classifyError(error) {
   const name = typeof error?.name === 'string' ? error.name : ''
-  const message = String(error?.message ?? '').trim()
-  if (isAssertion(error)) return 'assertion'
+  const message = messageOf(error)
+  if (isFailedExpectation(error)) return 'assertion'
   if (TIMEOUT_NAMES.has(name) || TIMEOUT.test(message)) return 'timeout'
-  if (message.startsWith(LIBRARY_MESSAGE_PREFIX)) {
-    return (error.causes ?? []).some(isAssertion) ? UNDECIDED_GRADINGS.libraryErrorCausedByAssertion : 'selector_break'
-  }
+  if (isLibraryError(error)) return isFailedExpectation(causeOfLibraryError(error)) ? 'assertion' : 'selector_break'
   if (GUARD.test(message)) return 'guard'
   if (name === 'SyntaxError' || LOAD_BREAK.test(message)) return 'load_break'
-  if (name === 'Error' && EXPECTATION_AS_PLAIN_ERROR.test(message)) return UNDECIDED_GRADINGS.expectationThrownAsPlainError
   return 'error'
 }
 
@@ -109,7 +110,7 @@ const EMPTY_KINDS = () => ({
  * `{ errors: [{ name, message, causes }] }`, as `bench/failure-reporter.mjs`
  * writes them. A failed test with no error at all counts as `error`.
  *
- * - `true_red`   at least one failed test threw an assertion.
+ * - `true_red`   at least one failed test failed on an expectation (kind `assertion`).
  * - `timeout`    no assertion, at least one timeout.
  * - `loud_break` no assertion or timeout, at least one selector, load or guard error.
  * - `error`      only other errors.

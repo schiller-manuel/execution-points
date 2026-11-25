@@ -375,6 +375,16 @@ function collectWholeGraderHashEntries(graderNm, repoRoot) {
 }
 
 /**
+ * The arms of the experiment (PROTOCOL D-23). `control` has plain Vitest. `treatment` has the
+ * library and a guide that offers it. `required` has the same workspace and guide as
+ * `treatment`, and its agent is told to write the regression tests with the library.
+ */
+export const ARMS = Object.freeze(['control', 'treatment', 'required'])
+
+/** Whether the workspace of an arm has the library. */
+export const hasLibrary = (arm) => arm === 'treatment' || arm === 'required'
+
+/**
  * Builds the library from the sources of `repoRoot` into `outDir`, which must lie outside
  * the checkout, and returns `outDir`. The checkout's own `dist/` is neither read nor
  * written: `tsdown` empties its output directory first, and other processes (a type check,
@@ -503,7 +513,7 @@ export function prepareToolchains(repoRoot, parentDir = realpathSync(tmpdir())) 
       return current
     },
     installForTrial(arm, workspaceDir) {
-      const src = arm === 'treatment' ? treatmentNm : controlNm
+      const src = hasLibrary(arm) ? treatmentNm : controlNm
       const dest = path.join(workspaceDir, 'node_modules')
       cloneDirCoW(src, dest)
     },

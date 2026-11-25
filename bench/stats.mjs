@@ -1,5 +1,5 @@
 /**
- * Statistical helpers for benchmark analysis (harness v2.5; P1.5, P2.3–P2.5, ST-01..ST-07):
+ * Statistical helpers for benchmark analysis (harness v2.6; P1.5, P2.3–P2.5, ST-01..ST-07):
  * - Approximate Wilson 95% confidence intervals for binomial proportions.
  * - Stratified Cochran–Mantel–Haenszel (CMH) test across matched blocks
  *   `(runId x taskId x requested model x reasoning x promptStyle x trialIndex)`.
@@ -95,6 +95,24 @@ export function blockKey(r) {
   return `${run}|${r.taskId}|${model}|${r.reasoning}|${prompt}|t${trial}`
 }
 const stratumKey = blockKey
+
+/**
+ * The rows of a two-arm comparison (D-23). Every paired statistic here compares the arm called
+ * `control` with the arm called `treatment`. To compare two other arms of a run, this gives
+ * the rows of `asControl` and `asTreatment` under those two names and keeps the arm they ran
+ * in as `armAsRun`. Rows of every other arm are returned apart, in `leftOut`.
+ */
+export function selectComparison(rows, asControl = 'control', asTreatment = 'treatment') {
+  if (asControl === asTreatment) throw new Error(`A comparison needs two different arms, got ${asControl} twice`)
+  const selected = []
+  const leftOut = []
+  for (const r of rows) {
+    if (r.arm === asControl) selected.push({ ...r, arm: 'control', armAsRun: r.arm })
+    else if (r.arm === asTreatment) selected.push({ ...r, arm: 'treatment', armAsRun: r.arm })
+    else leftOut.push(r)
+  }
+  return { rows: selected, leftOut }
+}
 
 /**
  * Every row that no paired statistic can use: its block has no row of the
